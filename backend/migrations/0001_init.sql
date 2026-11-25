@@ -4,7 +4,7 @@
 -- features that use them.
 
 -- +goose Up
-CREATE EXTENSION IF NOT EXISTS pgcrypto;   -- gen_random_uuid()
+-- gen_random_uuid() is built in since PostgreSQL 13, so pgcrypto is not needed.
 CREATE EXTENSION IF NOT EXISTS citext;
 
 -- ---------- enums ----------

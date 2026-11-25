@@ -40,6 +40,17 @@ func BaseURL() string {
 // The database is dropped when the test finishes.
 func NewDatabase(t testing.TB) *pgxpool.Pool {
 	t.Helper()
+	pool := NewEmptyDatabase(t)
+	m := db.NewMigrator(pool, migrations.FS, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := m.Up(context.Background()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	return pool
+}
+
+// NewEmptyDatabase creates an isolated, unmigrated database and returns an owner pool.
+func NewEmptyDatabase(t testing.TB) *pgxpool.Pool {
+	t.Helper()
 	Skip(t)
 	ctx := context.Background()
 
@@ -69,10 +80,5 @@ func NewDatabase(t testing.TB) *pgxpool.Pool {
 		pool.Close()
 		_, _ = admin.Exec(context.Background(), "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
 	})
-
-	m := db.NewMigrator(pool, migrations.FS, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err := m.Up(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
 	return pool
 }

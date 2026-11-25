@@ -63,13 +63,15 @@ CREATE TRIGGER audit_events_no_truncate BEFORE TRUNCATE ON audit_events
 -- +goose StatementBegin
 DO $$
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'iacp_app') THEN
-        BEGIN
-            CREATE ROLE iacp_app NOLOGIN;
-        EXCEPTION WHEN insufficient_privilege THEN
+    -- Roles are cluster-wide: two databases migrating at once can both try to create it.
+    BEGIN
+        CREATE ROLE iacp_app NOLOGIN;
+    EXCEPTION
+        WHEN duplicate_object OR unique_violation THEN
+            NULL;  -- created by another database or a concurrent migration
+        WHEN insufficient_privilege THEN
             RAISE NOTICE 'skipping iacp_app role creation: insufficient privilege';
-        END;
-    END IF;
+    END;
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'iacp_app') THEN
         REVOKE ALL ON audit_events FROM iacp_app;
         GRANT INSERT, SELECT ON audit_events TO iacp_app;
