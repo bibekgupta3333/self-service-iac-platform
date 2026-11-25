@@ -26,7 +26,7 @@ func (h *AuditHandler) Routes(r chi.Router) {
 	r.Get("/audit/verify", h.verify)
 }
 
-// verify handles GET /v1/audit/verify?from_seq=&to_seq= (to_seq omitted = chain head).
+// verify handles GET /v1/audit/verify?from_seq=&to_seq= (at most audit.MaxVerifyRange events per call).
 func (h *AuditHandler) verify(w http.ResponseWriter, r *http.Request) {
 	parse := func(name string, def int64) (int64, bool) {
 		v := r.URL.Query().Get(name)
@@ -38,8 +38,13 @@ func (h *AuditHandler) verify(w http.ResponseWriter, r *http.Request) {
 	}
 	from, ok1 := parse("from_seq", 1)
 	to, ok2 := parse("to_seq", 0)
-	if !ok1 || !ok2 || (to > 0 && to < from) {
-		writeError(w, r, badRequest("from_seq and to_seq must be non-negative integers with from_seq <= to_seq"))
+	if !ok1 || !ok2 {
+		writeError(w, r, badRequest("from_seq and to_seq must be non-negative integers"))
+		return
+	}
+	from, to, err := audit.VerifyWindow(from, to)
+	if err != nil {
+		writeError(w, r, err)
 		return
 	}
 	res, err := h.v.Verify(r.Context(), from, to)

@@ -22,14 +22,14 @@ func TestAuditVerify(t *testing.T) {
 	h := newTestRouter(&fakeCatalog{versions: []catalog.ModuleVersion{sqsVersion()}}, okPinger{}, NewAuditHandler(v))
 
 	rec := do(t, h, "GET", "/v1/audit/verify", "")
-	if rec.Code != 200 || v.from != 1 || v.to != 0 ||
+	if rec.Code != 200 || v.from != 1 || v.to != audit.MaxVerifyRange ||
 		!strings.Contains(rec.Body.String(), `"valid":false`) || !strings.Contains(rec.Body.String(), `"first_bad_seq":7`) {
 		t.Fatalf("got %d %s (from=%d to=%d)", rec.Code, rec.Body, v.from, v.to)
 	}
 	if rec := do(t, h, "GET", "/v1/audit/verify?from_seq=5&to_seq=9", ""); rec.Code != 200 || v.from != 5 || v.to != 9 {
 		t.Fatalf("range not passed: %d from=%d to=%d", rec.Code, v.from, v.to)
 	}
-	for _, q := range []string{"from_seq=x", "to_seq=-1", "from_seq=9&to_seq=5"} {
+	for _, q := range []string{"from_seq=x", "to_seq=-1", "from_seq=9&to_seq=5", "from_seq=1&to_seq=10001"} {
 		if rec := do(t, h, "GET", "/v1/audit/verify?"+q, ""); rec.Code != 400 {
 			t.Errorf("?%s = %d, want 400", q, rec.Code)
 		}

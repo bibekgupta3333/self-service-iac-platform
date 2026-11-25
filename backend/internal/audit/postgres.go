@@ -92,8 +92,26 @@ type Verifier struct{ q db.DBTX }
 // NewVerifier returns a Verifier reading through q.
 func NewVerifier(q db.DBTX) *Verifier { return &Verifier{q: q} }
 
-// Verify checks events with fromSeq <= seq <= toSeq (toSeq <= 0 means "to the head").
+// Verify checks events with fromSeq <= seq <= toSeq. toSeq <= 0 means "the next
+// MaxVerifyRange events"; larger explicit ranges are rejected (see VerifyWindow).
+// The result reports the window checked and whether events exist beyond it.
 func (v *Verifier) Verify(ctx context.Context, fromSeq, toSeq int64) (VerifyResult, error) {
+	fromSeq, toSeq, err := VerifyWindow(fromSeq, toSeq)
+	if err != nil {
+		return VerifyResult{}, err
+	}
+	res, err := v.verifyRange(ctx, fromSeq, toSeq)
+	if err != nil {
+		return VerifyResult{}, err
+	}
+	res.FromSeq, res.ToSeq = fromSeq, toSeq
+	if err := v.q.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM audit_events WHERE seq > $1)", toSeq).Scan(&res.HasMore); err != nil {
+		return VerifyResult{}, fmt.Errorf("check audit tail: %w", err)
+	}
+	return res, nil
+}
+
+func (v *Verifier) verifyRange(ctx context.Context, fromSeq, toSeq int64) (VerifyResult, error) {
 	anchor := GenesisHash
 	var prev []byte
 	err := v.q.QueryRow(ctx, "SELECT hash FROM audit_events WHERE seq < $1 ORDER BY seq DESC LIMIT 1", fromSeq).Scan(&prev)
@@ -108,7 +126,7 @@ func (v *Verifier) Verify(ctx context.Context, fromSeq, toSeq int64) (VerifyResu
 		SELECT seq, id, occurred_at, actor_type, actor_id, coalesce(host(actor_ip), ''), action, subject_type,
 		       subject_id, team_id, coalesce(correlation_id, ''), payload, prev_hash, hash
 		FROM audit_events
-		WHERE seq >= $1 AND ($2 <= 0 OR seq <= $2)
+		WHERE seq BETWEEN $1 AND $2
 		ORDER BY seq`, fromSeq, toSeq)
 	if err != nil {
 		return VerifyResult{}, fmt.Errorf("query audit events: %w", err)

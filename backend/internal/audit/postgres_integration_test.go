@@ -57,8 +57,11 @@ func TestWriterAndVerifierAgainstPostgres(t *testing.T) {
 		t.Fatalf("verify full chain = %+v, %v", res, err)
 	}
 	res, err = v.Verify(ctx, 3, 4)
-	if err != nil || !res.Valid || res.Checked != 2 {
+	if err != nil || !res.Valid || res.Checked != 2 || !res.HasMore || res.FromSeq != 3 || res.ToSeq != 4 {
 		t.Fatalf("verify range = %+v, %v", res, err)
+	}
+	if _, err := v.Verify(ctx, 1, audit.MaxVerifyRange+1); err == nil {
+		t.Fatal("ranges wider than MaxVerifyRange must be rejected")
 	}
 
 	t.Run("append-only", func(t *testing.T) {

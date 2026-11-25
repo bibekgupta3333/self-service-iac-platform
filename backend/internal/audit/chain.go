@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
 )
 
 // Actor types allowed by the audit_events.actor_type CHECK constraint.
@@ -137,6 +139,29 @@ type VerifyResult struct {
 	Valid       bool   `json:"valid"`
 	Checked     int    `json:"checked"`
 	FirstBadSeq *int64 `json:"first_bad_seq"`
+	FromSeq     int64  `json:"from_seq"`
+	ToSeq       int64  `json:"to_seq"`
+	HasMore     bool   `json:"has_more"` // events exist after ToSeq; continue from ToSeq+1
+}
+
+// MaxVerifyRange bounds how many seq values one verification may cover.
+const MaxVerifyRange = 10_000
+
+// VerifyWindow normalises a requested range. Pure.
+// from < 1 becomes 1; to <= 0 becomes from+MaxVerifyRange-1; a range wider than
+// MaxVerifyRange or with to < from is rejected.
+func VerifyWindow(from, to int64) (int64, int64, error) {
+	if from < 1 {
+		from = 1
+	}
+	if to <= 0 {
+		return from, from + MaxVerifyRange - 1, nil
+	}
+	if to < from || to-from+1 > MaxVerifyRange {
+		return 0, 0, &apperr.Error{Kind: apperr.KindInvalid, Code: "bad_request",
+			Message: fmt.Sprintf("seq range must satisfy from_seq <= to_seq and cover at most %d events", MaxVerifyRange)}
+	}
+	return from, to, nil
 }
 
 // VerifyChain checks that records (in seq order) form a valid chain starting at anchor,

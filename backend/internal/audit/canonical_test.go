@@ -76,6 +76,27 @@ func TestActorIPIsHashed(t *testing.T) {
 	}
 }
 
+func TestVerifyWindow(t *testing.T) {
+	tests := []struct {
+		from, to         int64
+		wantFrom, wantTo int64
+		wantErr          bool
+	}{
+		{from: 0, to: 0, wantFrom: 1, wantTo: MaxVerifyRange},
+		{from: 5, to: 0, wantFrom: 5, wantTo: 5 + MaxVerifyRange - 1},
+		{from: 5, to: 9, wantFrom: 5, wantTo: 9},
+		{from: 1, to: MaxVerifyRange, wantFrom: 1, wantTo: MaxVerifyRange},
+		{from: 1, to: MaxVerifyRange + 1, wantErr: true},
+		{from: 9, to: 5, wantErr: true},
+	}
+	for _, tt := range tests {
+		f, to, err := VerifyWindow(tt.from, tt.to)
+		if (err != nil) != tt.wantErr || (!tt.wantErr && (f != tt.wantFrom || to != tt.wantTo)) {
+			t.Errorf("VerifyWindow(%d, %d) = %d, %d, %v", tt.from, tt.to, f, to, err)
+		}
+	}
+}
+
 func TestCanonicalPayload(t *testing.T) {
 	got, err := CanonicalPayload(json.RawMessage(`{"b":[1.50,{"z":1e1,"a":null}],"a":"<x>"}`))
 	if err != nil {
