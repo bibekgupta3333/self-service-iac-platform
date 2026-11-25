@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
+	"github.com/pressly/goose/v3/lock"
 )
 
 // DBTX is the query surface shared by *pgxpool.Pool and pgx.Tx, so repositories
@@ -54,9 +55,18 @@ func NewMigrator(pool *pgxpool.Pool, fsys fs.FS, logger *slog.Logger) *Migrator 
 	return &Migrator{pool: pool, fsys: fsys, logger: logger}
 }
 
+// MigrationLockID is the PostgreSQL advisory lock that serialises migrations, so API
+// replicas starting together apply each migration exactly once.
+const MigrationLockID int64 = 4_172_655_401
+
 func (m *Migrator) provider() (*goose.Provider, func() error, error) {
+	// Poll every second for up to two minutes while another replica migrates.
+	locker, err := lock.NewPostgresSessionLocker(lock.WithLockID(MigrationLockID), lock.WithLockTimeout(1, 120))
+	if err != nil {
+		return nil, nil, fmt.Errorf("migration locker: %w", err)
+	}
 	sqlDB := stdlib.OpenDBFromPool(m.pool)
-	p, err := goose.NewProvider(goose.DialectPostgres, sqlDB, m.fsys)
+	p, err := goose.NewProvider(goose.DialectPostgres, sqlDB, m.fsys, goose.WithSessionLocker(locker))
 	if err != nil {
 		_ = sqlDB.Close()
 		return nil, nil, fmt.Errorf("goose provider: %w", err)
