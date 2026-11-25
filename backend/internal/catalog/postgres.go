@@ -128,6 +128,28 @@ func getVersion(ctx context.Context, q db.DBTX, module string, sv SemVer) (Modul
 	return v, nil
 }
 
+// lockModule reads a module row FOR UPDATE so concurrent indexes see a stable "before".
+func lockModule(ctx context.Context, tx pgx.Tx, name string) (Module, bool, error) {
+	m, err := scanModule(tx.QueryRow(ctx, `SELECT `+moduleCols+` FROM modules WHERE name = $1 FOR UPDATE`, name))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Module{}, false, nil
+	}
+	if err != nil {
+		return Module{}, false, fmt.Errorf("lock module: %w", err)
+	}
+	return m, true, nil
+}
+
+// moduleUpdatedEvent derives a module.updated event from the index event's actor.
+func moduleUpdatedEvent(indexed audit.Event, name string, changes map[string]FieldChange) audit.Event {
+	payload, _ := json.Marshal(map[string]any{"changes": changes}) // plain strings and slices: cannot fail
+	return audit.Event{
+		ActorType: indexed.ActorType, ActorID: indexed.ActorID, ActorIP: indexed.ActorIP,
+		CorrelationID: indexed.CorrelationID, Action: "module.updated",
+		SubjectType: "module", SubjectID: name, Payload: payload,
+	}
+}
+
 // Index implements Repository.
 func (r *PostgresRepository) Index(ctx context.Context, m Module, v ModuleVersion, ev audit.Event) (ModuleVersion, bool, error) {
 	var (
@@ -135,8 +157,12 @@ func (r *PostgresRepository) Index(ctx context.Context, m Module, v ModuleVersio
 		created bool
 	)
 	err := r.tx.InTx(ctx, func(tx pgx.Tx) error {
+		before, existed, err := lockModule(ctx, tx, m.Name)
+		if err != nil {
+			return err
+		}
 		var moduleID uuid.UUID
-		err := tx.QueryRow(ctx, `
+		err = tx.QueryRow(ctx, `
 			INSERT INTO modules (name, display_name, description, category, owners, repo_path)
 			VALUES ($1, $2, $3, $4, $5, $6)
 			ON CONFLICT (name) DO UPDATE SET
@@ -172,15 +198,23 @@ func (r *PostgresRepository) Index(ctx context.Context, m Module, v ModuleVersio
 		if stored, err = getVersion(ctx, tx, m.Name, v.Version); err != nil {
 			return err
 		}
-		if !created {
-			if !strings.EqualFold(stored.GitSHA, v.GitSHA) {
-				return apperr.Conflict("version_immutable",
-					fmt.Sprintf("%s is already indexed at commit %s", v.GitTag, stored.GitSHA))
-			}
-			return nil
+		if !created && !strings.EqualFold(stored.GitSHA, v.GitSHA) {
+			return apperr.Conflict("version_immutable",
+				fmt.Sprintf("%s is already indexed at commit %s", v.GitTag, stored.GitSHA))
 		}
-		if _, err := r.audit.Append(ctx, tx, ev); err != nil {
-			return fmt.Errorf("audit: %w", err)
+		if created {
+			if _, err := r.audit.Append(ctx, tx, ev); err != nil {
+				return fmt.Errorf("audit: %w", err)
+			}
+		}
+		// Metadata such as owners decides who may change a module, so changes are audited
+		// even when the version itself was already indexed.
+		if existed {
+			if changes := ModuleChanges(before, m); len(changes) > 0 {
+				if _, err := r.audit.Append(ctx, tx, moduleUpdatedEvent(ev, m.Name, changes)); err != nil {
+					return fmt.Errorf("audit: %w", err)
+				}
+			}
 		}
 		return nil
 	})

@@ -71,4 +71,34 @@ func TestPostgresRepository(t *testing.T) {
 			t.Fatalf("audit = %+v, %v", res, err)
 		}
 	})
+	t.Run("re-index that changes owners is audited", func(t *testing.T) {
+		cmd := validIndexCommand()
+		cmd.Owners = []string{"platform", "payments"}
+		if _, created, err := svc.Index(ctx, bot, cmd); err != nil || created {
+			t.Fatalf("created=%v err=%v", created, err)
+		}
+		var action, payload string
+		err := pool.QueryRow(ctx, `SELECT action, payload::text FROM audit_events ORDER BY seq DESC LIMIT 1`).Scan(&action, &payload)
+		if err != nil || action != "module.updated" || !strings.Contains(payload, `"payments"`) {
+			t.Fatalf("last audit event = %s %s (%v)", action, payload, err)
+		}
+		m, err := svc.GetModule(ctx, "sqs")
+		if err != nil || len(m.Module.Owners) != 2 {
+			t.Fatalf("owners not updated: %+v %v", m.Module, err)
+		}
+		// Re-index with identical metadata: no new event.
+		var before int64
+		_ = pool.QueryRow(ctx, `SELECT count(*) FROM audit_events`).Scan(&before)
+		if _, _, err := svc.Index(ctx, bot, cmd); err != nil {
+			t.Fatal(err)
+		}
+		var after int64
+		_ = pool.QueryRow(ctx, `SELECT count(*) FROM audit_events`).Scan(&after)
+		if after != before {
+			t.Fatalf("idempotent re-index wrote %d audit events", after-before)
+		}
+		if res, err := audit.NewVerifier(pool).Verify(ctx, 1, 0); err != nil || !res.Valid {
+			t.Fatalf("chain after module.updated = %+v, %v", res, err)
+		}
+	})
 }

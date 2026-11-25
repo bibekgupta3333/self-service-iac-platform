@@ -175,6 +175,27 @@ func LatestByModule(versions []ModuleVersion) map[uuid.UUID]ModuleVersion {
 	return latest
 }
 
+// FieldChange is the before and after value of one changed module field.
+type FieldChange struct {
+	From any `json:"from"`
+	To   any `json:"to"`
+}
+
+// ModuleChanges lists the descriptive fields that differ between before and after. Pure.
+func ModuleChanges(before, after Module) map[string]FieldChange {
+	out := map[string]FieldChange{}
+	diff := func(field string, a, b any, equal bool) {
+		if !equal {
+			out[field] = FieldChange{From: a, To: b}
+		}
+	}
+	diff("display_name", before.DisplayName, after.DisplayName, before.DisplayName == after.DisplayName)
+	diff("description", before.Description, after.Description, before.Description == after.Description)
+	diff("category", before.Category, after.Category, before.Category == after.Category)
+	diff("owners", before.Owners, after.Owners, slices.Equal(before.Owners, after.Owners))
+	return out
+}
+
 // GitTag returns the immutable tag for module name at version v.
 func GitTag(name string, v SemVer) string { return fmt.Sprintf("modules/%s/v%s", name, v) }
 

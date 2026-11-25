@@ -89,6 +89,23 @@ func TestSortVersionsDescDoesNotMutate(t *testing.T) {
 	}
 }
 
+func TestModuleChanges(t *testing.T) {
+	before := Module{DisplayName: "SQS", Description: "q", Category: "messaging", Owners: []string{"platform"}}
+	if got := ModuleChanges(before, before); len(got) != 0 {
+		t.Fatalf("no-op re-index reported changes: %v", got)
+	}
+	after := before
+	after.Owners = []string{"platform", "payments"}
+	after.Description = "queue"
+	got := ModuleChanges(before, after)
+	if len(got) != 2 || got["description"].To != "queue" {
+		t.Fatalf("changes = %+v", got)
+	}
+	if o, ok := got["owners"]; !ok || !slices.Equal(o.To.([]string), after.Owners) {
+		t.Fatalf("owner change missing: %+v", got)
+	}
+}
+
 func TestSourceAddress(t *testing.T) {
 	got := SourceAddress("https://github.com/acme/iacp.git", "sqs", SemVer{1, 3, 0, ""})
 	want := "git::https://github.com/acme/iacp.git//modules/sqs?ref=modules/sqs/v1.3.0"
