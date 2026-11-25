@@ -12,10 +12,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/audit"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/catalog"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/config"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/db"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/httpapi"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/observability"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/requests"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/migrations"
 )
 
 func main() {
@@ -36,14 +42,54 @@ func run() error {
 	logger := observability.NewLogger(os.Stdout, cfg.LogLevel)
 	slog.SetDefault(logger)
 
-	r := chi.NewRouter()
-	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	pool, err := db.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	if cfg.AutoMigrate {
+		if err := db.NewMigrator(pool, migrations.FS, logger).Up(ctx); err != nil {
+			return err
+		}
+	}
+
+	auth, err := newAuthenticator(ctx, cfg, identity.NewUserStore(pool))
+	if err != nil {
+		return err
+	}
+
+	clock, ids := platform.SystemClock{}, platform.RandomIDs{}
+	auditWriter := audit.NewWriter(clock, ids)
+	catalogSvc := catalog.NewService(catalog.NewPostgresRepository(pool, auditWriter), clock, cfg.ModuleRepoURL)
+	requestSvc := requests.NewService(requests.NewPostgresRepository(pool, auditWriter), catalogSvc, clock, ids)
+
+	handler := httpapi.NewRouter(httpapi.Deps{
+		Logger:  logger,
+		Auth:    auth,
+		Ready:   pool,
+		Catalog: httpapi.NewCatalogHandler(catalogSvc),
+		Public: []httpapi.RouteRegistrar{
+			httpapi.NewRequestHandler(requestSvc),
+			httpapi.NewAuditHandler(audit.NewVerifier(pool)),
+		},
 	})
 
-	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: r, ReadHeaderTimeout: 5 * time.Second}
+	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	return serve(ctx, srv, cfg.ShutdownTimeout)
+}
+
+func newAuthenticator(ctx context.Context, cfg config.Config, users *identity.UserStore) (httpapi.Authenticator, error) {
+	switch cfg.AuthMode {
+	case config.AuthModeDev:
+		p, err := users.EnsureDevUser(ctx, cfg.DevUserLogin)
+		if err != nil {
+			return nil, err
+		}
+		slog.Warn("dev authentication enabled: every caller acts as the local user", "login", p.Login)
+		return httpapi.DevAuthenticator{Principal: p}, nil
+	}
+	return nil, fmt.Errorf("unsupported auth mode %q", cfg.AuthMode)
 }
 
 // serve runs srv until ctx is cancelled, then drains in-flight requests.
