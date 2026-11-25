@@ -1,0 +1,203 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://iacp.dev/schemas/module.schema.json",
+  "title": "iacp module manifest (module.yaml)",
+  "description": "Contract for modules/<name>/module.yaml. See docs/04-module-registry.md section 4.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "compatibility", "inputs", "outputs"],
+  "properties": {
+    "apiVersion": { "const": "iacp.dev/v1" },
+    "kind": { "const": "Module" },
+    "metadata": { "$ref": "#/$defs/metadata" },
+    "compatibility": { "$ref": "#/$defs/compatibility" },
+    "inputs": { "$ref": "#/$defs/inputs" },
+    "outputs": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/output" }
+    },
+    "dependencies": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/dependency" }
+    },
+    "cost": { "$ref": "#/$defs/cost" },
+    "upgrade": { "$ref": "#/$defs/upgrade" },
+    "deprecation": { "$ref": "#/$defs/deprecation" }
+  },
+  "$defs": {
+    "semver": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$"
+    },
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "environment": {
+      "enum": ["development", "staging", "production"]
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "displayName", "description", "category", "owners", "maturity"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{1,40}$",
+          "description": "Must equal the module directory name."
+        },
+        "version": { "$ref": "#/$defs/semver" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "category": {
+          "enum": ["storage", "messaging", "compute", "database", "cache", "network", "observability"]
+        },
+        "owners": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^@[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$" }
+        },
+        "maturity": { "enum": ["alpha", "beta", "stable"] },
+        "documentation": { "type": "string", "format": "uri", "pattern": "^https://" }
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["terraform", "providers", "environments"],
+      "properties": {
+        "terraform": { "type": "string", "minLength": 1 },
+        "providers": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "pattern": "^[a-z0-9-]+/[a-z0-9-]+$" },
+          "additionalProperties": { "type": "string", "minLength": 1 }
+        },
+        "environments": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/environment" }
+        }
+      }
+    },
+    "inputs": {
+      "type": "object",
+      "required": ["type", "properties"],
+      "properties": {
+        "$schema": { "const": "https://json-schema.org/draft/2020-12/schema" },
+        "type": { "const": "object" },
+        "required": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/identifier" }
+        },
+        "additionalProperties": { "const": false },
+        "properties": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "$ref": "#/$defs/identifier" },
+          "additionalProperties": { "$ref": "#/$defs/inputProperty" }
+        }
+      }
+    },
+    "inputProperty": {
+      "type": "object",
+      "required": ["type"],
+      "propertyNames": {
+        "anyOf": [
+          { "not": { "pattern": "^x-" } },
+          { "enum": ["x-iacp-ui", "x-iacp-group", "x-iacp-production-only", "x-iacp-immutable"] }
+        ]
+      },
+      "properties": {
+        "type": {
+          "oneOf": [
+            { "$ref": "#/$defs/jsonType" },
+            {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "$ref": "#/$defs/jsonType" }
+            }
+          ]
+        },
+        "description": { "type": "string" },
+        "x-iacp-ui": { "enum": ["text", "number", "toggle", "danger-toggle", "select", "textarea", "key-value", "list", "stack-output"] },
+        "x-iacp-group": { "type": "string", "minLength": 1 },
+        "x-iacp-production-only": { "type": "boolean" },
+        "x-iacp-immutable": { "type": "boolean" }
+      }
+    },
+    "jsonType": {
+      "enum": ["string", "number", "integer", "boolean", "object", "array", "null"]
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "description"],
+      "properties": {
+        "name": { "$ref": "#/$defs/identifier" },
+        "description": { "type": "string", "minLength": 1 },
+        "sensitive": { "type": "boolean", "default": false },
+        "wireable": { "type": "boolean", "default": false }
+      }
+    },
+    "dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input", "accepts"],
+      "properties": {
+        "input": { "$ref": "#/$defs/identifier" },
+        "description": { "type": "string" },
+        "accepts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["module", "output"],
+            "properties": {
+              "module": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,40}$" },
+              "output": { "$ref": "#/$defs/identifier" }
+            }
+          }
+        }
+      }
+    },
+    "cost": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "baseline_monthly_usd": { "type": "number", "minimum": 0 },
+        "drivers": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/identifier" }
+        }
+      }
+    },
+    "upgrade": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "from": { "type": "string", "minLength": 1 },
+        "requires_migration": { "type": "boolean" },
+        "notes": { "type": "string" }
+      }
+    },
+    "deprecation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deprecated"],
+      "properties": {
+        "deprecated": { "type": "boolean" },
+        "message": { "type": "string" },
+        "replacement": { "type": "string" },
+        "sunset_date": { "type": "string", "format": "date" }
+      }
+    }
+  }
+}
