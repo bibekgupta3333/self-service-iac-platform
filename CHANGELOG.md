@@ -6,8 +6,17 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 
 ## [Unreleased]
 
+### Added
+- ADR-0009: local-first development with LocalStack and the Terraform local backend until MVP exit.
+- Monorepo layout: `modules/`, `policies/`, `environments/`, `tests/`, `backend/`, `portal/`, `tools/`, `.github/`.
+- `docker-compose.yml` with LocalStack 4.4 and PostgreSQL 17, both with health checks, plus `.env.example`.
+- `Makefile` targets for the local stack, Terraform checks, OPA tests, module tests and Go/Python tests; `.editorconfig`; `.terraform-version` (1.13.5).
+
+### Changed
+- `AGENTS.md`: local-first rules, the 70/30 object-oriented and functional coding style, and the small-commit, reviewed-PR workflow.
+
 ### Planned
-- M0 Foundations: monorepo skeleton, docker compose (Postgres, LocalStack), bootstrap Terraform for the state bucket, KMS and OIDC roles.
+- M0 Foundations (remaining): smoke stack against LocalStack. The real-AWS state bucket and OIDC roles are deferred by ADR-0009.
 - M1 Module registry: `modules/s3`, `modules/sqs`, `modules/lambda`, `module.yaml` schema, `module-release.yml`.
 - M2 Orchestration engine: Go API, config generator, GitHub App PRs, webhooks, `pr-validate.yml`, `apply.yml`.
 - M3 Security gates: TFLint, Checkov, OPA policies, budget context, environment protection.

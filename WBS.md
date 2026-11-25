@@ -40,14 +40,16 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 ## 2. Foundations — M0
 | ID | Task | Est | Dep |
 |----|------|-----|-----|
-| [ ] 2.1 | Monorepo skeleton (`modules/ policies/ environments/ tests/ backend/ portal/ .github/`) | 0.5 | 1 |
-| [ ] 2.2 | `docker-compose.yml`: Postgres, LocalStack, backend, portal; Makefile targets | 1 | 2.1 |
-| [ ] 2.3 | Bootstrap Terraform: state bucket (SSE-KMS, versioning, TLS-only), CMK | 1 | 2.1 |
-| [ ] 2.4 | GitHub OIDC provider + `iacp-plan` / `iacp-apply` roles + `iacp-boundary` (dev, staging) | 1 | 2.3 |
+| [x] 2.1 | Monorepo skeleton (`modules/ policies/ environments/ tests/ backend/ portal/ .github/`) | 0.5 | 1 |
+| [x] 2.2 | `docker-compose.yml`: Postgres, LocalStack; Makefile targets | 1 | 2.1 |
+| [ ] 2.3 | *(Deferred by ADR-0009)* Bootstrap Terraform: state bucket (SSE-KMS, versioning, TLS-only), CMK | 1 | 2.1 |
+| [ ] 2.4 | *(Deferred by ADR-0009)* GitHub OIDC provider + `iacp-plan` / `iacp-apply` roles + `iacp-boundary` (dev, staging) | 1 | 2.3 |
 | [ ] 2.5 | GitHub setup: repo rulesets, GitHub App registration, Environments, `iacp-approver` user | 1 | 2.1 |
-| [ ] 2.6 | Smoke stack `environments/development/platform/smoke/` plans via OIDC | 0.5 | 2.4 |
+| [ ] 2.6 | Smoke stack `environments/development/platform/smoke/` plans against LocalStack (OIDC once ADR-0009 ends) | 0.5 | 2.4 |
 
-**Exit:** `docker compose up` is healthy, and the smoke stack plans in Actions with no static credentials.
+| [x] 2.7 | ADR-0009: local-first development (LocalStack + Terraform local backend) | 0.5 | 1 |
+
+**Exit:** `docker compose up` is healthy, and the smoke stack plans in CI against LocalStack with no real credentials.
 
 ## 3. Module registry — M1
 | ID | Task | Est | Dep |
