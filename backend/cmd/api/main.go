@@ -13,6 +13,9 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/config"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/observability"
 )
 
 func main() {
@@ -26,14 +29,21 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	cfg, err := config.Load(os.LookupEnv)
+	if err != nil {
+		return err
+	}
+	logger := observability.NewLogger(os.Stdout, cfg.LogLevel)
+	slog.SetDefault(logger)
+
 	r := chi.NewRouter()
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 
-	srv := &http.Server{Addr: ":8080", Handler: r, ReadHeaderTimeout: 5 * time.Second}
-	return serve(ctx, srv, 15*time.Second)
+	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: r, ReadHeaderTimeout: 5 * time.Second}
+	return serve(ctx, srv, cfg.ShutdownTimeout)
 }
 
 // serve runs srv until ctx is cancelled, then drains in-flight requests.
