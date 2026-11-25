@@ -36,7 +36,8 @@ type Deps struct {
 // NewRouter builds the HTTP handler tree.
 func NewRouter(d Deps) http.Handler {
 	r := chi.NewRouter()
-	r.Use(requestContext(d.Logger), recoverer, accessLog)
+	// accessLog wraps recoverer so requests that panic are still logged with their 500.
+	r.Use(requestContext(d.Logger), accessLog, recoverer)
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
