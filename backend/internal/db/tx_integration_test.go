@@ -12,7 +12,7 @@ import (
 )
 
 func TestInTxRollsBackOnPanic(t *testing.T) {
-	pool := dbtest.NewDatabase(t)
+	_, pool := dbtest.NewDatabaseWithOwner(t)
 	ctx := context.Background()
 	txr := db.NewTxRunner(pool)
 	if _, err := pool.Exec(ctx, "CREATE TABLE panic_probe (n int)"); err != nil {
@@ -45,7 +45,7 @@ func TestInTxRollsBackOnPanic(t *testing.T) {
 }
 
 func TestInTxCommitAndRollback(t *testing.T) {
-	pool := dbtest.NewDatabase(t)
+	_, pool := dbtest.NewDatabaseWithOwner(t)
 	ctx := context.Background()
 	txr := db.NewTxRunner(pool)
 	if _, err := pool.Exec(ctx, "CREATE TABLE tx_probe (n int)"); err != nil {

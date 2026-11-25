@@ -42,16 +42,21 @@ func run() error {
 	logger := observability.NewLogger(os.Stdout, cfg.LogLevel)
 	slog.SetDefault(logger)
 
-	pool, err := db.Open(ctx, cfg.DatabaseURL)
-	if err != nil {
-		return err
-	}
-	defer pool.Close()
-
 	if cfg.AutoMigrate {
-		if err := db.NewMigrator(pool, migrations.FS, logger).Up(ctx); err != nil {
+		if err := migrate(ctx, cfg, logger); err != nil {
 			return err
 		}
+	}
+
+	pool, err := db.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return fmt.Errorf("runtime database (as %s): %w", db.AppRole, err)
+	}
+	defer pool.Close()
+	if privileged, err := db.Privileged(ctx, pool); err != nil {
+		return err
+	} else if privileged {
+		slog.Warn("IACP_DATABASE_URL connects as a superuser or schema owner: audit_events append-only grants are not enforced; use the iacp_app role")
 	}
 
 	auth, err := newAuthenticator(ctx, cfg, identity.NewUserStore(pool))
@@ -85,6 +90,25 @@ func run() error {
 
 	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	return serve(ctx, srv, cfg.ShutdownTimeout)
+}
+
+// migrate applies migrations as the schema owner, then enables login for the runtime
+// role when a password is configured. The owner connection is closed afterwards.
+func migrate(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
+	owner, err := db.Open(ctx, cfg.MigrateDatabaseURL)
+	if err != nil {
+		return fmt.Errorf("migration database: %w", err)
+	}
+	defer owner.Close()
+	if err := db.NewMigrator(owner, migrations.FS, logger).Up(ctx); err != nil {
+		return err
+	}
+	if cfg.AppDBPassword != "" {
+		if err := db.ProvisionAppRole(ctx, owner, cfg.AppDBPassword); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func newAuthenticator(ctx context.Context, cfg config.Config, users *identity.UserStore) (httpapi.Authenticator, error) {

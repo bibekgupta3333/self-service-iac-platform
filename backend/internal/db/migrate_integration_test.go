@@ -15,7 +15,7 @@ import (
 )
 
 func TestMigrationsApplyAndAreIdempotent(t *testing.T) {
-	pool := dbtest.NewDatabase(t)
+	_, pool := dbtest.NewDatabaseWithOwner(t)
 	ctx := context.Background()
 	m := db.NewMigrator(pool, migrations.FS, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
@@ -23,8 +23,8 @@ func TestMigrationsApplyAndAreIdempotent(t *testing.T) {
 		t.Fatalf("re-run migrations: %v", err)
 	}
 	v, err := m.Version(ctx)
-	if err != nil || v != 3 {
-		t.Fatalf("version = %d, %v; want 3", v, err)
+	if err != nil || v != 4 {
+		t.Fatalf("version = %d, %v; want 4", v, err)
 	}
 
 	for _, table := range []string{
@@ -44,7 +44,7 @@ func TestMigrationsApplyAndAreIdempotent(t *testing.T) {
 }
 
 func TestRequestCompletedAtCheck(t *testing.T) {
-	pool := dbtest.NewDatabase(t)
+	_, pool := dbtest.NewDatabaseWithOwner(t)
 	ctx := context.Background()
 	_, err := pool.Exec(ctx, `
 		WITH u AS (SELECT id FROM users WHERE github_login='iacp-bot'),
@@ -58,5 +58,38 @@ func TestRequestCompletedAtCheck(t *testing.T) {
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
 		t.Fatalf("expected CHECK violation for applied request without completed_at, got %v", err)
+	}
+}
+
+func TestRuntimeRoleIsLeastPrivileged(t *testing.T) {
+	app, owner := dbtest.NewDatabaseWithOwner(t)
+	ctx := context.Background()
+
+	if p, err := db.Privileged(ctx, app); err != nil || p {
+		t.Fatalf("app pool privileged = %v, %v; want false", p, err)
+	}
+	if p, err := db.Privileged(ctx, owner); err != nil || !p {
+		t.Fatalf("owner pool privileged = %v, %v; want true", p, err)
+	}
+	for _, stmt := range []string{
+		"CREATE TABLE sneaky (n int)",
+		"SELECT * FROM goose_db_version",
+		"DROP TABLE requests",
+	} {
+		if _, err := app.Exec(ctx, stmt); err == nil {
+			t.Errorf("iacp_app could run %q", stmt)
+		}
+	}
+	// Ordinary DML on platform tables is allowed.
+	if _, err := app.Exec(ctx, `INSERT INTO teams (slug, name, github_team_id, github_team_slug, cost_center)
+		VALUES ('ops', 'Ops', 99, 'ops', 'cc-9')`); err != nil {
+		t.Fatalf("iacp_app cannot insert teams: %v", err)
+	}
+	if _, err := app.Exec(ctx, `DELETE FROM teams WHERE slug = 'ops'`); err != nil {
+		t.Fatalf("iacp_app cannot delete teams: %v", err)
+	}
+	// Provisioning is idempotent.
+	if err := db.ProvisionAppRole(ctx, owner, "iacp-app-test-only"); err != nil {
+		t.Fatal(err)
 	}
 }

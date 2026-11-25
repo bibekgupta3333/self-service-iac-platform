@@ -16,8 +16,15 @@ import (
 // Prefix is the namespace for every environment variable read by the backend.
 const Prefix = "IACP_"
 
-// DefaultDatabaseURL points at the docker compose Postgres (local development only).
+// DefaultDatabaseURL is the schema-owner connection to the docker compose Postgres
+// (local development only). It is used for migrations, never for serving requests.
 const DefaultDatabaseURL = "postgres://iacp:iacp-local-only@localhost:5432/iacp?sslmode=disable"
+
+// DefaultAppDatabaseURL is the runtime connection as the least-privileged iacp_app role.
+const DefaultAppDatabaseURL = "postgres://iacp_app:" + DevAppDBPassword + "@localhost:5432/iacp?sslmode=disable"
+
+// DevAppDBPassword is the iacp_app password applied in dev mode when none is configured.
+const DevAppDBPassword = "iacp-app-local-only"
 
 // DefaultHTTPAddr binds loopback only; the container image overrides it (see Dockerfile).
 const DefaultHTTPAddr = "127.0.0.1:8080"
@@ -36,8 +43,13 @@ const (
 
 // Config is the fully resolved backend configuration.
 type Config struct {
-	HTTPAddr        string
-	DatabaseURL     string
+	HTTPAddr string
+	// DatabaseURL is the runtime connection (role iacp_app: DML, audit INSERT/SELECT only).
+	DatabaseURL string
+	// MigrateDatabaseURL is the schema-owner connection used only to apply migrations.
+	MigrateDatabaseURL string
+	// AppDBPassword, when set, is applied to iacp_app (LOGIN) after migrating.
+	AppDBPassword   string
 	LogLevel        slog.Level
 	ShutdownTimeout time.Duration
 	AutoMigrate     bool
@@ -76,18 +88,23 @@ func Load(lookup LookupFunc) (Config, error) {
 	errs = append(errs, err)
 
 	cfg := Config{
-		HTTPAddr:        get("HTTP_ADDR", DefaultHTTPAddr),
-		DatabaseURL:     get("DATABASE_URL", DefaultDatabaseURL),
-		LogLevel:        level,
-		ShutdownTimeout: timeout,
-		AutoMigrate:     autoMigrate,
-		AuthMode:        AuthMode(get("AUTH_MODE", "")),
-		DevUserLogin:    get("DEV_USER", "local-dev"),
-		ModuleRepoURL:   get("MODULE_REPO_URL", "https://github.com/bibekgupta3333/self-service-iac-platform.git"),
-		InternalToken:   get("INTERNAL_TOKEN", ""),
+		HTTPAddr:           get("HTTP_ADDR", DefaultHTTPAddr),
+		DatabaseURL:        get("DATABASE_URL", DefaultAppDatabaseURL),
+		MigrateDatabaseURL: get("MIGRATE_DATABASE_URL", DefaultDatabaseURL),
+		AppDBPassword:      get("APP_DB_PASSWORD", ""),
+		LogLevel:           level,
+		ShutdownTimeout:    timeout,
+		AutoMigrate:        autoMigrate,
+		AuthMode:           AuthMode(get("AUTH_MODE", "")),
+		DevUserLogin:       get("DEV_USER", "local-dev"),
+		ModuleRepoURL:      get("MODULE_REPO_URL", "https://github.com/bibekgupta3333/self-service-iac-platform.git"),
+		InternalToken:      get("INTERNAL_TOKEN", ""),
 	}
 	switch cfg.AuthMode {
 	case AuthModeDev:
+		if cfg.AppDBPassword == "" {
+			cfg.AppDBPassword = DevAppDBPassword // matches DefaultAppDatabaseURL
+		}
 	case "":
 		errs = append(errs, fmt.Errorf("%sAUTH_MODE must be set explicitly (supported: dev)", Prefix))
 	default:

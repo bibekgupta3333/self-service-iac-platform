@@ -16,7 +16,7 @@ import (
 )
 
 func TestWriterAndVerifierAgainstPostgres(t *testing.T) {
-	pool := dbtest.NewDatabase(t)
+	pool, owner := dbtest.NewDatabaseWithOwner(t)
 	ctx := context.Background()
 	w := audit.NewWriter(platform.SystemClock{}, platform.RandomIDs{})
 	txr := db.NewTxRunner(pool)
@@ -80,9 +80,22 @@ func TestWriterAndVerifierAgainstPostgres(t *testing.T) {
 		}
 	})
 
+	t.Run("app role cannot bypass triggers or modify rows", func(t *testing.T) {
+		for _, stmt := range []string{
+			"SET session_replication_role = replica",
+			"UPDATE audit_events SET action = 'x' WHERE seq = 1",
+			"DELETE FROM audit_events WHERE seq = 1",
+			"ALTER TABLE audit_events DISABLE TRIGGER USER",
+		} {
+			if _, err := pool.Exec(ctx, stmt); err == nil {
+				t.Errorf("iacp_app could run %q", stmt)
+			}
+		}
+	})
+
 	t.Run("tampering is detected", func(t *testing.T) {
-		// Simulate a superuser bypassing triggers.
-		err := txr.InTx(ctx, func(tx pgx.Tx) error {
+		// Simulate a superuser (not the app role) bypassing triggers.
+		err := db.NewTxRunner(owner).InTx(ctx, func(tx pgx.Tx) error {
 			if _, err := tx.Exec(ctx, "SET LOCAL session_replication_role = replica"); err != nil {
 				return err
 			}

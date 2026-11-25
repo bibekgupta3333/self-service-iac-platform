@@ -30,7 +30,11 @@ func TestLoad(t *testing.T) {
 			name: "defaults bind loopback",
 			env:  dev,
 			check: func(t *testing.T, c Config) {
-				if c.HTTPAddr != "127.0.0.1:8080" || c.DatabaseURL != DefaultDatabaseURL || c.LogLevel != slog.LevelInfo ||
+				if !strings.HasPrefix(c.DatabaseURL, "postgres://iacp_app:") || c.MigrateDatabaseURL != DefaultDatabaseURL ||
+					c.AppDBPassword != DevAppDBPassword {
+					t.Fatalf("runtime must use iacp_app and migrations the owner: %+v", c)
+				}
+				if c.HTTPAddr != "127.0.0.1:8080" || c.LogLevel != slog.LevelInfo ||
 					c.ShutdownTimeout != 15*time.Second || !c.AutoMigrate || c.AuthMode != AuthModeDev || c.InternalToken != "" {
 					t.Fatalf("unexpected defaults: %+v", c)
 				}
@@ -41,9 +45,13 @@ func TestLoad(t *testing.T) {
 			env: with(map[string]string{
 				"IACP_HTTP_ADDR": ":9090", "IACP_LOG_LEVEL": "debug", "IACP_SHUTDOWN_TIMEOUT": "3s",
 				"IACP_AUTO_MIGRATE": "false", "IACP_DATABASE_URL": "postgres://x",
-				"IACP_INTERNAL_TOKEN": strings.Repeat("t", 32),
+				"IACP_INTERNAL_TOKEN":       strings.Repeat("t", 32),
+				"IACP_MIGRATE_DATABASE_URL": "postgres://owner", "IACP_APP_DB_PASSWORD": "s3cret",
 			}),
 			check: func(t *testing.T, c Config) {
+				if c.MigrateDatabaseURL != "postgres://owner" || c.AppDBPassword != "s3cret" {
+					t.Fatalf("db overrides not applied: %+v", c)
+				}
 				if c.HTTPAddr != ":9090" || c.LogLevel != slog.LevelDebug || c.ShutdownTimeout != 3*time.Second ||
 					c.AutoMigrate || c.DatabaseURL != "postgres://x" || len(c.InternalToken) != 32 {
 					t.Fatalf("overrides not applied: %+v", c)
