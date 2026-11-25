@@ -3,7 +3,7 @@
 # description: |
 #   IAM policy documents must not allow every action ("*", "<svc>:*" on
 #   Resource "*", or NotAction) and must not grant write actions on
-#   Resource "*".
+#   Resource "*". AWS-managed admin policies must not be attached.
 package iacp.iam
 
 import data.lib.iacp as f
@@ -105,5 +105,49 @@ warn contains m if {
 		"iacp.iam.policy_unknown", rc.address,
 		"policy document is only known after apply, so it was not checked",
 		"build it with data.aws_iam_policy_document (checked at plan time) and review it by hand",
+	)
+}
+
+# --- AWS-managed policy attachments ------------------------------------------------
+
+attachment_types := {
+	"aws_iam_role_policy_attachment",
+	"aws_iam_policy_attachment",
+	"aws_iam_user_policy_attachment",
+	"aws_iam_group_policy_attachment",
+}
+
+admin_managed_policies := {"AdministratorAccess", "PowerUserAccess", "IAMFullAccess"}
+
+# attached_policy_arns(rc): managed policy ARNs a resource attaches.
+attached_policy_arns(rc) := {arn | arn := f.after(rc).policy_arn; is_string(arn)} if rc.type in attachment_types
+
+attached_policy_arns(rc) := {arn | some arn in f.after(rc).managed_policy_arns} if rc.type == "aws_iam_role"
+
+# aws_managed_name(arn): "AdministratorAccess" for arn:<partition>:iam::aws:policy/[path/]AdministratorAccess.
+aws_managed_name(arn) := regex.find_all_string_submatch_n(`^arn:aws[a-z-]*:iam::aws:policy/(?:.*/)?([A-Za-z0-9+=,.@_-]+)$`, arn, 1)[0][1]
+
+deny contains m if {
+	some rc in f.changed
+	some arn in attached_policy_arns(rc)
+	aws_managed_name(arn) in admin_managed_policies
+	not f.exempt("iacp.iam.admin_policy", rc.address)
+	m := f.msg(
+		"iacp.iam.admin_policy", rc.address,
+		sprintf("attaches the AWS-managed policy %s", [aws_managed_name(arn)]),
+		"attach a customer-managed policy scoped to the workload's resources",
+	)
+}
+
+warn contains m if {
+	some rc in f.changed
+	some arn in attached_policy_arns(rc)
+	name := aws_managed_name(arn)
+	endswith(name, "FullAccess")
+	not name in admin_managed_policies
+	m := f.msg(
+		"iacp.iam.full_access_policy", rc.address,
+		sprintf("attaches the broad AWS-managed policy %s", [name]),
+		"prefer a customer-managed policy limited to the actions and resources the workload needs",
 	)
 }

@@ -116,3 +116,49 @@ test_exception_suppresses_wildcard_resource if {
 	p := policy([allow("s3:PutObject", "*")])
 	count(iam.deny) == 0 with input as t.plan([p]) with data.iacp.context as ctx
 }
+
+# --- Managed policy attachments ----------------------------------------------------
+
+attachment(type, arn) := t.rc(type, "a", {"policy_arn": arn})
+
+test_admin_attachment_denied_for_every_attachment_type if {
+	every type in iam.attachment_types {
+		some m in iam.deny with input as t.plan([attachment(type, "arn:aws:iam::aws:policy/AdministratorAccess")])
+		startswith(m, sprintf("[iacp.iam.admin_policy] %s.a: attaches the AWS-managed policy AdministratorAccess", [type]))
+	}
+}
+
+test_power_user_and_iam_full_access_denied if {
+	count(iam.deny) == 1 with input as t.plan([attachment("aws_iam_role_policy_attachment", "arn:aws:iam::aws:policy/PowerUserAccess")])
+	count(iam.deny) == 1 with input as t.plan([attachment("aws_iam_user_policy_attachment", "arn:aws:iam::aws:policy/IAMFullAccess")])
+}
+
+test_gov_partition_admin_attachment_denied if {
+	count(iam.deny) == 1 with input as t.plan([attachment("aws_iam_role_policy_attachment", "arn:aws-us-gov:iam::aws:policy/AdministratorAccess")])
+}
+
+test_role_managed_policy_arns_checked if {
+	r := t.rc("aws_iam_role", "r", {"managed_policy_arns": ["arn:aws:iam::aws:policy/AdministratorAccess"]})
+	count(iam.deny) == 1 with input as t.plan([r])
+}
+
+test_full_access_attachment_warns if {
+	inp := t.plan([attachment("aws_iam_role_policy_attachment", "arn:aws:iam::aws:policy/AmazonS3FullAccess")])
+	count(iam.deny) == 0 with input as inp
+	t.rule_ids(iam.warn) == {"[iacp.iam.full_access_policy]"} with input as inp
+}
+
+test_scoped_managed_policy_allowed if {
+	inp := t.plan([attachment("aws_iam_role_policy_attachment", "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole")])
+	count(iam.deny) == 0 with input as inp
+	count(iam.warn) == 0 with input as inp
+}
+
+test_customer_policy_named_like_admin_allowed if {
+	count(iam.deny) == 0 with input as t.plan([attachment("aws_iam_role_policy_attachment", "arn:aws:iam::111111111111:policy/AdministratorAccess")])
+}
+
+test_unknown_policy_arn_ignored if {
+	r := t.with_unknown(t.rc("aws_iam_role_policy_attachment", "a", {}), {"policy_arn": true})
+	count(iam.deny) == 0 with input as t.plan([r])
+}
