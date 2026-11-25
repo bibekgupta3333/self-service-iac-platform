@@ -19,6 +19,7 @@ func TestProblemFor(t *testing.T) {
 		{badRequest("x"), 400, "bad_request"},
 		{apperr.Conflict("stack_exists", "x"), 409, "stack_exists"},
 		{apperr.Forbidden("x"), 403, "forbidden"},
+		{&apperr.Error{Kind: apperr.KindMethodNotAllowed, Code: "method_not_allowed"}, 405, "method_not_allowed"},
 		{&apperr.Error{Kind: apperr.KindUnauthenticated, Code: "unauthenticated"}, 401, "unauthenticated"},
 		{fmt.Errorf("wrapped: %w", apperr.Forbidden("x")), 403, "forbidden"},
 		{errors.New("db down"), 500, "internal"},

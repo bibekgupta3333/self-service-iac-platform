@@ -4,13 +4,16 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/fp"
 )
 
 // Pinger reports whether a dependency is reachable (the database pool in production).
@@ -34,6 +37,14 @@ type Deps struct {
 	Catalog  *CatalogHandler
 	// Public lists further handlers mounted under authenticated /v1.
 	Public []RouteRegistrar
+}
+
+var probeMethods = []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+	http.MethodPatch, http.MethodDelete, http.MethodOptions}
+
+// allowedMethods lists the methods r routes for path, for the Allow header.
+func allowedMethods(r chi.Routes, path string) []string {
+	return fp.Filter(probeMethods, func(m string) bool { return r.Match(chi.NewRouteContext(), m, path) })
 }
 
 // NewRouter builds the HTTP handler tree.
@@ -81,7 +92,10 @@ func NewRouter(d Deps) http.Handler {
 		writeError(w, req, apperr.NotFound("no route for %s %s", req.Method, req.URL.Path))
 	})
 	r.MethodNotAllowed(func(w http.ResponseWriter, req *http.Request) {
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		allowed := allowedMethods(r, req.URL.Path)
+		w.Header().Set("Allow", strings.Join(allowed, ", "))
+		writeError(w, req, &apperr.Error{Kind: apperr.KindMethodNotAllowed, Code: "method_not_allowed",
+			Message: fmt.Sprintf("%s is not allowed on %s; allowed: %s", req.Method, req.URL.Path, strings.Join(allowed, ", "))})
 	})
 	return r
 }

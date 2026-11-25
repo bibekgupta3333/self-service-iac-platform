@@ -63,6 +63,8 @@ func problemFor(err error) Problem {
 		p.Status, p.Title = http.StatusUnauthorized, "Authentication required"
 	case apperr.KindForbidden:
 		p.Status, p.Title = http.StatusForbidden, "Not allowed"
+	case apperr.KindMethodNotAllowed:
+		p.Status, p.Title = http.StatusMethodNotAllowed, "Method not allowed"
 	default:
 		p.Status, p.Title, p.Code, p.Detail = http.StatusInternalServerError, "Internal server error", "internal", ""
 	}

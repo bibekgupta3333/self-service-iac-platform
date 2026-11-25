@@ -23,6 +23,8 @@ const (
 	KindUnauthenticated
 	// KindForbidden means the caller is known but not allowed to do this.
 	KindForbidden
+	// KindMethodNotAllowed means the route exists but not for this HTTP method.
+	KindMethodNotAllowed
 )
 
 // Forbidden builds a KindForbidden error.

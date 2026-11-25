@@ -73,6 +73,26 @@ func TestInternalRoutesUseTheInternalAuthenticator(t *testing.T) {
 	}
 }
 
+func TestMethodNotAllowedIsProblemWithAllow(t *testing.T) {
+	h := newTestRouter(&fakeCatalog{versions: []catalog.ModuleVersion{sqsVersion()}}, okPinger{}, NewRequestHandler(&fakeRequests{}))
+	tests := []struct {
+		method, path, allow string
+	}{
+		{"PUT", "/v1/requests", "GET, POST"},
+		{"DELETE", "/v1/catalog/modules", "GET"},
+		{"GET", "/v1/internal/catalog/index", "POST"},
+		{"POST", "/healthz", "GET"},
+	}
+	for _, tt := range tests {
+		rec := do(t, h, tt.method, tt.path, "", "Authorization", "Bearer "+testInternalToken)
+		if rec.Code != 405 || rec.Header().Get("Allow") != tt.allow ||
+			rec.Header().Get("Content-Type") != "application/problem+json" ||
+			!strings.Contains(rec.Body.String(), `"code":"method_not_allowed"`) {
+			t.Errorf("%s %s = %d Allow=%q %s", tt.method, tt.path, rec.Code, rec.Header().Get("Allow"), rec.Body)
+		}
+	}
+}
+
 func TestUnauthenticatedBodyIsGeneric(t *testing.T) {
 	h := NewRouter(Deps{Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: failingAuth{},
 		Ready: okPinger{}, Catalog: NewCatalogHandler(&fakeCatalog{})})
