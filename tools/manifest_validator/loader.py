@@ -31,7 +31,7 @@ class ManifestLoader:
     def load(self, path: Path) -> ModulePackage:
         package = ModulePackage(name=path.name, path=path)
         package.manifest, package.load_error = self._read_manifest(path / MANIFEST_NAME)
-        tf_text = hcl.read_tf_files(str(p) for p in sorted(path.glob("*.tf")))
+        tf_text = "\n".join(p.read_text(encoding="utf-8") for p in sorted(path.glob("*.tf")))
         package.variables = {
             name: hcl.type_family(body) for name, body in hcl.find_blocks(tf_text, "variable").items()
         }

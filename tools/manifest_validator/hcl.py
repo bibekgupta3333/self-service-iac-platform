@@ -3,13 +3,14 @@
 These functions do not parse HCL in general. They find top-level
 ``variable``, ``output`` and ``locals`` blocks by brace matching and pull
 simple attributes out of them. That is enough for module contract checks
-and avoids a third-party HCL parser dependency.
+and avoids a third-party HCL parser dependency. All functions are pure:
+callers (see loader.py) read the files.
 """
 
 from __future__ import annotations
 
 import re
-from typing import Iterable, Mapping
+from typing import Mapping
 
 _BLOCK_HEADER = re.compile(r'^\s*(variable|output)\s+"([^"]+)"\s*\{', re.MULTILINE)
 _LOCALS_HEADER = re.compile(r"^\s*locals\s*\{", re.MULTILINE)
@@ -116,12 +117,3 @@ def type_family(body: str) -> str | None:
     if not match:
         return None
     return _TYPE_FAMILIES.get(match.group(1), "unknown")
-
-
-def read_tf_files(paths: Iterable[str]) -> str:
-    """Concatenate the content of the given .tf files."""
-    chunks = []
-    for path in paths:
-        with open(path, encoding="utf-8") as handle:
-            chunks.append(handle.read())
-    return "\n".join(chunks)
