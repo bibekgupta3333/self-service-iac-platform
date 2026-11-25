@@ -7,6 +7,14 @@ __pycache__/
 *.tfstate
 *.tfstate.*
 *.tfplan
+tfplan
+*.tfplan.json
+# Plan JSON from local runs (policy fixtures under policies/**/fixtures are kept)
+/plan.json
+environments/**/plan.json
+modules/**/plan.json
+# Lambda build artifacts
+*.zip
 crash.log
 .terraform.lock.hcl.bak
 # Node / Next.js
@@ -17,3 +25,6 @@ node_modules/
 # Env
 .env
 .env.*
+!.env.example
+# LocalStack / local backend artifacts (ADR-0009)
+.localstack/

@@ -499,54 +499,16 @@ Savings levers: one NAT gateway for non-critical AZs, fewer interface endpoints 
 
 ## 11. Local setup with LocalStack
 
-`docker-compose.yml` at the repo root:
+The current local stack is [`docker-compose.yml`](../docker-compose.yml) at the repo root (see [ADR-0009](adr/0009-local-first-localstack-and-local-backend.md)):
 
-```yaml
-services:
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: iacp
-      POSTGRES_PASSWORD: iacp
-      POSTGRES_DB: iacp
-    ports: ["5432:5432"]
-    healthcheck: { test: ["CMD", "pg_isready", "-U", "iacp"], interval: 5s }
+| Service | Image | Port | Purpose |
+|---|---|---|---|
+| `localstack` | `localstack/localstack:4.4` (pinned by digest) | `127.0.0.1:4566` | AWS emulator: s3, sqs, sns, lambda, iam, sts, kms, logs, cloudwatch, secretsmanager, events |
+| `postgres` | `postgres:17-alpine` (pinned by digest) | `127.0.0.1:5432` | Control-plane database (user `iacp`, local-only password `iacp-local-only`) |
 
-  localstack:
-    image: localstack/localstack:3.8
-    environment:
-      SERVICES: s3,sqs,lambda,iam,sts,kms,logs,scheduler,secretsmanager,events
-      DEFAULT_REGION: us-east-1
-    ports: ["4566:4566"]
-    volumes:
-      - ./scripts/localstack-init:/etc/localstack/init/ready.d:ro   # creates state bucket, queues, KMS key
+Start it with `make up`. The `Makefile` forces dummy credentials (`test`/`test`) and `AWS_ENDPOINT_URL=http://localhost:4566`, so real credentials in your shell are never used.
 
-  backend:
-    build: ./backend
-    environment:
-      DATABASE_URL: postgres://iacp:iacp@postgres:5432/iacp?sslmode=disable
-      AWS_ENDPOINT_URL: http://localstack:4566
-      AWS_REGION: us-east-1
-      IACP_EVENTS_QUEUE_URL: http://localstack:4566/000000000000/iacp-events
-      IACP_GITHUB_MODE: fake            # in-memory GitHub fake; or "app" with a dev GitHub App
-      IACP_AUTH_MODE: dev               # dev login with seeded users/teams
-    ports: ["8080:8080"]
-    depends_on: [postgres, localstack]
-
-  worker:
-    build: ./backend
-    command: ["/iacp", "worker"]
-    environment: { DATABASE_URL: postgres://iacp:iacp@postgres:5432/iacp?sslmode=disable, AWS_ENDPOINT_URL: http://localstack:4566, AWS_REGION: us-east-1 }
-    depends_on: [backend]
-
-  portal:
-    build: ./portal
-    environment: { NEXT_PUBLIC_API_URL: http://localhost:8080 }
-    ports: ["3000:3000"]
-    depends_on: [backend]
-```
-
-`scripts/localstack-init/01-bootstrap.sh` creates `iacp-tfstate-000000000000` (versioned, SSE-KMS), the `iacp-events` + DLQ queues and secrets with dummy values.
+**Planned additions:** `backend`, `worker` and `portal` services join the compose file once they exist (M2/M4). A LocalStack init hook will create the `iacp-tfstate-000000000000` bucket when the generator moves to the S3-on-LocalStack backend (ADR-0009, decision 4). Until then, stacks use the Terraform `local` backend.
 
 Module testing locally:
 

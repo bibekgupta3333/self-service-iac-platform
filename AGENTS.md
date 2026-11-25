@@ -33,6 +33,7 @@ If code and docs disagree, fix one of them in the same change. A significant des
 
 ## Hard rules
 1. **No static cloud credentials.** AWS access is GitHub OIDC only (`iacp-plan` / `iacp-apply`). Never commit keys, `.env` files, state, or plan files.
+   - **Local-first phase ([ADR-0009](docs/adr/0009-local-first-localstack-and-local-backend.md)):** until MVP exit, all AWS use targets **LocalStack** (`http://localhost:4566`, dummy creds `test`/`test`). Stacks use the Terraform **`local` backend**.
 2. **Terraform never runs in the backend.** The backend orchestrates; plans and applies run only in GitHub Actions.
 3. **Never `terraform apply` against real accounts from a laptop.** Use LocalStack (`tflocal`) locally.
 4. **Pin everything.** Use exact module refs (`?ref=modules/<name>/vX.Y.Z`), never `main`. Pin providers in `versions.tf` and commit the lock file. Pin GitHub Actions by commit SHA.
@@ -45,7 +46,7 @@ If code and docs disagree, fix one of them in the same change. A significant des
 ## Commands
 ```bash
 # Local stack
-docker compose up -d                     # Postgres, LocalStack, backend, portal
+make up                                  # LocalStack + Postgres (docker compose)
 
 # Terraform modules
 terraform fmt -recursive -check
@@ -70,14 +71,20 @@ cd portal && npm ci && npm run lint && npm test
 - **Go:** standard layout (`cmd/`, `internal/`), chi router, pgx and sqlc, context everywhere, structured JSON logs, table-driven tests, wrapped errors (`fmt.Errorf("…: %w", err)`).
 - **Terraform:** one resource concern per file. Every variable has a `description`, a `type`, and `validation` where useful. Outputs are documented. Run `terraform-docs` for READMEs.
 - **Rego:** each policy has positive and negative tests and a clear `deny` message naming the resource and the fix.
-- **Python:** only for tooling and diagrams. Keep scripts self-contained under `docs/diagrams/src/`.
+- **Python:** only for tooling (`tools/`) and diagrams (`docs/diagrams/src/`). Use type hints, dataclasses and pytest.
+
+### Programming style: about 70% object-oriented, 30% functional
+- **Object-oriented (structure):** model the domain as types with behaviour. Services, repositories, clients and generators are structs or classes. They receive their dependencies through constructors (`NewCatalogService(repo, clock)`) and depend on small interfaces, not concrete types. Encapsulate invariants in methods such as `Request.Transition(to)` and `ModuleVersion.IsCompatible(tf)`.
+- **Functional (logic):** keep calculations pure, deterministic and side-effect free. Examples: input validation, SemVer comparison, HCL rendering, plan summarisation, state-machine transition tables, policy decisions. Prefer immutable values, small composable functions, and map/filter helpers over mutation.
+- **Boundary rule:** I/O (DB, HTTP, GitHub, AWS, filesystem) lives only in OOP adapters. Pure functions never perform I/O, so they test without mocks.
 
 ## Git and commits
 - Author for this repo is `bibekgupta3333 <bibekgupta3333@gmail.com>` (repo-local git config).
 - Use Conventional Commits: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `ci:`, `chore:`.
 - Do not add co-author trailers or tool and assistant attribution lines.
 - Update `CHANGELOG.md` under `[Unreleased]` and tick tasks in `WBS.md` when work lands.
-- Branch from `main`. Every change goes through a PR with green checks.
+- Branch from `main` with `feat/…`, `fix/…`, `chore/…` or `docs/…`. Every change goes through a PR with green checks and a review. Merge with a merge commit so the logical commits stay visible.
+- Keep commits **small and logical**: one concern per commit (for example scaffold, then domain, then tests). Never make one large mixed commit.
 
 ## Definition of done
 - [ ] Tests added or updated and passing (unit, golden files, policy tests, Terratest where relevant)

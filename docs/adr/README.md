@@ -12,6 +12,7 @@
 | [0006](0006-opa-conftest-and-checkov.md) | OPA/conftest on plan JSON plus Checkov | Accepted |
 | [0007](0007-go-backend-postgresql.md) | Go backend with PostgreSQL | Accepted |
 | [0008](0008-github-app-for-automation.md) | GitHub App for automation | Accepted |
+| [0009](0009-local-first-localstack-and-local-backend.md) | Local-first development with LocalStack and the local backend | Accepted |
 
 ## Process
 
