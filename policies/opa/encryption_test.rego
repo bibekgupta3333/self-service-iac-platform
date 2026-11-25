@@ -53,6 +53,19 @@ test_s3_sse_being_deleted_denied if {
 	count(enc.deny) == 1 with input as t.plan([bucket, t.with_actions(sse("aws:kms"), ["delete"])])
 }
 
+# Two buckets in one module; only `a` has an SSE config, whose `bucket` is unknown
+# at plan time. The config must not count for `b`.
+test_s3_two_bucket_probe_only_unlinked_bucket_denied if {
+	a := t.rc("aws_s3_bucket", "a", {"bucket": "probe-a"})
+	b := t.rc("aws_s3_bucket", "b", {"bucket": "probe-b"})
+	sse_a := t.rc("aws_s3_bucket_server_side_encryption_configuration", "a", {"rule": [{"apply_server_side_encryption_by_default": [{"sse_algorithm": "aws:kms", "kms_master_key_id": "arn:aws:kms:us-east-1:111111111111:key/k"}]}]})
+	inp := t.plan_with_config([a, b, sse_a], [t.cfg(sse_a.type, "a", t.bucket_ref("a"))])
+	denied := {m | some m in enc.deny; contains(m, "iacp.encryption.s3_kms")} with input as inp
+	count(denied) == 1
+	some m in denied
+	contains(m, "aws_s3_bucket.b:")
+}
+
 test_s3_inline_kms_allowed if {
 	b := t.rc("aws_s3_bucket", "legacy", {"server_side_encryption_configuration": [{"rule": [{"apply_server_side_encryption_by_default": [{"sse_algorithm": "aws:kms"}]}]}]})
 	count(enc.deny) == 0 with input as t.plan([b])

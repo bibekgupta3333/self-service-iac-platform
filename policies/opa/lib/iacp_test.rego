@@ -64,6 +64,60 @@ test_exempt_other_rule_not_covered if {
 	not f.exempt("other", "a") with data.iacp.context as ctx
 }
 
+# --- Configuration lookup and bucket linking ------------------------------------
+
+test_module_names_drop_instance_keys if {
+	f.module_names(`module.a[0].module.b`) == ["a", "b"]
+	f.module_names("") == []
+}
+
+test_config_resource_in_nested_module if {
+	r := object.union(t.rc("aws_sqs_queue", "q", {}), {"module_address": `module.a["x"].module.b`})
+	inner := {"resources": [t.cfg("aws_sqs_queue", "q", {"name": {"constant_value": "q"}})]}
+	conf := {"configuration": {"root_module": {"module_calls": {"a": {"module": {"module_calls": {"b": {"module": inner}}}}}}}}
+	f.config_expr(r, "name") == {"constant_value": "q"} with input as conf
+}
+
+test_config_expr_missing_is_empty if {
+	f.config_expr(t.rc("aws_sqs_queue", "q", {}), "name") == {} with input as t.plan([])
+}
+
+test_linked_by_reference_with_unknown_bucket_name if {
+	a := t.rc("aws_s3_bucket", "a", {"bucket": "probe-a"})
+	pab := t.rc("aws_s3_bucket_public_access_block", "a", {})
+	f.linked_to_bucket(pab, a) with input as t.plan_with_config([], [t.cfg(pab.type, "a", t.bucket_ref("a"))])
+}
+
+test_reference_to_other_bucket_not_linked if {
+	b := t.rc("aws_s3_bucket", "b", {"bucket": "probe-b"})
+	pab := t.rc("aws_s3_bucket_public_access_block", "a", {})
+	not f.linked_to_bucket(pab, b) with input as t.plan_with_config([], [t.cfg(pab.type, "a", t.bucket_ref("a"))])
+}
+
+test_reference_with_instance_key_linked if {
+	a := t.rc("aws_s3_bucket", "a", {})
+	pab := t.rc("aws_s3_bucket_public_access_block", "a", {})
+	expr := {"bucket": {"references": ["aws_s3_bucket.a[0].id"]}}
+	f.linked_to_bucket(pab, a) with input as t.plan_with_config([], [t.cfg(pab.type, "a", expr)])
+}
+
+test_reference_prefix_of_other_name_not_linked if {
+	a := t.rc("aws_s3_bucket", "a", {})
+	pab := t.rc("aws_s3_bucket_public_access_block", "x", {})
+	expr := {"bucket": {"references": ["aws_s3_bucket.ab.id"]}}
+	not f.linked_to_bucket(pab, a) with input as t.plan_with_config([], [t.cfg(pab.type, "x", expr)])
+}
+
+test_unknown_child_bucket_without_reference_not_linked if {
+	a := t.rc("aws_s3_bucket", "a", {"bucket": "probe-a"})
+	pab := t.rc("aws_s3_bucket_public_access_block", "a", {})
+	not f.linked_to_bucket(pab, a) with input as t.plan([])
+}
+
+test_data_resource_ref if {
+	f.resource_ref({"mode": "data", "type": "aws_iam_policy_document", "name": "d"}) == "data.aws_iam_policy_document.d"
+}
+
 test_msg_format if {
 	f.msg("x.y", "aws_s3_bucket.a", "bad", "do good") == "[x.y] aws_s3_bucket.a: bad. Fix: do good"
 }

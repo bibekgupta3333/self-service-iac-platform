@@ -60,14 +60,62 @@ module_of(rc) := object.get(rc, "module_address", "")
 
 same_module(a, b) if module_of(a) == module_of(b)
 
-# linked_to_bucket(child, bucket): child config is in the bucket's module and, when both
-# names are known at plan time, targets the same bucket.
-linked_to_bucket(child, bucket) if {
-	same_module(child, bucket)
-	not bucket_mismatch(child, bucket)
+# --- Configuration lookup -------------------------------------------------------
+
+# module_names(addr): ["a", "b"] for "module.a[0].module.b" (instance keys dropped).
+module_names(addr) := [m[1] | some m in regex.find_all_string_submatch_n(`module\.([^.\[]+)`, addr, -1)]
+
+# config_module(rc): the configuration block of the module that declares rc.
+config_module(rc) := object.get(
+	input,
+	array.concat(
+		["configuration", "root_module"],
+		[step | some name in module_names(module_of(rc)); some step in ["module_calls", name, "module"]],
+	),
+	{},
+)
+
+# config_resources(rc): the resource block(s) in configuration that rc was planned from.
+config_resources(rc) := [r |
+	some r in object.get(config_module(rc), "resources", [])
+	r.mode == rc.mode
+	r.type == rc.type
+	r.name == rc.name
+]
+
+# config_expr(rc, key): the configuration expression for attribute key ({} when absent).
+config_expr(rc, key) := object.get(array.concat(config_resources(rc), [{}])[0], ["expressions", key], {})
+
+# refers_to(rc, key, target): rc's `key` expression references the target resource
+# (same module, matched by type and name, any attribute or instance key).
+refers_to(rc, key, target) if {
+	same_module(rc, target)
+	prefix := resource_ref(target)
+	some ref in config_expr(rc, key).references
+	ref_matches(ref, prefix)
 }
 
-bucket_mismatch(child, bucket) if after(child).bucket != after(bucket).bucket
+resource_ref(rc) := concat(".", [rc.type, rc.name]) if rc.mode == "managed"
+
+resource_ref(rc) := concat(".", ["data", rc.type, rc.name]) if rc.mode == "data"
+
+ref_matches(ref, prefix) if ref == prefix
+
+ref_matches(ref, prefix) if startswith(ref, concat("", [prefix, "."]))
+
+ref_matches(ref, prefix) if startswith(ref, concat("", [prefix, "["]))
+
+# linked_to_bucket(child, bucket): child (PAB, SSE config, policy, ACL) targets the bucket,
+# shown by a configuration reference or by equal bucket names known at plan time.
+# Without either, the child is not linked (fail closed).
+linked_to_bucket(child, bucket) if refers_to(child, "bucket", bucket)
+
+linked_to_bucket(child, bucket) if {
+	same_module(child, bucket)
+	name := after(child).bucket
+	is_string(name)
+	name == after(bucket).bucket
+}
 
 # --- Environment -------------------------------------------------------------
 

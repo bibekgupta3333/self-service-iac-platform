@@ -38,6 +38,17 @@ test_bucket_with_partial_pab_denied if {
 	count(s3.deny) == 1 with input as t.plan([bucket, pab({"restrict_public_buckets": false})])
 }
 
+test_s3_two_bucket_probe_only_unlinked_bucket_denied if {
+	a := t.rc("aws_s3_bucket", "a", {"bucket": "probe-a"})
+	b := t.rc("aws_s3_bucket", "b", {"bucket": "probe-b"})
+	pab_a := t.rc("aws_s3_bucket_public_access_block", "a", object.remove(pab({}).change.after, ["bucket"]))
+	inp := t.plan_with_config([a, b, pab_a], [t.cfg(pab_a.type, "a", t.bucket_ref("a"))])
+	s3.deny == {concat("", [
+		"[iacp.s3.no_public] aws_s3_bucket.b: bucket has no public access block with all four flags enabled. ",
+		`Fix: add aws_s3_bucket_public_access_block with ["block_public_acls", "block_public_policy", "ignore_public_acls", "restrict_public_buckets"] all set to true`,
+	])} with input as inp
+}
+
 test_pab_exception_honoured if {
 	ctx := {"now": "2026-01-01T00:00:00Z", "exceptions": [{
 		"rule_id": "iacp.s3.no_public",

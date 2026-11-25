@@ -34,3 +34,24 @@ with_actions(r, actions) := object.union(r, {"change": object.union(r.change, {"
 with_unknown(r, unknown) := object.union(r, {"change": object.union(r.change, {"after_unknown": unknown})})
 
 plan(rcs) := {"resource_changes": rcs}
+
+# cfg builds a configuration resource block with the given expressions.
+cfg(type, name, expressions) := {
+	"address": sprintf("%s.%s", [type, name]),
+	"mode": "managed",
+	"type": type,
+	"name": name,
+	"expressions": expressions,
+}
+
+# bucket_ref is the `bucket = aws_s3_bucket.<name>.id` expression.
+bucket_ref(name) := {"bucket": {"references": [sprintf("aws_s3_bucket.%s.id", [name]), sprintf("aws_s3_bucket.%s", [name])]}}
+
+# plan_with_config adds root-module configuration resources to a plan.
+plan_with_config(rcs, resources) := {
+	"resource_changes": rcs,
+	"configuration": {"root_module": {"resources": resources}},
+}
+
+# rule_ids extracts the "[rule.id]" prefixes from a set of messages.
+rule_ids(messages) := {id | some m in messages; id := regex.find_n(`^\[[a-z0-9._]+\]`, m, 1)[0]}
