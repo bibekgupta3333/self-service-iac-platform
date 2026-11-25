@@ -17,3 +17,7 @@ node_modules/
 # Env
 .env
 .env.*
+!.env.example
+# LocalStack / local backend artifacts (ADR-0009)
+*.tfstate.lock.info
+.localstack/
