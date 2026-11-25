@@ -55,6 +55,7 @@ type Request struct {
 	ApprovedPlanHash string
 	ApprovedBy       *uuid.UUID
 	ApprovedAt       *time.Time
+	RetryCount       int // automatic apply retries used (requests.retry_count)
 	CreatedBy        uuid.UUID
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
@@ -91,15 +92,16 @@ func (r *Request) Approve(planHash string, by uuid.UUID, at time.Time) error {
 }
 
 func (r *Request) move(event Event, at time.Time) error {
-	to, err := Transition(r.Status, event)
+	next, err := Next(Snapshot{Status: r.Status, RetryCount: r.RetryCount}, event)
 	if err != nil {
 		return err
 	}
-	if event == EventNewCommit { // a new commit invalidates the reviewed plan
+	// A new commit or a dismissed review invalidates the reviewed plan.
+	if event == EventNewCommit || event == EventReviewDismissed {
 		r.ApprovedPlanHash, r.ApprovedBy, r.ApprovedAt = "", nil, nil
 	}
-	r.Status, r.UpdatedAt = to, at
-	if to.IsTerminal() {
+	r.Status, r.RetryCount, r.UpdatedAt = next.Status, next.RetryCount, at
+	if next.Status.IsTerminal() {
 		r.CompletedAt = &at
 	}
 	return nil

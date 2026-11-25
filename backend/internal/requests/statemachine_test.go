@@ -32,6 +32,8 @@ func TestTransition(t *testing.T) {
 		{StatusApplying, EventApplySucceeded, StatusApplied, false},
 		{StatusApplying, EventApplyFailed, StatusFailed, false},
 		{StatusApplying, EventApplyRetry, StatusApplying, false},
+		{StatusApproved, EventReviewDismissed, StatusPlanReady, false},
+		{StatusPlanReady, EventReviewDismissed, StatusPlanReady, true},
 		// invalid
 		{StatusDraft, EventApplyStarted, StatusDraft, true},
 		{StatusApplying, EventCancel, StatusApplying, true},
@@ -57,7 +59,7 @@ func TestTransition(t *testing.T) {
 }
 
 func TestTerminalStatusesAcceptNoEvents(t *testing.T) {
-	events := []Event{EventPROpened, EventValidationStarted, EventChecksPassed, EventChecksFailed, EventApproved,
+	events := []Event{EventReviewDismissed, EventPROpened, EventValidationStarted, EventChecksPassed, EventChecksFailed, EventApproved,
 		EventNewCommit, EventPRClosed, EventCancel, EventApplyStarted, EventApplySucceeded, EventApplyFailed, EventApplyRetry}
 	for _, s := range AllStatuses {
 		if !s.IsTerminal() {
@@ -150,5 +152,49 @@ func TestApproveGuards(t *testing.T) {
 	}
 	if r.Status != StatusPlanReady {
 		t.Fatalf("status changed on failed approve: %s", r.Status)
+	}
+}
+
+func TestNextCapsApplyRetries(t *testing.T) {
+	s := Snapshot{Status: StatusApplying}
+	for i := 1; i <= MaxApplyRetries; i++ {
+		var err error
+		if s, err = Next(s, EventApplyRetry); err != nil || s.RetryCount != i || s.Status != StatusApplying {
+			t.Fatalf("retry %d: %+v, %v", i, s, err)
+		}
+	}
+	if _, err := Next(s, EventApplyRetry); err == nil {
+		t.Fatalf("retry %d must exceed the budget of %d", MaxApplyRetries+1, MaxApplyRetries)
+	}
+	// After the budget, the only ways out are success or failure.
+	if got, err := Next(s, EventApplyFailed); err != nil || got.Status != StatusFailed || got.RetryCount != MaxApplyRetries {
+		t.Fatalf("fail after retries = %+v, %v", got, err)
+	}
+}
+
+func TestReviewDismissedClearsApproval(t *testing.T) {
+	r := NewDraft(uuid.New(), "req-abc123", StackRef{}, KindCreate, nil, "", uuid.New(), time.Now())
+	r.Status = StatusPlanReady
+	if err := r.Approve(strings.Repeat("cd", 32), uuid.New(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Fire(EventReviewDismissed, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if r.Status != StatusPlanReady || r.ApprovedPlanHash != "" || r.ApprovedBy != nil || r.ApprovedAt != nil {
+		t.Fatalf("dismissal must return to plan_ready and clear the pinned plan: %+v", r)
+	}
+}
+
+func TestRequestRetryCountTracked(t *testing.T) {
+	r := NewDraft(uuid.New(), "req-abc123", StackRef{}, KindCreate, nil, "", uuid.New(), time.Now())
+	r.Status = StatusApplying
+	for range MaxApplyRetries {
+		if err := r.Fire(EventApplyRetry, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if r.RetryCount != MaxApplyRetries || r.Fire(EventApplyRetry, time.Now()) == nil {
+		t.Fatalf("entity must enforce the retry budget: %+v", r)
 	}
 }

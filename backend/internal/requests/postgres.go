@@ -59,7 +59,7 @@ func (r *PostgresRepository) Get(ctx context.Context, id uuid.UUID) (*Request, e
 }
 
 const requestCols = `r.id, r.short_id, r.stack_id, s.path, s.status, r.kind, r.status, r.spec, coalesce(r.justification, ''),
-	r.queued_behind, coalesce(r.approved_plan_hash, ''), r.approved_by, r.approved_at, r.created_by, r.created_at,
+	r.queued_behind, coalesce(r.approved_plan_hash, ''), r.approved_by, r.approved_at, r.retry_count, r.created_by, r.created_at,
 	r.updated_at, r.completed_at`
 
 func scanRequest(row pgx.Row) (*Request, error) {
@@ -68,7 +68,7 @@ func scanRequest(row pgx.Row) (*Request, error) {
 		spec []byte
 	)
 	err := row.Scan(&q.ID, &q.ShortID, &q.Stack.ID, &q.Stack.Path, &q.Stack.Status, &q.Kind, &q.Status, &spec,
-		&q.Justification, &q.QueuedBehind, &q.ApprovedPlanHash, &q.ApprovedBy, &q.ApprovedAt, &q.CreatedBy,
+		&q.Justification, &q.QueuedBehind, &q.ApprovedPlanHash, &q.ApprovedBy, &q.ApprovedAt, &q.RetryCount, &q.CreatedBy,
 		&q.CreatedAt, &q.UpdatedAt, &q.CompletedAt)
 	if err != nil {
 		return nil, err

@@ -42,15 +42,22 @@ const (
 	EventApplyStarted      Event = "apply_started"      // merged, apply.yml in progress
 	EventApplySucceeded    Event = "apply_succeeded"    // apply ok + outputs reported
 	EventApplyFailed       Event = "apply_failed"       // non-transient error / plan mismatch
-	EventApplyRetry        Event = "apply_retry"        // transient error, auto-retry
+	EventApplyRetry        Event = "apply_retry"        // transient error, auto-retry (max MaxApplyRetries)
+	EventReviewDismissed   Event = "review_dismissed"   // pull_request_review dismissed
 )
+
+// MaxApplyRetries caps automatic retries of a transient apply failure (docs/03 §4.1).
+const MaxApplyRetries = 2
 
 type edge struct {
 	from  Status
 	event Event
 }
 
-// transitions is the complete request state machine. Anything not listed is invalid.
+// transitions is the complete request state machine (docs/03 §4.1). Anything not listed
+// is invalid. Edges beyond the summary diagram, documented in the §4.1 table:
+// cancel from pr_open/plan_ready (the cancel API), and new_commit / pr_closed while
+// validating (a push or close can arrive before the validation verdict).
 var transitions = map[edge]Status{
 	{StatusDraft, EventPROpened}: StatusPROpen,
 	{StatusDraft, EventCancel}:   StatusCancelled,
@@ -69,9 +76,10 @@ var transitions = map[edge]Status{
 	{StatusPlanReady, EventPRClosed}:  StatusRejected,
 	{StatusPlanReady, EventCancel}:    StatusCancelled,
 
-	{StatusApproved, EventNewCommit}:    StatusValidating,
-	{StatusApproved, EventPRClosed}:     StatusRejected,
-	{StatusApproved, EventApplyStarted}: StatusApplying,
+	{StatusApproved, EventNewCommit}:       StatusValidating,
+	{StatusApproved, EventPRClosed}:        StatusRejected,
+	{StatusApproved, EventApplyStarted}:    StatusApplying,
+	{StatusApproved, EventReviewDismissed}: StatusPlanReady,
 
 	{StatusApplying, EventApplySucceeded}: StatusApplied,
 	{StatusApplying, EventApplyFailed}:    StatusFailed,
@@ -105,6 +113,29 @@ func Transition(from Status, event Event) (Status, error) {
 		}
 	}
 	return to, nil
+}
+
+// Snapshot is the part of a request the state machine reasons about.
+type Snapshot struct {
+	Status     Status
+	RetryCount int
+}
+
+// Next applies event to s: the transition table plus the retry budget. Pure.
+// apply_retry is allowed only while RetryCount < MaxApplyRetries and increments it.
+func Next(s Snapshot, event Event) (Snapshot, error) {
+	to, err := Transition(s.Status, event)
+	if err != nil {
+		return s, err
+	}
+	if event == EventApplyRetry {
+		if s.RetryCount >= MaxApplyRetries {
+			return s, &apperr.Error{Kind: apperr.KindConflict, Code: "retry_budget_exhausted",
+				Message: fmt.Sprintf("apply was already retried %d times", s.RetryCount)}
+		}
+		return Snapshot{Status: to, RetryCount: s.RetryCount + 1}, nil
+	}
+	return Snapshot{Status: to, RetryCount: s.RetryCount}, nil
 }
 
 // AllowedEvents returns the events accepted in status from, sorted.

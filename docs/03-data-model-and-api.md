@@ -499,6 +499,13 @@ stateDiagram-v2
     plan_ready --> validating: new commit pushed (re-plan)
     plan_ready --> rejected: PR closed unmerged / review rejected
     pr_open --> rejected: PR closed unmerged
+    pr_open --> cancelled: user cancels
+    validating --> validating: new commit pushed (restart)
+    validating --> rejected: PR closed unmerged
+    plan_ready --> cancelled: user cancels
+    approved --> plan_ready: review dismissed
+    approved --> validating: new commit pushed (re-plan)
+    approved --> rejected: PR closed unmerged
     approved --> applying: merged → apply.yml started
     applying --> applied: apply ok + outputs reported
     applying --> failed: non-transient error / plan mismatch
@@ -514,18 +521,21 @@ stateDiagram-v2
 | — | `POST /v1/requests` | `draft` | validate, acquire lock or queue, audit `request.created` |
 | `draft` | PR opened by GitHub App | `pr_open` | store branch/PR, audit |
 | `draft` | cancel / queued > 7 d | `cancelled` | dequeue |
+| `pr_open`/`plan_ready` | `POST /requests/{id}/cancel` | `cancelled` | close PR, release lock |
 | `pr_open` | `workflow_run` (pr-validate) in_progress | `validating` | create `pipeline_runs` |
 | `validating` | callback `stage=summary, passed=true` | `plan_ready` | store plan summary + cost, PR comment |
 | `validating` | callback `passed=false` | `failed` | store findings; close PR with comment (configurable); release lock |
 | `plan_ready` | `pull_request_review` approved + required checks green | `approved` | `approved_plan_hash = plan_summaries.plan_hash`, audit |
 | `plan_ready` | TTL-expiry `destroy` request in **non-prod**, checks green | `approved` | `iacp-approver` machine user (member of `@acme/self-service-iac-platform-approvers`; GitHub Apps cannot be code owners) submits the approving review and the worker merges; production is never auto-approved; audit `request.auto_approved` |
-| `plan_ready`/`approved` | `pull_request.synchronize` | `validating` | clear approval & pinned hash |
-| `pr_open`/`plan_ready`/`approved` | `pull_request.closed` (unmerged) | `rejected` | release lock |
+| `validating`/`plan_ready`/`approved` | `pull_request.synchronize` | `validating` | clear approval & pinned hash; restart validation |
+| `approved` | `pull_request_review` dismissed | `plan_ready` | clear approval & pinned hash |
+| `pr_open`/`validating`/`plan_ready`/`approved` | `pull_request.closed` (unmerged) | `rejected` | release lock |
 | `approved` | `push` to main / `workflow_run` apply in_progress | `applying` | stack → `updating`/`provisioning`/`destroying` |
 | `applying` | callback apply succeeded | `applied` | stack outputs, `last_applied_sha`; stack → `active`/`destroyed`; release lock; dispatch next queued |
-| `applying` | callback apply failed (non-transient) | `failed` | stack → `failed`; notify; release lock |
+| `applying` | callback apply failed (transient), `retry_count < 2` | `applying` | `retry_count += 1`; re-dispatch with backoff |
+| `applying` | callback apply failed (non-transient, or transient with retries used up) | `failed` | stack → `failed`; notify; release lock |
 
-Transitions are enforced in `internal/requests/statemachine.go` by a pure transition table and `Transition(from, event) (to, error)`; the `Request` entity wraps it (`Fire`, and `Approve`, which also pins the plan hash); DB updates use `UPDATE … WHERE id=$1 AND status=$2` (optimistic check) so concurrent webhook + callback races resolve deterministically.
+Transitions are enforced in `internal/requests/statemachine.go` by a pure transition table, `Transition(from, event) (to, error)`, and `Next(snapshot, event)`, which also enforces the retry budget (`MaxApplyRetries = 2`, counted in `requests.retry_count`). The `Request` entity wraps them (`Fire`, and `Approve`, which also pins the plan hash); DB updates use `UPDATE … WHERE id=$1 AND status=$2` (optimistic check) so concurrent webhook + callback races resolve deterministically.
 
 ### 4.2 Stack
 
