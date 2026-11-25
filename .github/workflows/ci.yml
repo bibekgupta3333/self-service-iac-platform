@@ -52,7 +52,14 @@ jobs:
         shell: bash
         run: |
           shopt -s nullglob globstar
-          has() { if [ "$#" -gt 0 ]; then echo true; else echo false; fi; }
+          # true when any argument exists (literal paths are not dropped by nullglob).
+          has() {
+            local f
+            for f in "$@"; do
+              if [ -e "$f" ]; then echo true; return; fi
+            done
+            echo false
+          }
           {
             echo "terraform_version=$(cat .terraform-version 2>/dev/null || echo 1.13.5)"
             echo "modules=$(has modules/*/*.tf)"
