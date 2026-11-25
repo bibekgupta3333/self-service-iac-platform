@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -101,12 +102,21 @@ type TxRunner struct{ pool *pgxpool.Pool }
 func NewTxRunner(pool *pgxpool.Pool) *TxRunner { return &TxRunner{pool: pool} }
 
 // InTx runs fn in a transaction, committing on nil error and rolling back otherwise.
+// If fn panics the transaction is rolled back (returning its connection to the pool)
+// and the panic is re-raised for the caller's recovery middleware.
 func (r *TxRunner) InTx(ctx context.Context, fn func(tx pgx.Tx) error) (err error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() {
+		if p := recover(); p != nil {
+			// Use a fresh context: ctx may already be cancelled, and the connection must go back.
+			rbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			_ = tx.Rollback(rbCtx)
+			panic(p)
+		}
 		if err != nil {
 			if rbErr := tx.Rollback(ctx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
 				err = errors.Join(err, fmt.Errorf("rollback: %w", rbErr))
