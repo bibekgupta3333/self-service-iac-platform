@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -121,9 +122,13 @@ type pgStore struct {
 	audit *audit.Writer
 }
 
-func (s *pgStore) ClaimIdempotencyKey(ctx context.Context, userID uuid.UUID, key, hash string) (bool, error) {
-	tag, err := s.tx.Exec(ctx, `INSERT INTO idempotency_keys (user_id, key, request_hash) VALUES ($1, $2, $3)
-		ON CONFLICT (user_id, key) DO NOTHING`, userID, key, hash)
+func (s *pgStore) ClaimIdempotencyKey(ctx context.Context, c IdempotencyClaim) (bool, error) {
+	if _, err := s.tx.Exec(ctx, `DELETE FROM idempotency_keys WHERE user_id = $1 AND key = $2 AND created_at < $3`,
+		c.UserID, c.Key, c.ExpiredBefore); err != nil {
+		return false, fmt.Errorf("expire idempotency key: %w", err)
+	}
+	tag, err := s.tx.Exec(ctx, `INSERT INTO idempotency_keys (user_id, key, request_hash, created_at) VALUES ($1, $2, $3, $4)
+		ON CONFLICT (user_id, key) DO NOTHING`, c.UserID, c.Key, c.RequestHash, c.At)
 	if err != nil {
 		return false, err
 	}
@@ -132,18 +137,28 @@ func (s *pgStore) ClaimIdempotencyKey(ctx context.Context, userID uuid.UUID, key
 
 func (s *pgStore) GetIdempotencyKey(ctx context.Context, userID uuid.UUID, key string) (IdempotencyRecord, error) {
 	var (
-		rec  IdempotencyRecord
-		body map[string]string
+		rec IdempotencyRecord
+		id  string
 	)
-	err := s.tx.QueryRow(ctx, `SELECT request_hash, response_body FROM idempotency_keys WHERE user_id = $1 AND key = $2`,
-		userID, key).Scan(&rec.RequestHash, &body)
+	err := s.tx.QueryRow(ctx, `SELECT request_hash, response_body->>'request_id' FROM idempotency_keys WHERE user_id = $1 AND key = $2`,
+		userID, key).Scan(&rec.RequestHash, &id)
 	if err != nil {
 		return IdempotencyRecord{}, err
 	}
-	if id, err := uuid.Parse(body["request_id"]); err == nil {
-		rec.RequestID = &id
+	if rec.RequestID, err = uuid.Parse(id); err != nil {
+		return IdempotencyRecord{}, fmt.Errorf("idempotency key without request id: %w", err)
 	}
 	return rec, nil
+}
+
+// PurgeExpiredIdempotencyKeys deletes keys created before cutoff and returns how many
+// were removed. The worker (WBS 4.9) calls it periodically; claims also expire keys lazily.
+func (r *PostgresRepository) PurgeExpiredIdempotencyKeys(ctx context.Context, cutoff time.Time) (int64, error) {
+	tag, err := r.pool.Exec(ctx, `DELETE FROM idempotency_keys WHERE created_at < $1`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("purge idempotency keys: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // CompleteIdempotencyKey stores a pointer to the created request rather than a frozen

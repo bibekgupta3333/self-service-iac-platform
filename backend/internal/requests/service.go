@@ -48,18 +48,38 @@ type NewStack struct {
 	CreatedAt     time.Time
 }
 
-// IdempotencyRecord is a stored Idempotency-Key.
+// IdempotencyWindow is how long an Idempotency-Key is remembered (docs/03 §5).
+const IdempotencyWindow = 24 * time.Hour
+
+// IdempotencyClaim is an attempt to reserve an Idempotency-Key for one user.
+type IdempotencyClaim struct {
+	UserID      uuid.UUID
+	Key         string
+	RequestHash string
+	At          time.Time
+	// ExpiredBefore: a stored key created before this instant is forgotten and may be reused.
+	ExpiredBefore time.Time
+}
+
+// NewIdempotencyClaim builds a claim at now with the standard window. Pure.
+func NewIdempotencyClaim(userID uuid.UUID, key, requestHash string, now time.Time) IdempotencyClaim {
+	return IdempotencyClaim{UserID: userID, Key: key, RequestHash: requestHash, At: now, ExpiredBefore: now.Add(-IdempotencyWindow)}
+}
+
+// IdempotencyRecord is a stored, completed Idempotency-Key. Claim and completion commit
+// in the same transaction, so a visible key always points at a request.
 type IdempotencyRecord struct {
 	RequestHash string
-	RequestID   *uuid.UUID
+	RequestID   uuid.UUID
 }
 
 // Store is the transactional persistence port used while creating a request.
 // Every method runs inside the same database transaction.
 type Store interface {
-	// ClaimIdempotencyKey inserts the key; it returns false if the key already exists.
-	// A concurrent claim of the same key blocks until the first transaction finishes.
-	ClaimIdempotencyKey(ctx context.Context, userID uuid.UUID, key, requestHash string) (bool, error)
+	// ClaimIdempotencyKey drops the key if it expired, then inserts it; it returns false
+	// if a live key already exists. A concurrent claim of the same key blocks until the
+	// first transaction finishes.
+	ClaimIdempotencyKey(ctx context.Context, c IdempotencyClaim) (bool, error)
 	GetIdempotencyKey(ctx context.Context, userID uuid.UUID, key string) (IdempotencyRecord, error)
 	CompleteIdempotencyKey(ctx context.Context, userID uuid.UUID, key string, requestID uuid.UUID) error
 	TeamBySlug(ctx context.Context, slug string) (Team, error)
@@ -141,7 +161,8 @@ func (s *Service) Create(ctx context.Context, by identity.Principal, cmd CreateC
 	}
 	var res CreateResult
 	err := s.repo.InTx(ctx, func(st Store) error {
-		claimed, err := st.ClaimIdempotencyKey(ctx, by.UserID, cmd.IdempotencyKey, cmd.RequestHash)
+		claim := NewIdempotencyClaim(by.UserID, cmd.IdempotencyKey, cmd.RequestHash, s.clock.Now())
+		claimed, err := st.ClaimIdempotencyKey(ctx, claim)
 		if err != nil {
 			return fmt.Errorf("claim idempotency key: %w", err)
 		}
@@ -174,10 +195,7 @@ func (s *Service) replay(ctx context.Context, st Store, by identity.Principal, c
 		return CreateResult{}, apperr.Invalid("idempotency_key_reuse",
 			"Idempotency-Key was already used with a different request body")
 	}
-	if rec.RequestID == nil {
-		return CreateResult{}, apperr.Conflict("idempotency_key_in_progress", "a request with this Idempotency-Key is in progress")
-	}
-	req, err := st.GetRequest(ctx, *rec.RequestID)
+	req, err := st.GetRequest(ctx, rec.RequestID)
 	if err != nil {
 		return CreateResult{}, fmt.Errorf("load replayed request: %w", err)
 	}

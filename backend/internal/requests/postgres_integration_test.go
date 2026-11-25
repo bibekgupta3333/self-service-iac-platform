@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -137,4 +138,25 @@ func TestPostgresRequestFlow(t *testing.T) {
 	if err != nil || !res.Valid || res.Checked != 4 { // 2 index + 2 request.created
 		t.Fatalf("audit = %+v, %v", res, err)
 	}
+
+	t.Run("idempotency keys expire after 24h", func(t *testing.T) {
+		if _, err := pool.Exec(ctx, `UPDATE idempotency_keys SET created_at = now() - interval '25 hours'
+			WHERE key = '6a1f0c7e-2b9d-4d3e'`); err != nil {
+			t.Fatal(err)
+		}
+		third := validInput()
+		third.Stack = "order-worker"
+		res, err := svc.Create(ctx, user, createCmd(third, "6a1f0c7e-2b9d-4d3e"))
+		if err != nil || res.Replayed {
+			t.Fatalf("expired key must be reusable with a new body: %+v, %v", res, err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE idempotency_keys SET created_at = now() - interval '2 days'
+			WHERE key = 'third-key-1234'`); err != nil {
+			t.Fatal(err)
+		}
+		n, err := repo.PurgeExpiredIdempotencyKeys(ctx, time.Now().Add(-IdempotencyWindow))
+		if err != nil || n != 1 {
+			t.Fatalf("purged %d, %v; want 1", n, err)
+		}
+	})
 }

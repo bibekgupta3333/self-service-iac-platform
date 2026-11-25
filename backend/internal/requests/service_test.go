@@ -24,18 +24,60 @@ import (
 type memRepo struct{ state memState }
 
 type memState struct {
-	keys     map[string]IdempotencyRecord
+	keys     map[string]memKey
 	stacks   []NewStack
 	requests []*Request
 	events   []audit.Event
 }
 
+type memKey struct {
+	rec IdempotencyRecord
+	at  time.Time
+}
+
+// stepClock is a Clock tests can move forward.
+type stepClock struct{ t time.Time }
+
+func (c *stepClock) Now() time.Time { return c.t }
+
+func TestIdempotencyKeyExpiresAfterWindow(t *testing.T) {
+	repo := newMemRepo()
+	clock := &stepClock{t: t0}
+	svc := NewService(repo, fakeVersions{}, fakeMembers{dev.UserID: RoleDeveloper}, clock, &seqIDs{})
+	ctx := context.Background()
+
+	first, err := svc.Create(ctx, dev, createCmd(validInput(), "key-expiry-01"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := validInput()
+	other.Stack = "order-api"
+
+	clock.t = t0.Add(IdempotencyWindow - time.Minute)
+	if _, err := svc.Create(ctx, dev, createCmd(other, "key-expiry-01")); !hasCode(err, "idempotency_key_reuse") {
+		t.Fatalf("inside the window a different body must be rejected, got %v", err)
+	}
+
+	clock.t = t0.Add(IdempotencyWindow + time.Minute)
+	res, err := svc.Create(ctx, dev, createCmd(other, "key-expiry-01"))
+	if err != nil || res.Replayed || res.Request.ID == first.Request.ID {
+		t.Fatalf("after the window the key must be reusable: %+v, %v", res, err)
+	}
+}
+
+func TestNewIdempotencyClaim(t *testing.T) {
+	c := NewIdempotencyClaim(dev.UserID, "k", "h", t0)
+	if !c.At.Equal(t0) || !c.ExpiredBefore.Equal(t0.Add(-24*time.Hour)) {
+		t.Fatalf("claim = %+v", c)
+	}
+}
+
 func newMemRepo() *memRepo {
-	return &memRepo{state: memState{keys: map[string]IdempotencyRecord{}}}
+	return &memRepo{state: memState{keys: map[string]memKey{}}}
 }
 
 func (s memState) clone() memState {
-	keys := make(map[string]IdempotencyRecord, len(s.keys))
+	keys := make(map[string]memKey, len(s.keys))
 	for k, v := range s.keys {
 		keys[k] = v
 	}
@@ -79,22 +121,24 @@ type memStore struct{ s memState }
 
 func key(u uuid.UUID, k string) string { return u.String() + "/" + k }
 
-func (m *memStore) ClaimIdempotencyKey(_ context.Context, u uuid.UUID, k, h string) (bool, error) {
-	if _, ok := m.s.keys[key(u, k)]; ok {
-		return false, nil
+func (m *memStore) ClaimIdempotencyKey(_ context.Context, c IdempotencyClaim) (bool, error) {
+	if cur, ok := m.s.keys[key(c.UserID, c.Key)]; ok {
+		if !cur.at.Before(c.ExpiredBefore) {
+			return false, nil
+		}
 	}
-	m.s.keys[key(u, k)] = IdempotencyRecord{RequestHash: h}
+	m.s.keys[key(c.UserID, c.Key)] = memKey{rec: IdempotencyRecord{RequestHash: c.RequestHash}, at: c.At}
 	return true, nil
 }
 
 func (m *memStore) GetIdempotencyKey(_ context.Context, u uuid.UUID, k string) (IdempotencyRecord, error) {
-	return m.s.keys[key(u, k)], nil
+	return m.s.keys[key(u, k)].rec, nil
 }
 
 func (m *memStore) CompleteIdempotencyKey(_ context.Context, u uuid.UUID, k string, id uuid.UUID) error {
-	rec := m.s.keys[key(u, k)]
-	rec.RequestID = &id
-	m.s.keys[key(u, k)] = rec
+	cur := m.s.keys[key(u, k)]
+	cur.rec.RequestID = id
+	m.s.keys[key(u, k)] = cur
 	return nil
 }
 
