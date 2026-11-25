@@ -1,0 +1,12 @@
+{
+  "iacp": {
+    "context": {
+      "environment": "staging",
+      "team": "payments",
+      "stack": "orders",
+      "allowed_regions": ["us-east-1", "us-west-2"],
+      "exceptions": [],
+      "now": "2026-11-24T10:05:00Z"
+    }
+  }
+}

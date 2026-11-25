@@ -13,6 +13,11 @@ repo="git::https://github.com/bibekgupta3333/self-service-iac-platform.git"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
+# Dummy settings only: the non-compliant fixture has a provider with no region,
+# which takes it from the environment. Never point this at a real account.
+export AWS_REGION=us-east-1 AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test
+unset AWS_PROFILE AWS_SESSION_TOKEN
+
 generate() {
   local name="$1" source="$2"
   rm -rf "${work:?}"/*

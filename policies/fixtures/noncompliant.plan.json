@@ -5,6 +5,132 @@
     "root_module": {
       "resources": [
         {
+          "address": "aws_iam_policy.admin_like",
+          "mode": "managed",
+          "type": "aws_iam_policy",
+          "name": "admin_like",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "schema_version": 0,
+          "values": {
+            "description": null,
+            "name": "orders-admin-like",
+            "path": "/",
+            "policy": "{\"Statement\":[{\"Action\":\"*\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:s3:::orders-data\",\"Sid\":\"Everything\"},{\"Action\":\"s3:GetObject\",\"Effect\":\"Allow\",\"NotResource\":\"arn:aws:s3:::secret/*\",\"Sid\":\"AllButOne\"}],\"Version\":\"2012-10-17\"}",
+            "tags": null,
+            "tags_all": {
+              "iacp:environment": "staging",
+              "iacp:team": "search"
+            }
+          },
+          "sensitive_values": {
+            "tags_all": {}
+          }
+        },
+        {
+          "address": "aws_iam_role_policy.computed",
+          "mode": "managed",
+          "type": "aws_iam_role_policy",
+          "name": "computed",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "schema_version": 0,
+          "values": {
+            "role": "orders-worker"
+          },
+          "sensitive_values": {}
+        },
+        {
+          "address": "aws_iam_role_policy_attachment.admin",
+          "mode": "managed",
+          "type": "aws_iam_role_policy_attachment",
+          "name": "admin",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "schema_version": 0,
+          "values": {
+            "policy_arn": "arn:aws:iam::aws:policy/AdministratorAccess",
+            "role": "orders-worker"
+          },
+          "sensitive_values": {}
+        },
+        {
+          "address": "aws_iam_role_policy_attachment.s3_full",
+          "mode": "managed",
+          "type": "aws_iam_role_policy_attachment",
+          "name": "s3_full",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "schema_version": 0,
+          "values": {
+            "policy_arn": "arn:aws:iam::aws:policy/AmazonS3FullAccess",
+            "role": "orders-worker"
+          },
+          "sensitive_values": {}
+        },
+        {
+          "address": "aws_s3_bucket.logs",
+          "mode": "managed",
+          "type": "aws_s3_bucket",
+          "name": "logs",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "schema_version": 0,
+          "values": {
+            "bucket": "orders-logs",
+            "force_destroy": false,
+            "region": "eu-central-1",
+            "tags": null,
+            "tags_all": {
+              "iacp:environment": "staging",
+              "iacp:team": "search"
+            },
+            "timeouts": null
+          },
+          "sensitive_values": {
+            "cors_rule": [],
+            "grant": [],
+            "lifecycle_rule": [],
+            "logging": [],
+            "object_lock_configuration": [],
+            "replication_configuration": [],
+            "server_side_encryption_configuration": [],
+            "tags_all": {},
+            "versioning": [],
+            "website": []
+          },
+          "identity_schema_version": 0,
+          "identity": {
+            "account_id": null,
+            "bucket": null,
+            "region": null
+          }
+        },
+        {
+          "address": "aws_s3_bucket_acl.public",
+          "mode": "managed",
+          "type": "aws_s3_bucket_acl",
+          "name": "public",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "schema_version": 0,
+          "values": {
+            "acl": "public-read",
+            "bucket": "orders-data",
+            "expected_bucket_owner": null,
+            "region": "eu-central-1"
+          },
+          "sensitive_values": {
+            "access_control_policy": []
+          }
+        },
+        {
+          "address": "aws_s3_bucket_policy.logs",
+          "mode": "managed",
+          "type": "aws_s3_bucket_policy",
+          "name": "logs",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "schema_version": 0,
+          "values": {
+            "region": "eu-central-1"
+          },
+          "sensitive_values": {}
+        },
+        {
           "address": "aws_s3_bucket_policy.public",
           "mode": "managed",
           "type": "aws_s3_bucket_policy",
@@ -15,6 +141,68 @@
             "bucket": "orders-data",
             "policy": "{\"Statement\":[{\"Action\":\"s3:GetObject\",\"Effect\":\"Allow\",\"Principal\":\"*\",\"Resource\":\"arn:aws:s3:::orders-data/*\"}],\"Version\":\"2012-10-17\"}",
             "region": "eu-central-1"
+          },
+          "sensitive_values": {}
+        },
+        {
+          "address": "aws_s3_bucket_public_access_block.logs",
+          "mode": "managed",
+          "type": "aws_s3_bucket_public_access_block",
+          "name": "logs",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "schema_version": 0,
+          "values": {
+            "block_public_acls": true,
+            "block_public_policy": true,
+            "ignore_public_acls": true,
+            "region": "eu-central-1",
+            "restrict_public_buckets": true
+          },
+          "sensitive_values": {}
+        },
+        {
+          "address": "aws_s3_bucket_server_side_encryption_configuration.logs",
+          "mode": "managed",
+          "type": "aws_s3_bucket_server_side_encryption_configuration",
+          "name": "logs",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "schema_version": 0,
+          "values": {
+            "expected_bucket_owner": null,
+            "region": "eu-central-1",
+            "rule": [
+              {
+                "apply_server_side_encryption_by_default": [
+                  {
+                    "kms_master_key_id": "",
+                    "sse_algorithm": "aws:kms"
+                  }
+                ],
+                "bucket_key_enabled": null
+              }
+            ]
+          },
+          "sensitive_values": {
+            "rule": [
+              {
+                "apply_server_side_encryption_by_default": [
+                  {}
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "address": "terraform_data.bootstrap",
+          "mode": "managed",
+          "type": "terraform_data",
+          "name": "bootstrap",
+          "provider_name": "terraform.io/builtin/terraform",
+          "schema_version": 0,
+          "values": {
+            "input": null,
+            "output": null,
+            "triggers_replace": null
           },
           "sensitive_values": {}
         }
@@ -37,7 +225,7 @@
                 "tags": null,
                 "tags_all": {
                   "iacp:environment": "staging",
-                  "iacp:team": "payments"
+                  "iacp:team": "search"
                 }
               },
               "sensitive_values": {
@@ -64,7 +252,7 @@
                 "tags": null,
                 "tags_all": {
                   "iacp:environment": "staging",
-                  "iacp:team": "payments"
+                  "iacp:team": "search"
                 },
                 "timeouts": null,
                 "xks_key_id": null
@@ -87,7 +275,7 @@
                 "tags": null,
                 "tags_all": {
                   "iacp:environment": "staging",
-                  "iacp:team": "payments"
+                  "iacp:team": "search"
                 },
                 "timeouts": null
               },
@@ -179,7 +367,7 @@
                 "tags": null,
                 "tags_all": {
                   "iacp:environment": "staging",
-                  "iacp:team": "payments"
+                  "iacp:team": "search"
                 },
                 "timeouts": null,
                 "visibility_timeout_seconds": 30
@@ -196,6 +384,228 @@
   },
   "resource_changes": [
     {
+      "address": "aws_iam_policy.admin_like",
+      "mode": "managed",
+      "type": "aws_iam_policy",
+      "name": "admin_like",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "description": null,
+          "name": "orders-admin-like",
+          "path": "/",
+          "policy": "{\"Statement\":[{\"Action\":\"*\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:s3:::orders-data\",\"Sid\":\"Everything\"},{\"Action\":\"s3:GetObject\",\"Effect\":\"Allow\",\"NotResource\":\"arn:aws:s3:::secret/*\",\"Sid\":\"AllButOne\"}],\"Version\":\"2012-10-17\"}",
+          "tags": null,
+          "tags_all": {
+            "iacp:environment": "staging",
+            "iacp:team": "search"
+          }
+        },
+        "after_unknown": {
+          "arn": true,
+          "attachment_count": true,
+          "id": true,
+          "name_prefix": true,
+          "policy_id": true,
+          "tags_all": {}
+        },
+        "before_sensitive": false,
+        "after_sensitive": {
+          "tags_all": {}
+        }
+      }
+    },
+    {
+      "address": "aws_iam_role_policy.computed",
+      "mode": "managed",
+      "type": "aws_iam_role_policy",
+      "name": "computed",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "role": "orders-worker"
+        },
+        "after_unknown": {
+          "id": true,
+          "name": true,
+          "name_prefix": true,
+          "policy": true
+        },
+        "before_sensitive": false,
+        "after_sensitive": {}
+      }
+    },
+    {
+      "address": "aws_iam_role_policy_attachment.admin",
+      "mode": "managed",
+      "type": "aws_iam_role_policy_attachment",
+      "name": "admin",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "policy_arn": "arn:aws:iam::aws:policy/AdministratorAccess",
+          "role": "orders-worker"
+        },
+        "after_unknown": {
+          "id": true
+        },
+        "before_sensitive": false,
+        "after_sensitive": {}
+      }
+    },
+    {
+      "address": "aws_iam_role_policy_attachment.s3_full",
+      "mode": "managed",
+      "type": "aws_iam_role_policy_attachment",
+      "name": "s3_full",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "policy_arn": "arn:aws:iam::aws:policy/AmazonS3FullAccess",
+          "role": "orders-worker"
+        },
+        "after_unknown": {
+          "id": true
+        },
+        "before_sensitive": false,
+        "after_sensitive": {}
+      }
+    },
+    {
+      "address": "aws_s3_bucket.logs",
+      "mode": "managed",
+      "type": "aws_s3_bucket",
+      "name": "logs",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "bucket": "orders-logs",
+          "force_destroy": false,
+          "region": "eu-central-1",
+          "tags": null,
+          "tags_all": {
+            "iacp:environment": "staging",
+            "iacp:team": "search"
+          },
+          "timeouts": null
+        },
+        "after_unknown": {
+          "acceleration_status": true,
+          "acl": true,
+          "arn": true,
+          "bucket_domain_name": true,
+          "bucket_prefix": true,
+          "bucket_region": true,
+          "bucket_regional_domain_name": true,
+          "cors_rule": true,
+          "grant": true,
+          "hosted_zone_id": true,
+          "id": true,
+          "lifecycle_rule": true,
+          "logging": true,
+          "object_lock_configuration": true,
+          "object_lock_enabled": true,
+          "policy": true,
+          "replication_configuration": true,
+          "request_payer": true,
+          "server_side_encryption_configuration": true,
+          "tags_all": {},
+          "versioning": true,
+          "website": true,
+          "website_domain": true,
+          "website_endpoint": true
+        },
+        "before_sensitive": false,
+        "after_sensitive": {
+          "cors_rule": [],
+          "grant": [],
+          "lifecycle_rule": [],
+          "logging": [],
+          "object_lock_configuration": [],
+          "replication_configuration": [],
+          "server_side_encryption_configuration": [],
+          "tags_all": {},
+          "versioning": [],
+          "website": []
+        },
+        "after_identity": {
+          "account_id": null,
+          "bucket": null,
+          "region": null
+        }
+      }
+    },
+    {
+      "address": "aws_s3_bucket_acl.public",
+      "mode": "managed",
+      "type": "aws_s3_bucket_acl",
+      "name": "public",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "acl": "public-read",
+          "bucket": "orders-data",
+          "expected_bucket_owner": null,
+          "region": "eu-central-1"
+        },
+        "after_unknown": {
+          "access_control_policy": true,
+          "id": true
+        },
+        "before_sensitive": false,
+        "after_sensitive": {
+          "access_control_policy": []
+        }
+      }
+    },
+    {
+      "address": "aws_s3_bucket_policy.logs",
+      "mode": "managed",
+      "type": "aws_s3_bucket_policy",
+      "name": "logs",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "region": "eu-central-1"
+        },
+        "after_unknown": {
+          "bucket": true,
+          "id": true,
+          "policy": true
+        },
+        "before_sensitive": false,
+        "after_sensitive": {}
+      }
+    },
+    {
       "address": "aws_s3_bucket_policy.public",
       "mode": "managed",
       "type": "aws_s3_bucket_policy",
@@ -210,6 +620,104 @@
           "bucket": "orders-data",
           "policy": "{\"Statement\":[{\"Action\":\"s3:GetObject\",\"Effect\":\"Allow\",\"Principal\":\"*\",\"Resource\":\"arn:aws:s3:::orders-data/*\"}],\"Version\":\"2012-10-17\"}",
           "region": "eu-central-1"
+        },
+        "after_unknown": {
+          "id": true
+        },
+        "before_sensitive": false,
+        "after_sensitive": {}
+      }
+    },
+    {
+      "address": "aws_s3_bucket_public_access_block.logs",
+      "mode": "managed",
+      "type": "aws_s3_bucket_public_access_block",
+      "name": "logs",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "block_public_acls": true,
+          "block_public_policy": true,
+          "ignore_public_acls": true,
+          "region": "eu-central-1",
+          "restrict_public_buckets": true
+        },
+        "after_unknown": {
+          "bucket": true,
+          "id": true
+        },
+        "before_sensitive": false,
+        "after_sensitive": {}
+      }
+    },
+    {
+      "address": "aws_s3_bucket_server_side_encryption_configuration.logs",
+      "mode": "managed",
+      "type": "aws_s3_bucket_server_side_encryption_configuration",
+      "name": "logs",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "expected_bucket_owner": null,
+          "region": "eu-central-1",
+          "rule": [
+            {
+              "apply_server_side_encryption_by_default": [
+                {
+                  "kms_master_key_id": "",
+                  "sse_algorithm": "aws:kms"
+                }
+              ],
+              "bucket_key_enabled": null
+            }
+          ]
+        },
+        "after_unknown": {
+          "bucket": true,
+          "id": true,
+          "rule": [
+            {
+              "apply_server_side_encryption_by_default": [
+                {}
+              ]
+            }
+          ]
+        },
+        "before_sensitive": false,
+        "after_sensitive": {
+          "rule": [
+            {
+              "apply_server_side_encryption_by_default": [
+                {}
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "address": "terraform_data.bootstrap",
+      "mode": "managed",
+      "type": "terraform_data",
+      "name": "bootstrap",
+      "provider_name": "terraform.io/builtin/terraform",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "input": null,
+          "output": null,
+          "triggers_replace": null
         },
         "after_unknown": {
           "id": true
@@ -238,7 +746,7 @@
           "tags": null,
           "tags_all": {
             "iacp:environment": "staging",
-            "iacp:team": "payments"
+            "iacp:team": "search"
           }
         },
         "after_unknown": {
@@ -280,7 +788,7 @@
           "tags": null,
           "tags_all": {
             "iacp:environment": "staging",
-            "iacp:team": "payments"
+            "iacp:team": "search"
           },
           "timeouts": null,
           "xks_key_id": null
@@ -319,7 +827,7 @@
           "tags": null,
           "tags_all": {
             "iacp:environment": "staging",
-            "iacp:team": "payments"
+            "iacp:team": "search"
           },
           "timeouts": null
         },
@@ -472,7 +980,7 @@
           "tags": null,
           "tags_all": {
             "iacp:environment": "staging",
-            "iacp:team": "payments"
+            "iacp:team": "search"
           },
           "timeouts": null,
           "visibility_timeout_seconds": 30
@@ -512,7 +1020,7 @@
               "tags": {
                 "constant_value": {
                   "iacp:environment": "staging",
-                  "iacp:team": "payments"
+                  "iacp:team": "search"
                 }
               }
             }
@@ -533,10 +1041,189 @@
             "constant_value": true
           }
         }
+      },
+      "aws.from_local": {
+        "name": "aws",
+        "full_name": "registry.terraform.io/hashicorp/aws",
+        "alias": "from_local",
+        "version_constraint": "6.0.0",
+        "expressions": {
+          "access_key": {
+            "constant_value": "test"
+          },
+          "region": {
+            "references": [
+              "local.secondary_region"
+            ]
+          },
+          "secret_key": {
+            "constant_value": "test"
+          },
+          "skip_credentials_validation": {
+            "constant_value": true
+          },
+          "skip_metadata_api_check": {
+            "constant_value": true
+          },
+          "skip_requesting_account_id": {
+            "constant_value": true
+          }
+        }
+      },
+      "aws.no_region": {
+        "name": "aws",
+        "full_name": "registry.terraform.io/hashicorp/aws",
+        "alias": "no_region",
+        "version_constraint": "6.0.0",
+        "expressions": {
+          "access_key": {
+            "constant_value": "test"
+          },
+          "secret_key": {
+            "constant_value": "test"
+          },
+          "skip_credentials_validation": {
+            "constant_value": true
+          },
+          "skip_metadata_api_check": {
+            "constant_value": true
+          },
+          "skip_requesting_account_id": {
+            "constant_value": true
+          }
+        }
+      },
+      "http": {
+        "name": "http",
+        "full_name": "registry.terraform.io/hashicorp/http",
+        "version_constraint": "3.5.0"
+      },
+      "terraform": {
+        "name": "terraform",
+        "full_name": "terraform.io/builtin/terraform"
       }
     },
     "root_module": {
       "resources": [
+        {
+          "address": "aws_iam_policy.admin_like",
+          "mode": "managed",
+          "type": "aws_iam_policy",
+          "name": "admin_like",
+          "provider_config_key": "aws",
+          "expressions": {
+            "name": {
+              "constant_value": "orders-admin-like"
+            },
+            "policy": {}
+          },
+          "schema_version": 0
+        },
+        {
+          "address": "aws_iam_role_policy.computed",
+          "mode": "managed",
+          "type": "aws_iam_role_policy",
+          "name": "computed",
+          "provider_config_key": "aws",
+          "expressions": {
+            "policy": {
+              "references": [
+                "aws_s3_bucket.logs.arn",
+                "aws_s3_bucket.logs"
+              ]
+            },
+            "role": {
+              "constant_value": "orders-worker"
+            }
+          },
+          "schema_version": 0
+        },
+        {
+          "address": "aws_iam_role_policy_attachment.admin",
+          "mode": "managed",
+          "type": "aws_iam_role_policy_attachment",
+          "name": "admin",
+          "provider_config_key": "aws",
+          "expressions": {
+            "policy_arn": {
+              "constant_value": "arn:aws:iam::aws:policy/AdministratorAccess"
+            },
+            "role": {
+              "constant_value": "orders-worker"
+            }
+          },
+          "schema_version": 0
+        },
+        {
+          "address": "aws_iam_role_policy_attachment.s3_full",
+          "mode": "managed",
+          "type": "aws_iam_role_policy_attachment",
+          "name": "s3_full",
+          "provider_config_key": "aws",
+          "expressions": {
+            "policy_arn": {
+              "constant_value": "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+            },
+            "role": {
+              "constant_value": "orders-worker"
+            }
+          },
+          "schema_version": 0
+        },
+        {
+          "address": "aws_s3_bucket.logs",
+          "mode": "managed",
+          "type": "aws_s3_bucket",
+          "name": "logs",
+          "provider_config_key": "aws",
+          "expressions": {
+            "bucket": {
+              "constant_value": "orders-logs"
+            }
+          },
+          "schema_version": 0
+        },
+        {
+          "address": "aws_s3_bucket_acl.public",
+          "mode": "managed",
+          "type": "aws_s3_bucket_acl",
+          "name": "public",
+          "provider_config_key": "aws",
+          "expressions": {
+            "acl": {
+              "constant_value": "public-read"
+            },
+            "bucket": {
+              "references": [
+                "module.store.bucket",
+                "module.store"
+              ]
+            }
+          },
+          "schema_version": 0
+        },
+        {
+          "address": "aws_s3_bucket_policy.logs",
+          "mode": "managed",
+          "type": "aws_s3_bucket_policy",
+          "name": "logs",
+          "provider_config_key": "aws",
+          "expressions": {
+            "bucket": {
+              "references": [
+                "aws_s3_bucket.logs.id",
+                "aws_s3_bucket.logs"
+              ]
+            },
+            "policy": {
+              "references": [
+                "aws_s3_bucket.logs.arn",
+                "aws_s3_bucket.logs"
+              ]
+            }
+          },
+          "schema_version": 0
+        },
         {
           "address": "aws_s3_bucket_policy.public",
           "mode": "managed",
@@ -553,6 +1240,95 @@
             "policy": {}
           },
           "schema_version": 0
+        },
+        {
+          "address": "aws_s3_bucket_public_access_block.logs",
+          "mode": "managed",
+          "type": "aws_s3_bucket_public_access_block",
+          "name": "logs",
+          "provider_config_key": "aws",
+          "expressions": {
+            "block_public_acls": {
+              "constant_value": true
+            },
+            "block_public_policy": {
+              "constant_value": true
+            },
+            "bucket": {
+              "references": [
+                "aws_s3_bucket.logs.id",
+                "aws_s3_bucket.logs"
+              ]
+            },
+            "ignore_public_acls": {
+              "constant_value": true
+            },
+            "restrict_public_buckets": {
+              "constant_value": true
+            }
+          },
+          "schema_version": 0
+        },
+        {
+          "address": "aws_s3_bucket_server_side_encryption_configuration.logs",
+          "mode": "managed",
+          "type": "aws_s3_bucket_server_side_encryption_configuration",
+          "name": "logs",
+          "provider_config_key": "aws",
+          "expressions": {
+            "bucket": {
+              "references": [
+                "aws_s3_bucket.logs.id",
+                "aws_s3_bucket.logs"
+              ]
+            },
+            "rule": [
+              {
+                "apply_server_side_encryption_by_default": [
+                  {
+                    "sse_algorithm": {
+                      "constant_value": "aws:kms"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "schema_version": 0
+        },
+        {
+          "address": "terraform_data.bootstrap",
+          "mode": "managed",
+          "type": "terraform_data",
+          "name": "bootstrap",
+          "provider_config_key": "terraform",
+          "provisioners": [
+            {
+              "type": "local-exec",
+              "expressions": {
+                "command": {
+                  "constant_value": "echo bootstrap"
+                }
+              }
+            }
+          ],
+          "schema_version": 0
+        },
+        {
+          "address": "data.http.exfil",
+          "mode": "data",
+          "type": "http",
+          "name": "exfil",
+          "provider_config_key": "http",
+          "expressions": {
+            "url": {
+              "constant_value": "https://example.invalid/collect"
+            }
+          },
+          "schema_version": 0,
+          "count_expression": {
+            "constant_value": 0
+          }
         }
       ],
       "module_calls": {
@@ -758,6 +1534,18 @@
     }
   },
   "relevant_attributes": [
+    {
+      "resource": "aws_s3_bucket.logs",
+      "attribute": [
+        "arn"
+      ]
+    },
+    {
+      "resource": "aws_s3_bucket.logs",
+      "attribute": [
+        "id"
+      ]
+    },
     {
       "resource": "module.store.aws_kms_key.this",
       "attribute": [
