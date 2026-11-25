@@ -206,11 +206,11 @@ provider "aws" {
 
   default_tags {
     tags = {
-      "iacp:env"        = "development"
-      "iacp:managed-by" = "iacp"
-      "iacp:stack"      = "order-events"
-      "iacp:team"       = "payments"
-      "cost-center"        = "cc-4102"
+      cost-center        = "cc-4102"
+      "iacp:environment" = "development"
+      "iacp:managed-by"  = "iacp"
+      "iacp:stack"       = "order-events"
+      "iacp:team"        = "payments"
     }
   }
 }
