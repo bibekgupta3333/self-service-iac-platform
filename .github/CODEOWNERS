@@ -1,0 +1,11 @@
+# Code owners for the Self-Service IaC Platform.
+# Later rules override earlier ones; the last matching pattern wins.
+
+*                   @bibekgupta3333
+
+# Security-sensitive paths: policy gates, CI and generated stacks.
+/policies/          @bibekgupta3333
+/.github/           @bibekgupta3333
+/.tflint.hcl        @bibekgupta3333
+/environments/      @bibekgupta3333
+/modules/           @bibekgupta3333
