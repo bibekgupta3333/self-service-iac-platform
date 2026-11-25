@@ -18,18 +18,9 @@ uses_kms(rules) if {
 	d.sse_algorithm in kms_algorithms
 }
 
-# linked(child, bucket): child config is in the bucket's module and, when both
-# names are known at plan time, targets the same bucket.
-linked(child, bucket) if {
-	f.same_module(child, bucket)
-	not bucket_mismatch(child, bucket)
-}
-
-bucket_mismatch(child, bucket) if f.after(child).bucket != f.after(bucket).bucket
-
 bucket_has_kms(b) if {
 	some sse in f.present_of_type("aws_s3_bucket_server_side_encryption_configuration")
-	linked(sse, b)
+	f.linked_to_bucket(sse, b)
 	uses_kms(f.after(sse).rule)
 }
 

@@ -60,6 +60,15 @@ module_of(rc) := object.get(rc, "module_address", "")
 
 same_module(a, b) if module_of(a) == module_of(b)
 
+# linked_to_bucket(child, bucket): child config is in the bucket's module and, when both
+# names are known at plan time, targets the same bucket.
+linked_to_bucket(child, bucket) if {
+	same_module(child, bucket)
+	not bucket_mismatch(child, bucket)
+}
+
+bucket_mismatch(child, bucket) if after(child).bucket != after(bucket).bucket
+
 # --- Environment -------------------------------------------------------------
 
 # environment_of(rc): the context environment, else the resource's
