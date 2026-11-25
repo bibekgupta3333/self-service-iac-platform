@@ -2,11 +2,67 @@
 # title: Forbidden constructs
 # description: |
 #   Module calls must come from this repository pinned to an exact release tag
-#   (?ref=modules/<name>/vX.Y.Z), and force_destroy is only allowed in
-#   development.
+#   (?ref=modules/<name>/vX.Y.Z), force_destroy is only allowed in
+#   development, and code-execution / exfiltration paths (data "external",
+#   data "http", provisioners) are not allowed anywhere. None of these rules
+#   can be waived.
 package iacp.forbidden
 
 import data.lib.iacp as f
+
+# --- Configuration walk -------------------------------------------------------------
+
+# config_blocks contains [address, block] for every resource and data block in the
+# configuration, including nested modules (module.a.module.b.data.http.x).
+config_blocks contains [address, r] if {
+	walk(input.configuration.root_module, [path, resources])
+	module_resources_path(path)
+	some r in resources
+	address := concat("", array.concat(module_prefixes(path), [r.address]))
+}
+
+# module_resources_path: ["resources"] or ["module_calls", n, "module", ..., "resources"].
+module_resources_path(path) if {
+	n := count(path)
+	n % 3 == 1
+	path[n - 1] == "resources"
+	count({i |
+		some i, e in path
+		i < n - 1
+		not module_step(i, e)
+	}) == 0
+}
+
+module_step(i, "module_calls") if i % 3 == 0
+
+module_step(i, _) if i % 3 == 1
+
+module_step(i, "module") if i % 3 == 2
+
+module_prefixes(path) := [sprintf("module.%s.", [path[i + 1]]) | some i, e in path; e == "module_calls"; i % 3 == 0]
+
+forbidden_data_sources := {"external", "http"}
+
+deny contains m if {
+	some [address, r] in config_blocks
+	r.mode == "data"
+	r.type in forbidden_data_sources
+	m := f.msg(
+		"iacp.forbidden.data_source", address,
+		sprintf("data %q can run programs or reach arbitrary URLs during plan", [r.type]),
+		"remove it; pass values in as module inputs or use an AWS data source",
+	)
+}
+
+deny contains m if {
+	some [address, r] in config_blocks
+	some p in r.provisioners
+	m := f.msg(
+		"iacp.forbidden.provisioner", address,
+		sprintf("%s provisioner runs arbitrary commands during apply", [p.type]),
+		"remove the provisioner; model the step as a resource or run it outside Terraform",
+	)
+}
 
 source_pattern := `^git::https://(github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)\.git//modules/([a-z0-9-]+)\?ref=modules/([a-z0-9-]+)/v[0-9]+\.[0-9]+\.[0-9]+$`
 

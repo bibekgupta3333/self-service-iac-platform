@@ -85,3 +85,44 @@ test_force_destroy_context_wins_over_tag if {
 test_force_destroy_false_allowed_in_production if {
 	count(forbidden.deny) == 0 with input as t.plan([bucket(false, "production")])
 }
+
+# --- Data sources and provisioners ---------------------------------------------------
+
+block(mode, type, name, extra) := object.union(
+	{"address": concat(".", array.concat(["data" | mode == "data"], [type, name])), "mode": mode, "type": type, "name": name},
+	extra,
+)
+
+root_config(resources) := {"configuration": {"root_module": {"resources": resources}}}
+
+test_external_data_source_denied if {
+	some m in forbidden.deny with input as root_config([block("data", "external", "x", {})])
+	startswith(m, `[iacp.forbidden.data_source] data.external.x: data "external" can run programs`)
+}
+
+test_http_data_source_in_nested_module_denied if {
+	inner := {"resources": [block("data", "http", "h", {})]}
+	inp := {"configuration": {"root_module": {"module_calls": {"a": {"module": {"module_calls": {"b": {"module": inner}}}}}}}}
+	some m in forbidden.deny with input as inp
+	startswith(m, "[iacp.forbidden.data_source] module.a.module.b.data.http.h:")
+}
+
+test_aws_data_source_allowed if {
+	count(forbidden.deny) == 0 with input as root_config([block("data", "aws_caller_identity", "me", {})])
+}
+
+test_provisioner_denied if {
+	r := block("managed", "terraform_data", "run", {"provisioners": [{"type": "local-exec", "expressions": {}}]})
+	some m in forbidden.deny with input as root_config([r])
+	startswith(m, "[iacp.forbidden.provisioner] terraform_data.run: local-exec provisioner runs arbitrary commands")
+}
+
+test_resource_without_provisioner_allowed if {
+	count(forbidden.deny) == 0 with input as root_config([block("managed", "terraform_data", "marker", {})])
+}
+
+# "resources" keys inside expressions (e.g. a policy document) are not blocks.
+test_expression_named_resources_ignored if {
+	r := block("managed", "aws_iam_policy", "p", {"expressions": {"resources": [block("data", "external", "x", {})]}})
+	count(forbidden.deny) == 0 with input as root_config([r])
+}
