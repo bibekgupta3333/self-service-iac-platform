@@ -26,7 +26,7 @@ docs/           design documentation and diagrams
 ```
 
 ## Documentation
-Start at [docs/README.md](docs/README.md).
+Start at [OVERVIEW.md](OVERVIEW.md), then [docs/README.md](docs/README.md). Planning: [WBS.md](WBS.md) · History: [CHANGELOG.md](CHANGELOG.md) · Contributor/agent rules: [AGENTS.md](AGENTS.md).
 
 ## Regenerating diagrams
 ```bash
