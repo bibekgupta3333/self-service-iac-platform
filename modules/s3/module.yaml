@@ -57,10 +57,18 @@ inputs:
       default: false
       description: Allow destroy with objects present. Not allowed in production.
       x-iacp-ui: danger-toggle
-    access_log_bucket:
-      type: [string, "null"]
+    access_logging:
+      type: [object, "null"]
       default: null
-      description: Existing bucket that receives server access logs. Null disables access logging.
+      description: Server access logging to an existing bucket. Null disables access logging.
+      additionalProperties: false
+      required: [target_bucket]
+      properties:
+        target_bucket:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+        target_prefix:
+          type: string
       x-iacp-group: Logging
     tags:
       type: object

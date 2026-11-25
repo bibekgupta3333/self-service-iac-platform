@@ -89,7 +89,7 @@ run "secure_defaults" {
 
   assert {
     condition     = length(aws_s3_bucket_logging.this) == 0
-    error_message = "Access logging must be off when access_log_bucket is null."
+    error_message = "Access logging must be off when access_logging is null."
   }
 
   assert {

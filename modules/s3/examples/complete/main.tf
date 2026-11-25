@@ -22,7 +22,9 @@ module "bucket" {
   noncurrent_version_expiration_days = 30
   transition_to_ia_days              = 90
   force_destroy                      = true
-  access_log_bucket                  = module.access_logs.id
+  access_logging = {
+    target_bucket = module.access_logs.id
+  }
 
   tags = {
     "cost-center" = "cc-1234"

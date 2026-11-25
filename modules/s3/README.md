@@ -41,11 +41,11 @@ The module declares no provider. The calling root configures `provider "aws"`.
 | `stack` | Owning stack name, used for the `iacp:stack` tag. Injected by the platform. | `string` | n/a | yes |
 | `tags` | Additional tags. Keys starting with `iacp:` are reserved. At most 30. | `map(string)` | `{}` | no |
 | `versioning_enabled` | Keep object versions. Always enabled in production. | `bool` | `true` | no |
-| `kms_key_arn` | Existing KMS key ARN. If null, a dedicated key is created. Aliases are not accepted. | `string` | `null` | no |
+| `kms_key_arn` | Existing KMS key ARN. If null, a dedicated key is created. Aliases are not accepted. Must be known at plan time (for example an output of another stack). | `string` | `null` | no |
 | `noncurrent_version_expiration_days` | Days after which noncurrent versions expire (1-3650). | `number` | `90` | no |
 | `transition_to_ia_days` | Days after which current objects move to STANDARD_IA (>= 30). Null disables. | `number` | `null` | no |
 | `force_destroy` | Allow destroy while objects exist. Not allowed in production. | `bool` | `false` | no |
-| `access_log_bucket` | Existing bucket for server access logs. Null disables access logging. The target bucket must allow log delivery. | `string` | `null` | no |
+| `access_logging` | Server access logging: `{ target_bucket = string, target_prefix = optional(string) }`. The prefix defaults to `s3/<bucket name>/`. Null disables logging. The target bucket must allow log delivery. | `object` | `null` | no |
 
 ## Outputs
 

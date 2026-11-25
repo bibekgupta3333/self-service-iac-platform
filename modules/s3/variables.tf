@@ -108,13 +108,16 @@ variable "force_destroy" {
   }
 }
 
-variable "access_log_bucket" {
-  description = "Name of an existing bucket that receives server access logs. Null disables access logging."
-  type        = string
-  default     = null
+variable "access_logging" {
+  description = "Server access logging. target_bucket is an existing bucket that accepts log delivery; target_prefix defaults to s3/<bucket name>/. Null disables access logging. An object (not a plain string) so the target bucket may be another resource's output that is unknown until apply."
+  type = object({
+    target_bucket = string
+    target_prefix = optional(string)
+  })
+  default = null
 
   validation {
-    condition     = var.access_log_bucket == null || can(regex("^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$", var.access_log_bucket))
-    error_message = "access_log_bucket must be a valid S3 bucket name."
+    condition     = var.access_logging == null || can(regex("^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$", var.access_logging.target_bucket))
+    error_message = "access_logging.target_bucket must be a valid S3 bucket name."
   }
 }
