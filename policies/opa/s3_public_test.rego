@@ -49,6 +49,23 @@ test_s3_two_bucket_probe_only_unlinked_bucket_denied if {
 	])} with input as inp
 }
 
+test_unchanged_bucket_with_pab_weakened_denied if {
+	noop_bucket := t.with_actions(bucket, ["no-op"])
+	weakened := t.with_actions(pab({"block_public_policy": false}), ["update"])
+	some m in s3.deny with input as t.plan([noop_bucket, weakened])
+	startswith(m, "[iacp.s3.no_public] module.data.aws_s3_bucket.this:")
+}
+
+test_unchanged_bucket_with_pab_deleted_denied if {
+	noop_bucket := t.with_actions(bucket, ["no-op"])
+	count(s3.deny) == 1 with input as t.plan([noop_bucket, t.with_actions(pab({}), ["delete"])])
+}
+
+test_unchanged_bucket_and_pab_allowed if {
+	noop_bucket := t.with_actions(bucket, ["no-op"])
+	count(s3.deny) == 0 with input as t.plan([noop_bucket, t.with_actions(pab({}), ["no-op"])])
+}
+
 test_pab_exception_honoured if {
 	ctx := {"now": "2026-01-01T00:00:00Z", "exceptions": [{
 		"rule_id": "iacp.s3.no_public",

@@ -31,7 +31,8 @@ bucket_has_kms(b) if {
 }
 
 deny contains m if {
-	some b in f.changed_of_type("aws_s3_bucket")
+	# Every bucket that will exist, so disabling a control on an unchanged bucket is caught.
+	some b in f.present_of_type("aws_s3_bucket")
 	not bucket_has_kms(b)
 	not f.exempt("iacp.encryption.s3_kms", b.address)
 	m := f.msg(

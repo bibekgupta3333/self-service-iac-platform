@@ -66,6 +66,25 @@ test_s3_two_bucket_probe_only_unlinked_bucket_denied if {
 	contains(m, "aws_s3_bucket.b:")
 }
 
+test_s3_unchanged_bucket_with_sse_deleted_denied if {
+	noop_bucket := t.with_actions(bucket, ["no-op"])
+	count(enc.deny) == 1 with input as t.plan([noop_bucket, t.with_actions(sse("aws:kms"), ["delete"])])
+}
+
+test_s3_unchanged_bucket_with_sse_downgraded_denied if {
+	noop_bucket := t.with_actions(bucket, ["no-op"])
+	count(enc.deny) == 1 with input as t.plan([noop_bucket, t.with_actions(sse("AES256"), ["update"])])
+}
+
+test_s3_unchanged_bucket_and_sse_allowed if {
+	noop_bucket := t.with_actions(bucket, ["no-op"])
+	count(enc.deny) == 0 with input as t.plan([noop_bucket, t.with_actions(sse("aws:kms"), ["no-op"])])
+}
+
+test_s3_deleted_bucket_ignored if {
+	count(enc.deny) == 0 with input as t.plan([t.with_actions(bucket, ["delete"])])
+}
+
 test_s3_inline_kms_allowed if {
 	b := t.rc("aws_s3_bucket", "legacy", {"server_side_encryption_configuration": [{"rule": [{"apply_server_side_encryption_by_default": [{"sse_algorithm": "aws:kms"}]}]}]})
 	count(enc.deny) == 0 with input as t.plan([b])
