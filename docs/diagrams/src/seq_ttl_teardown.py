@@ -14,7 +14,7 @@ def build() -> Sequence:
     s = Sequence("TTL teardown: ephemeral stack expiry",
                  subtitle="Destroy goes through the same PR + apply pipeline as any other change")
     s.participant("sched", "EventBridge\nScheduler", "aws")
-    s.participant("worker", "Foundry\nWorker")
+    s.participant("worker", "Platform\nWorker")
     s.participant("db", "PostgreSQL", "data")
     s.participant("owner", "Stack owner", "actor")
     s.participant("gh", "GitHub App /\nRepository", "github")
@@ -40,7 +40,7 @@ def build() -> Sequence:
            span=("gh", "gha"))
     s.msg("worker", "gh", "approve + merge destroy PR")
     s.msg("gh", "gha", "apply.yml (destroy) on merge")
-    s.msg("gha", "aws", "terraform destroy (foundry-apply role)")
+    s.msg("gha", "aws", "terraform destroy (iacp-apply role)")
     s.ret("aws", "gha", "resources deleted")
     s.msg("gha", "worker", "POST result=success (via API)")
     s.msg("worker", "db", "stack -> destroyed; request -> applied; release lock")

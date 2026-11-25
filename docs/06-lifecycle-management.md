@@ -1,6 +1,6 @@
 # 06 — Lifecycle Management
 
-> Purpose: describe how Foundry manages a stack after it is first provisioned — upgrades, state, locking, drift, recovery, expiry, dependencies, audit, access control and budgets — with the data each feature touches and the operator runbooks.
+> Purpose: describe how the platform manages a stack after it is first provisioned — upgrades, state, locking, drift, recovery, expiry, dependencies, audit, access control and budgets — with the data each feature touches and the operator runbooks.
 
 Related: [03-data-model-and-api.md](03-data-model-and-api.md) · [04-module-registry.md](04-module-registry.md) · [05-automation-pipeline.md](05-automation-pipeline.md) · [07-security-and-policy.md](07-security-and-policy.md) · [ADR-0004](adr/0004-s3-native-locking-plus-platform-lock.md)
 
@@ -112,14 +112,14 @@ Where a migration cannot be expressed with `moved` (e.g. a resource moves betwee
 
 | Property | Value |
 |---|---|
-| Bucket | `foundry-tfstate-<platform-account-id>` |
+| Bucket | `iacp-tfstate-<platform-account-id>` |
 | Key | `<env>/<team>/<stack>/terraform.tfstate` |
-| Encryption | SSE-KMS with CMK `alias/foundry-tfstate`; bucket key enabled |
+| Encryption | SSE-KMS with CMK `alias/iacp-tfstate`; bucket key enabled |
 | Versioning | Enabled; noncurrent versions retained 90 days, then transitioned to Glacier IR, expired after 400 days |
 | Access | Public access blocked, TLS-only bucket policy, Object Ownership enforced |
-| Who can read | `foundry-plan` roles: `s3:GetObject` on `<env>/*` of their environment only |
-| Who can write | `foundry-apply` roles: `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject` on `<env>/*` (lockfiles) |
-| Replication | Cross-region replication to `foundry-tfstate-replica-<acct>` (DR) |
+| Who can read | `iacp-plan` roles: `s3:GetObject` on `<env>/*` of their environment only |
+| Who can write | `iacp-apply` roles: `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject` on `<env>/*` (lockfiles) |
+| Replication | Cross-region replication to `iacp-tfstate-replica-<acct>` (DR) |
 | Backup | AWS Backup daily for the bucket (point-in-time restore) |
 
 Generated `backend.tf`:
@@ -127,17 +127,17 @@ Generated `backend.tf`:
 ```hcl
 terraform {
   backend "s3" {
-    bucket       = "foundry-tfstate-111111111111"
+    bucket       = "iacp-tfstate-111111111111"
     key          = "development/payments/orders-store/terraform.tfstate"
     region       = "us-east-1"
     encrypt      = true
-    kms_key_id   = "arn:aws:kms:us-east-1:111111111111:alias/foundry-tfstate"
+    kms_key_id   = "arn:aws:kms:us-east-1:111111111111:alias/iacp-tfstate"
     use_lockfile = true
   }
 }
 ```
 
-The backend has no `role_arn`: the job's OIDC session for the workload account's `foundry-plan`/`foundry-apply` role is granted cross-account access to its environment prefix by the state bucket policy and the CMK key policy.
+The backend has no `role_arn`: the job's OIDC session for the workload account's `iacp-plan`/`iacp-apply` role is granted cross-account access to its environment prefix by the state bucket policy and the CMK key policy.
 
 **State and the database.** The database never stores state. After each apply, `apply.yml` reports non-sensitive outputs and the API records `stack_resources.outputs` plus the S3 `VersionId` of the new state object (`pipeline_runs.state_version_id`) — this is the bookmark used by rollback (§5).
 
@@ -155,8 +155,8 @@ State edits are the highest-risk operation on the platform and are never done fr
 
 | Rule | Detail |
 |---|---|
-| Who | Platform team members in the `foundry-breakglass` GitHub team; **two-person rule** (requester + approver from `@acme/sre`) |
-| How | Only via the `state-surgery` workflow (`workflow_dispatch` on a protected `breakglass` GitHub Environment with required reviewers). It assumes `foundry-breakglass-<env>` (session tagged with the requester) |
+| Who | Platform team members in the `iacp-breakglass` GitHub team; **two-person rule** (requester + approver from `@acme/sre`) |
+| How | Only via the `state-surgery` workflow (`workflow_dispatch` on a protected `breakglass` GitHub Environment with required reviewers). It assumes `iacp-breakglass-<env>` (session tagged with the requester) |
 | Allowed commands | `terraform state list`, `state show`, `state mv`, `state rm`, `import` (via `import` blocks preferred), `state pull` (read-only, artifact encrypted) |
 | Forbidden | `state push` of hand-edited JSON; `force-unlock` outside the stale-lock runbook; any `apply` from this workflow |
 | Pre-step | Workflow records current state `VersionId` and acquires the platform lock (`kind=breakglass`) |
@@ -209,7 +209,7 @@ PR plans run with `-lock=false` (read-only) and drift checks too; only `apply.ym
 
 **Runbook — stale Terraform lock.**
 1. Confirm no `apply` job for the stack is running (`gh run list --workflow apply.yml`) and the platform lock shows `apply_interrupted`.
-2. Read the lock: `aws s3 cp s3://foundry-tfstate-<acct>/<key>.tflock -` and note the lock `ID` and `Who`.
+2. Read the lock: `aws s3 cp s3://iacp-tfstate-<acct>/<key>.tflock -` and note the lock `ID` and `Who`.
 3. Trigger `state-surgery` with command `force-unlock <ID>` (the only sanctioned use of `force-unlock`; requires break-glass approval).
 4. Retry the request from the portal ("Retry apply"), which re-plans: if the interrupted apply partially succeeded, the plan shows the remainder.
 
@@ -219,12 +219,12 @@ PR plans run with `-lock=false` (read-only) and drift checks too; only `apply.ym
 
 ![Drift detection sequence](diagrams/images/seq-drift-detection.png)
 
-**Purpose.** Detect changes made outside Foundry (console edits, other automation) and make them visible and actionable.
+**Purpose.** Detect changes made outside the platform (console edits, other automation) and make them visible and actionable.
 
 **Design.**
 
 1. EventBridge Scheduler triggers the worker nightly; the worker shards active stacks (≤ 256 per dispatch) and calls `workflow_dispatch` on `drift.yml` via the GitHub App. A cron in `drift.yml` is the fallback.
-2. Nightly at 02:00 UTC, per stack, `terraform plan -refresh-only -lock=false -detailed-exitcode` with `foundry-plan`:
+2. Nightly at 02:00 UTC, per stack, `terraform plan -refresh-only -lock=false -detailed-exitcode` with `iacp-plan`:
    - exit `0` → no drift; `stacks.last_drift_check_at` updated.
    - exit `2` → drift; `resource_drift` summarised into `drift.json`.
    - exit `1` → error; recorded as `drift_check_failed` (not drift).
@@ -273,7 +273,7 @@ High-severity drift in production pages the on-call and auto-opens a `reconcile`
 | Transient / throttling | `ThrottlingException`, `RequestLimitExceeded`, 5xx, `i/o timeout`, runner lost | At most 2 retries with exponential backoff (2 min, then 10 min) via `workflow_dispatch apply.yml reason=retry`; the retry re-plans and requires hash match against the original approval only if no resources were changed, otherwise re-approval | None unless retries exhausted |
 | Eventual consistency | `InvalidParameterValueException: role cannot be assumed`, `NoSuchEntity` right after create | Treated as transient (counts toward the 2-retry limit); first retry after 60 s | None |
 | Quota / capacity | `LimitExceededException`, `InsufficientInstanceCapacity` | None; stack `failed`, team + platform notified | Request quota increase, then "Retry apply" |
-| Permission denied | `AccessDenied` from `foundry-apply` / boundary | None; alert platform team (policy gap or intended block) | Fix role/boundary (platform PR) or change request |
+| Permission denied | `AccessDenied` from `iacp-apply` / boundary | None; alert platform team (policy gap or intended block) | Fix role/boundary (platform PR) or change request |
 | Validation / config error | `InvalidParameterCombination`, name conflicts, `AlreadyExists` | None | Submit `update` request fixing inputs; or `import` if resource pre-exists |
 | Partial apply with healthy remainder | Some resources created, later one failed | None | "Retry apply" (re-plan converges) or "Rollback" |
 | Harmful but successful change | Apply succeeded, service broken | None | "Rollback" (revert PR) — maintainer approval in prod |
@@ -300,26 +300,26 @@ High-severity drift in production pages the on-call and auto-opens a `reconcile`
 
 **Design.**
 
-- A stack is ephemeral when created with `ttl` (e.g. `72h`, max `30d`); only allowed in `development` and `staging`. `stacks.expires_at` and `foundry.stack.json.expires_at` are set; resources get tag `foundry:expires-at`.
-- On create/extend, the worker upserts two EventBridge Scheduler one-time schedules in group `foundry-ttl`:
+- A stack is ephemeral when created with `ttl` (e.g. `72h`, max `30d`); only allowed in `development` and `staging`. `stacks.expires_at` and `iacp.stack.json.expires_at` are set; resources get tag `iacp:expires-at`.
+- On create/extend, the worker upserts two EventBridge Scheduler one-time schedules in group `iacp-ttl`:
   - `ttl-warn-<stack_id>` at `expires_at - 24h` → worker sends warning (email/Slack/portal banner) with "Extend" link.
   - `ttl-expire-<stack_id>` at `expires_at` → worker opens a `destroy` request (`requested_by = system:ttl-reaper`).
 - The destroy request follows the normal path: PR sets `desired_state: "absent"`, `pr-validate.yml` runs `plan -destroy`, the platform bot auto-approves it in non-production environments only (policy `ttl_auto_approve.rego` allows auto-approval only when `requested_by = system:ttl-reaper` and env ≠ production), `apply.yml` destroys, then a cleanup PR removes the directory.
 - `ttl-reaper.yml` hourly backstop reconciles any expired stack the scheduler missed ([05-automation-pipeline.md](05-automation-pipeline.md#45-ttl-reaperyml)).
 
-**Extend:** `PATCH /v1/stacks/{id}` (developer+) updates `expires_at` (max total lifetime 30 days unless admin), rewrites `foundry.stack.json` via a small PR (auto-merged; no infra change, plan is empty) and reschedules both schedules.
+**Extend:** `PATCH /v1/stacks/{id}` (developer+) updates `expires_at` (max total lifetime 30 days unless admin), rewrites `iacp.stack.json` via a small PR (auto-merged; no infra change, plan is empty) and reschedules both schedules.
 
 **Data touched.** `stacks.expires_at`, `stacks.ttl_extended_count`, EventBridge schedules, `requests (kind='destroy')`, `audit_events` (`ttl.warned`, `ttl.extended`, `ttl.expired`).
 
 **Edge cases.**
 - *Destroy blocked by non-empty bucket*: ephemeral stacks set `force_destroy = true` on S3 (permitted outside production). Deletion-protected RDS in ephemeral stacks is disallowed by policy.
 - *Other stacks depend on it*: TTL destroy is blocked; owners of dependents are notified and the TTL warning includes the dependent list (see §7).
-- *Destroy fails*: stack `failed`; transient errors follow the normal 2-retry policy (§5), the hourly reaper re-checks once, then pages the owning team; resources keep `foundry:expires-at` so a weekly cost report lists them.
+- *Destroy fails*: stack `failed`; transient errors follow the normal 2-retry policy (§5), the hourly reaper re-checks once, then pages the owning team; resources keep `iacp:expires-at` so a weekly cost report lists them.
 - *Stack in-flight request at expiry*: destroy request is queued behind it via the platform lock.
 
 **Runbook — orphaned ephemeral resources.**
-1. Run the weekly orphan report (Resource Groups Tagging API: `foundry:expires-at` < now − 48h).
-2. For each, find the stack by `foundry:stack-id` tag; if the stack is `destroyed`, open a platform ticket and remove manually with break-glass, recording resource ARNs in the audit note.
+1. Run the weekly orphan report (Resource Groups Tagging API: `iacp:expires-at` < now − 48h).
+2. For each, find the stack by `iacp:stack-id` tag; if the stack is `destroyed`, open a platform ticket and remove manually with break-glass, recording resource ARNs in the audit note.
 
 ---
 
@@ -331,7 +331,7 @@ High-severity drift in production pages the on-call and auto-opens a `reconcile`
 
 - Within a stack, modules reference each other directly (`module.queue.arn`).
 - Across stacks, the user selects an upstream **wireable output** in the portal. The API records an edge in `stack_dependencies (stack_id, depends_on_stack_id, output_bindings)`, where `output_bindings` maps upstream outputs to downstream inputs.
-- The generator writes upstream values as literals into `foundry.deps.auto.tfvars.json` of the downstream stack, and `depends_on` into `foundry.stack.json`:
+- The generator writes upstream values as literals into `iacp.deps.auto.tfvars.json` of the downstream stack, and `depends_on` into `iacp.stack.json`:
 
 ```json
 {
@@ -403,7 +403,7 @@ CREATE TABLE audit_events (
   prev_hash   BYTEA NOT NULL,
   hash        BYTEA NOT NULL          -- sha256(prev_hash || canonical_json(row without hash))
 );
-REVOKE UPDATE, DELETE ON audit_events FROM foundry_app;
+REVOKE UPDATE, DELETE ON audit_events FROM iacp_app;
 ```
 
 A single writer (`audit.Writer`, serialised with `pg_advisory_xact_lock`) computes the chain inside the same transaction as the business change. A daily job verifies the chain and anchors the latest hash to the log-archive bucket; a break raises a P1 security alert.
@@ -412,7 +412,7 @@ A single writer (`audit.Writer`, serialised with `pg_advisory_xact_lock`) comput
 
 **Edge cases.** Webhook replays are deduplicated by `X-GitHub-Delivery` before auditing; clock skew is irrelevant to ordering (ordered by `id`); PII is limited to GitHub login and email.
 
-**Runbook — "who changed this resource?"** Search portal audit by ARN → resolves `foundry:stack-id` tag → stack timeline (requests, approvers, runs) → CloudTrail query filtered on session name `apply-<run_id>-*`. If CloudTrail shows a principal other than `foundry-apply`, it is out-of-band drift (§4).
+**Runbook — "who changed this resource?"** Search portal audit by ARN → resolves `iacp:stack-id` tag → stack timeline (requests, approvers, runs) → CloudTrail query filtered on session name `apply-<run_id>-*`. If CloudTrail shows a principal other than `iacp-apply`, it is out-of-band drift (§4).
 
 ---
 
@@ -422,12 +422,12 @@ A single writer (`audit.Writer`, serialised with `pg_advisory_xact_lock`) comput
 
 **Design.** Identity comes from GitHub OAuth; roles derive from GitHub team membership, synced every 15 minutes and on `membership`/`team` webhooks:
 
-| GitHub team convention | Foundry role (per team) |
+| GitHub team convention | The platform role (per team) |
 |---|---|
-| `foundry-<team>-viewers` | `viewer` |
+| `iacp-<team>-viewers` | `viewer` |
 | `<team>` (any member) | `developer` |
 | `<team>-maintainers` | `maintainer` |
-| `foundry-admins` | `admin` (global) |
+| `iacp-admins` | `admin` (global) |
 
 | Action | viewer | developer | maintainer | admin |
 |---|---|---|---|---|
@@ -461,7 +461,7 @@ Enforcement points: API middleware (`authz.Require(team, env, action)`), CODEOWN
 - In `pr-validate.yml`, Infracost produces the monthly delta for the plan; the API supplies `current_committed_usd` (sum of `cost_estimates` for the team's active stacks) via `GET /v1/internal/budget-context`. OPA `budget.rego`:
 
 ```rego
-package foundry.budget
+package iacp.budget
 
 import rego.v1
 
@@ -482,7 +482,7 @@ warn contains msg if {
 ```
 
 - **Override**: an admin approves in the portal (`POST /v1/requests/{id}/budget-override` with reason, max delta and expiry); the API records the approver (`override_by`) and the override details, sets `budget_override_approved` in the OPA context and re-runs checks (re-run of the `pr-validate` workflow via the App).
-- **Actuals**: the worker pulls AWS Cost Explorer daily grouped by `foundry:team` tag, stores actuals per stack, and alerts at the budget's `alert_thresholds`; a mismatch > 25% between Infracost estimate and actuals for a stack is surfaced on the dashboard (usage-based costs).
+- **Actuals**: the worker pulls AWS Cost Explorer daily grouped by `iacp:team` tag, stores actuals per stack, and alerts at the budget's `alert_thresholds`; a mismatch > 25% between Infracost estimate and actuals for a stack is surfaced on the dashboard (usage-based costs).
 
 **Data touched.** `budgets` (incl. `override_by`), `budget_overrides`, `cost_estimates`, CUR/Cost Explorer actuals, `audit_events (budget.override.granted)`.
 

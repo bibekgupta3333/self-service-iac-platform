@@ -11,13 +11,13 @@ The backend must create branches and commits, open and label PRs, dispatch workf
 
 ## Decision
 
-Use a dedicated **GitHub App** ("Foundry") installed on the `foundry` repository only:
+Use a dedicated **GitHub App** ("The platform") installed on the `iacp` repository only:
 
 - Permissions: Contents (read/write), Pull requests (read/write), Actions (read/write, for `workflow_dispatch`), Checks (read), Metadata (read), Members (read, for team sync).
 - Subscribed events: `pull_request`, `pull_request_review`, `workflow_run`, `check_run`, `push`, `membership`, `team`.
 - The backend authenticates with the App private key (in AWS Secrets Manager, KMS-encrypted) to mint 1-hour installation tokens.
 - Webhooks are verified with HMAC (`X-Hub-Signature-256`) and deduplicated by `X-GitHub-Delivery`.
-- Commits made via the Git Data API are signed by GitHub and attributed to the App, with a `Foundry-Request:` trailer and co-author line for the requesting user.
+- Commits made via the Git Data API are signed by GitHub and attributed to the App, with a `the platform-Request:` trailer and co-author line for the requesting user.
 - User identity for the portal uses GitHub OAuth separately; user tokens are never used to write to the repository.
 
 ## Consequences

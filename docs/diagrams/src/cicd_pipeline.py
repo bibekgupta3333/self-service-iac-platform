@@ -24,11 +24,11 @@ TOOL = "#FFFFFF"
 
 def build():
     graph = dict(GRAPH, ranksep="0.6", nodesep="0.35", splines="ortho", newrank="true", forcelabels="true")
-    with Diagram("Foundry: CI/CD pipeline (pr-validate.yml and apply.yml)",
+    with Diagram("Self-Service IaC Platform: CI/CD pipeline (pr-validate.yml and apply.yml)",
                  filename=out("cicd-pipeline"), show=False, direction="LR",
                  graph_attr=graph, node_attr=NODE, edge_attr=dict(EDGE, penwidth="1.4"),
                  outformat="png"):
-        with Cluster("pr-validate.yml  (on pull_request; foundry-plan role, read-only)",
+        with Cluster("pr-validate.yml  (on pull_request; iacp-plan role, read-only)",
                      graph_attr=cluster(PURPLE)):
             fmt = step("1. terraform fmt\n-check")
             val = step("2. terraform\nvalidate")
@@ -44,7 +44,7 @@ def build():
             gate = step("Required checks green\n+ CODEOWNERS approval\n"
                         "(production: GitHub\nEnvironment approver)\n-> merge to main", GATE, "#B26B00")
 
-        with Cluster("apply.yml  (on push to main; changed stacks only; foundry-apply role)",
+        with Cluster("apply.yml  (on push to main; changed stacks only; iacp-apply role)",
                      graph_attr=cluster(GREEN)):
             lock = step("a. acquire stack lock\n(API, Postgres row)")
             replan = step("b. re-plan +\nverify plan hash")
@@ -55,7 +55,7 @@ def build():
 
         dev = User("Developer\n(portal request)")
         pr = Github("Pull request\nopened / updated")
-        api = Go("Foundry API\n(callbacks with GitHub\nOIDC JWT: status, plan,\ncost, outputs, audit)")
+        api = Go("Platform API\n(callbacks with GitHub\nOIDC JWT: status, plan,\ncost, outputs, audit)")
         dev >> pr >> fmt
         # second row: merge gate + apply, laid out under the PR row
         pr >> Edge(style="invis") >> gate

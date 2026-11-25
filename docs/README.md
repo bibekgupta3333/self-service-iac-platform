@@ -1,6 +1,6 @@
-# Foundry — Design Documentation
+# Self-Service IaC Platform — Design Documentation
 
-Foundry is a self-service Infrastructure-as-Code platform: a **package manager for cloud infrastructure** combined with a **secure, PR-driven deployment and lifecycle engine**. Developers pick versioned Terraform modules in a portal, the platform opens a reviewed pull request, and GitHub Actions validates, scans, policy-checks, costs, plans, and applies the change. Every change can be audited.
+The Self-Service IaC Platform is a self-service Infrastructure-as-Code platform: a **package manager for cloud infrastructure** combined with a **secure, PR-driven deployment and lifecycle engine**. Developers pick versioned Terraform modules in a portal, the platform opens a reviewed pull request, and GitHub Actions validates, scans, policy-checks, costs, plans, and applies the change. Every change can be audited.
 
 ## Reading order
 

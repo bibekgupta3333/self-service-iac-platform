@@ -18,7 +18,7 @@ Requirements that drive the decision:
 
 ## Decision
 
-Every change to infrastructure is expressed as a **pull request** against the `foundry` monorepo. The platform generates Terraform root modules under `environments/<env>/<team>/<stack>/`, opens a PR via the GitHub App, and the pipeline validates and plans on the PR. Merge to `main` is the approval; `main` is the desired state; `apply.yml` reconciles AWS to `main`.
+Every change to infrastructure is expressed as a **pull request** against the `iacp` monorepo. The platform generates Terraform root modules under `environments/<env>/<team>/<stack>/`, opens a PR via the GitHub App, and the pipeline validates and plans on the PR. Merge to `main` is the approval; `main` is the desired state; `apply.yml` reconciles AWS to `main`.
 
 The portal and API are a request/orchestration layer over Git, not an alternative path to AWS.
 

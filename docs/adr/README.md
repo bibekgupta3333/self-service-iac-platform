@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-> Purpose: index of significant, hard-to-reverse decisions for Foundry, in MADR-lite format (Context / Decision / Consequences / Alternatives).
+> Purpose: index of significant, hard-to-reverse decisions for the platform, in MADR-lite format (Context / Decision / Consequences / Alternatives).
 
 | ADR | Title | Status |
 |---|---|---|

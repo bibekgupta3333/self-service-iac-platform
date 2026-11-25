@@ -12,14 +12,14 @@ OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "images",
 
 def build() -> Sequence:
     s = Sequence("Drift detection: nightly plan -detailed-exitcode",
-                 subtitle="Read-only: drift.yml uses the foundry-plan role and never applies")
+                 subtitle="Read-only: drift.yml uses the iacp-plan role and never applies")
     s.participant("sched", "EventBridge\nScheduler", "aws")
-    s.participant("worker", "Foundry\nWorker")
+    s.participant("worker", "Platform\nWorker")
     s.participant("db", "PostgreSQL", "data")
     s.participant("gh", "GitHub App", "github")
     s.participant("gha", "GitHub Actions\ndrift.yml (matrix)", "github")
-    s.participant("aws", "Workload account\n(foundry-plan)", "aws")
-    s.participant("api", "Foundry API")
+    s.participant("aws", "Workload account\n(iacp-plan)", "aws")
+    s.participant("api", "Platform API")
     s.participant("owner", "Stack owners\n(team)", "actor")
 
     s.msg("sched", "worker", "cron 02:00 UTC -> SQS drift-scan message")
@@ -28,7 +28,7 @@ def build() -> Sequence:
     s.msg("worker", "gh", "workflow_dispatch drift.yml {stacks matrix}")
     s.msg("gh", "gha", "start matrix jobs (max-parallel per account)")
     s.frame("loop", "for each stack in matrix")
-    s.msg("gha", "aws", "AssumeRoleWithWebIdentity (foundry-plan)")
+    s.msg("gha", "aws", "AssumeRoleWithWebIdentity (iacp-plan)")
     s.self_msg("gha", "terraform plan -detailed-exitcode -lock=false")
     s.frame("alt", "exit 0: no changes")
     s.msg("gha", "api", "POST /v1/drift {stack, status=clean}")

@@ -7,13 +7,13 @@
 
 ## Context
 
-We need guardrails that block insecure or non-compliant infrastructure before it is applied, covering both generic cloud best practices (encryption, public exposure, logging) and Foundry-specific rules (approved module sources, exact version pins, mandatory tags, environment restrictions, budgets, yanked versions). Static HCL scanning misses values that only resolve at plan time (computed defaults, module internals, variables); plan-based checks miss nothing that Terraform will do.
+We need guardrails that block insecure or non-compliant infrastructure before it is applied, covering both generic cloud best practices (encryption, public exposure, logging) and the platform-specific rules (approved module sources, exact version pins, mandatory tags, environment restrictions, budgets, yanked versions). Static HCL scanning misses values that only resolve at plan time (computed defaults, module internals, variables); plan-based checks miss nothing that Terraform will do.
 
 ## Decision
 
 Use two complementary layers in `pr-validate.yml`:
 
-1. **Checkov** (static, on the stack directory with external modules downloaded) for broad, maintained best-practice coverage, plus custom checks in `policies/checkov/` (`FOUNDRY_*`). Failures at HIGH/CRITICAL or any custom check block merge.
+1. **Checkov** (static, on the stack directory with external modules downloaded) for broad, maintained best-practice coverage, plus custom checks in `policies/checkov/` (`IACP_*`). Failures at HIGH/CRITICAL or any custom check block merge.
 2. **OPA via conftest** on `terraform show -json` plan output for organisation-specific, context-aware rules. Policies live in `policies/opa/`, receive platform context (team, role, budget, module catalog status) as data, and are unit-tested with `opa test`.
 
 Infracost output is evaluated by the same OPA engine for budget rules.

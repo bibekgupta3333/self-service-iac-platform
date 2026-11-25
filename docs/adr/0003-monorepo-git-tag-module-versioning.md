@@ -11,9 +11,9 @@ Modules must be versioned so stacks can pin exact versions and upgrade deliberat
 
 ## Decision
 
-- Keep modules, policies, generated environments, tests, backend and portal in **one repository** (`foundry`).
+- Keep modules, policies, generated environments, tests, backend and portal in **one repository** (`iacp`).
 - Version each module independently with **SemVer git tags** `modules/<name>/vX.Y.Z`, created only by `module-release.yml` and protected by a tag ruleset.
-- Consumers reference `git::https://github.com/<org>/foundry.git//modules/<name>?ref=modules/<name>/vX.Y.Z`.
+- Consumers reference `git::https://github.com/<org>/self-service-iac-platform.git//modules/<name>?ref=modules/<name>/vX.Y.Z`.
 - Each module ships a `module.yaml` manifest; on release it is indexed into the Postgres catalog, which is a derived view (Git remains the source of truth).
 
 ## Consequences

@@ -1,4 +1,4 @@
-# Foundry — Project Overview
+# Self-Service IaC Platform — Project Overview
 
 **A package manager for cloud infrastructure, plus a secure deployment and lifecycle platform.**
 
@@ -6,7 +6,7 @@
 Teams request AWS infrastructure through tickets or hand-written Terraform. The result is slow provisioning, inconsistent environments, security drift, and no clear record of who changed what.
 
 ## The solution
-Developers choose a versioned infrastructure package (S3, SQS, Lambda, …) in a portal and fill in typed inputs. Foundry turns that into a reviewed pull request. Automated checks run on the PR. After merge, the change is applied and tracked for its whole life.
+Developers choose a versioned infrastructure package (S3, SQS, Lambda, …) in a portal and fill in typed inputs. The platform turns that into a reviewed pull request. Automated checks run on the PR. After merge, the change is applied and tracked for its whole life.
 
 ```
 Portal ──► Go API ──► generates Terraform ──► GitHub PR

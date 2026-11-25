@@ -3,7 +3,7 @@
 Guidelines for anyone changing this repo, whether a contributor or an automated coding agent. Read [OVERVIEW.md](OVERVIEW.md) first, then the relevant doc in [docs/](docs/README.md).
 
 ## Project in one line
-Foundry is a self-service IaC platform. Developers request versioned Terraform modules through a portal, the platform opens a PR, GitHub Actions validates, scans, plans, and applies the change, and the platform manages its lifecycle.
+The Self-Service IaC Platform is a self-service IaC platform. Developers request versioned Terraform modules through a portal, the platform opens a PR, GitHub Actions validates, scans, plans, and applies the change, and the platform manages its lifecycle.
 
 ## Repository layout
 ```
@@ -32,11 +32,11 @@ docs/           design docs, ADRs, diagrams (docs/diagrams/src → images/)
 If code and docs disagree, fix one of them in the same change. A significant design change needs a new ADR in `docs/adr/`.
 
 ## Hard rules
-1. **No static cloud credentials.** AWS access is GitHub OIDC only (`foundry-plan` / `foundry-apply`). Never commit keys, `.env` files, state, or plan files.
+1. **No static cloud credentials.** AWS access is GitHub OIDC only (`iacp-plan` / `iacp-apply`). Never commit keys, `.env` files, state, or plan files.
 2. **Terraform never runs in the backend.** The backend orchestrates; plans and applies run only in GitHub Actions.
 3. **Never `terraform apply` against real accounts from a laptop.** Use LocalStack (`tflocal`) locally.
 4. **Pin everything.** Use exact module refs (`?ref=modules/<name>/vX.Y.Z`), never `main`. Pin providers in `versions.tf` and commit the lock file. Pin GitHub Actions by commit SHA.
-5. **Modules keep secure defaults:** encryption with KMS, public access blocked, least-privilege IAM, required tags (`foundry:team`, `foundry:environment`, `foundry:stack`, `foundry:managed-by`).
+5. **Modules keep secure defaults:** encryption with KMS, public access blocked, least-privilege IAM, required tags (`iacp:team`, `iacp:environment`, `iacp:stack`, `iacp:managed-by`).
 6. **Breaking module change means a major version bump** plus upgrade notes. Use `moved` blocks where possible.
 7. **`environments/` is generated** by `backend/internal/generator`. To change output, change the templates and update the golden files.
 8. **Audit log is append-only.** Never add UPDATE or DELETE paths for `audit_events`.

@@ -1,6 +1,6 @@
 # 03 — Data Model and API
 
-> Purpose: specify Foundry's PostgreSQL schema, the request and stack state machines, the REST API contract, and the Go package layout of `backend/`.
+> Purpose: specify the platform's PostgreSQL schema, the request and stack state machines, the REST API contract, and the Go package layout of `backend/`.
 
 ## Contents
 
@@ -24,7 +24,7 @@ Related: [01-system-architecture.md](01-system-architecture.md) · [04-module-re
 | Table | Purpose | Key relationships |
 |---|---|---|
 | `teams` | Tenant unit; mirrors a GitHub team. | has many memberships, stacks, budgets |
-| `users` | GitHub-authenticated humans (and the `foundry-bot` system user). | memberships |
+| `users` | GitHub-authenticated humans (and the `iacp-bot` system user). | memberships |
 | `memberships` | user × team × role (`viewer`/`developer`/`maintainer`/`admin`). | |
 | `modules` | Catalog package (e.g. `s3`). | has many module_versions |
 | `module_versions` | Immutable released version with manifest, input schema, outputs, git tag/SHA. | referenced by stack_resources |
@@ -250,7 +250,7 @@ CREATE TABLE pipeline_runs (
     github_run_id      bigint      NOT NULL,
     github_run_attempt int         NOT NULL DEFAULT 1,
     github_job_id      bigint,
-    workflow_ref       text        NOT NULL,          -- acme/foundry/.github/workflows/pr-validate.yml@refs/pull/812/merge
+    workflow_ref       text        NOT NULL,          -- acme/self-service-iac-platform/.github/workflows/pr-validate.yml@refs/pull/812/merge
     head_sha           char(40)    NOT NULL,
     stages             jsonb       NOT NULL DEFAULT '[]'::jsonb,  -- [{"name":"checkov","status":"passed","duration_ms":8123}]
     log_url            text,
@@ -273,7 +273,7 @@ CREATE TABLE plan_summaries (
     resource_changes  jsonb       NOT NULL,      -- [{"address":"module.orders_queue.aws_sqs_queue.this","actions":["create"]}]
     policy_results    jsonb       NOT NULL,      -- {"opa":{"deny":[],"warn":[]},"checkov":{"failed":0,"passed":42},"tflint":{...}}
     policy_passed     boolean     NOT NULL,
-    plan_artifact_uri text        NOT NULL,      -- s3://foundry-plan-artifacts-111111111111/<run>/plan.json
+    plan_artifact_uri text        NOT NULL,      -- s3://iacp-plan-artifacts-111111111111/<run>/plan.json
     created_at        timestamptz NOT NULL DEFAULT now()
 );
 
@@ -333,7 +333,7 @@ CREATE TABLE budget_overrides (
 
 CREATE TABLE policy_exceptions (
     id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    rule_id      text        NOT NULL,                -- foundry.s3.no_public | CKV_AWS_18
+    rule_id      text        NOT NULL,                -- iacp.s3.no_public | CKV_AWS_18
     team_id      uuid        NOT NULL REFERENCES teams(id),
     stack_id     uuid        REFERENCES stacks(id),   -- NULL = team-wide (rare)
     resource_address text,                            -- optional narrowing
@@ -472,15 +472,15 @@ CREATE TRIGGER audit_events_no_truncate BEFORE TRUNCATE ON audit_events
     FOR EACH STATEMENT EXECUTE FUNCTION audit_events_immutable();
 
 -- Privileges: application role may only INSERT and SELECT.
-REVOKE ALL ON audit_events FROM foundry_app;
-GRANT INSERT, SELECT ON audit_events TO foundry_app;
+REVOKE ALL ON audit_events FROM iacp_app;
+GRANT INSERT, SELECT ON audit_events TO iacp_app;
 ```
 
 Notes:
 
 - `payload::text` of `jsonb` is canonical (keys sorted, whitespace normalised by Postgres), so the verifier can recompute hashes from exported rows.
-- **Verification job** (worker, nightly): streams `audit_events` in `seq` order, recomputes the chain, emits metric `Foundry/AuditChainValid` (alarm on 0).
-- **Anchoring:** at 00:15 UTC the worker writes `{seq, hash, occurred_at}` of the chain head plus an NDJSON export of the previous day to `s3://foundry-audit-anchor-111111111111/yyyy/mm/dd/` (Object Lock compliance, 7 y). Any later tampering with Postgres (even by a superuser disabling triggers) is detectable against the anchors.
+- **Verification job** (worker, nightly): streams `audit_events` in `seq` order, recomputes the chain, emits metric `the platform/AuditChainValid` (alarm on 0).
+- **Anchoring:** at 00:15 UTC the worker writes `{seq, hash, occurred_at}` of the chain head plus an NDJSON export of the previous day to `s3://iacp-audit-anchor-111111111111/yyyy/mm/dd/` (Object Lock compliance, 7 y). Any later tampering with Postgres (even by a superuser disabling triggers) is detectable against the anchors.
 - The single advisory lock serialises audit inserts (~ tens/sec sustained); measured headroom is ample for 500 requests/day. If needed, partition chains per team.
 
 ## 4. State machines
@@ -520,7 +520,7 @@ stateDiagram-v2
 | `validating` | callback `stage=summary, passed=true` | `plan_ready` | store plan summary + cost, PR comment |
 | `validating` | callback `passed=false` | `failed` | store findings; close PR with comment (configurable); release lock |
 | `plan_ready` | `pull_request_review` approved + required checks green | `approved` | `approved_plan_hash = plan_summaries.plan_hash`, audit |
-| `plan_ready` | TTL-expiry `destroy` request in **non-prod**, checks green | `approved` | `foundry-approver` machine user (member of `@acme/foundry-approvers`; GitHub Apps cannot be code owners) submits the approving review and the worker merges; production is never auto-approved; audit `request.auto_approved` |
+| `plan_ready` | TTL-expiry `destroy` request in **non-prod**, checks green | `approved` | `iacp-approver` machine user (member of `@acme/self-service-iac-platform-approvers`; GitHub Apps cannot be code owners) submits the approving review and the worker merges; production is never auto-approved; audit `request.auto_approved` |
 | `plan_ready`/`approved` | `pull_request.synchronize` | `validating` | clear approval & pinned hash |
 | `pr_open`/`plan_ready`/`approved` | `pull_request.closed` (unmerged) | `rejected` | release lock |
 | `approved` | `push` to main / `workflow_run` apply in_progress | `applying` | stack → `updating`/`provisioning`/`destroying` |
@@ -553,8 +553,8 @@ stateDiagram-v2
 
 ## 5. API conventions
 
-- Base URL `https://api.foundry.acme.internal/v1`. JSON only (`application/json; charset=utf-8`). OpenAPI 3.1 spec in `backend/api/openapi.yaml` is the source of truth; handlers and portal client are generated from it (`oapi-codegen`, `openapi-typescript`).
-- **Auth:** browser sessions use `foundry_session` HttpOnly, Secure, SameSite=Lax cookie holding a short-lived JWT (EdDSA, 15 min) + refresh cookie (8 h). CLI/automation uses `Authorization: Bearer <PAT-style token>` scoped to a team and role (stored hashed). Actions callbacks use `Authorization: Bearer <GitHub OIDC JWT>`. CSRF: double-submit token header `X-CSRF-Token` for cookie-authenticated mutations.
+- Base URL `https://api.iacp.acme.internal/v1`. JSON only (`application/json; charset=utf-8`). OpenAPI 3.1 spec in `backend/api/openapi.yaml` is the source of truth; handlers and portal client are generated from it (`oapi-codegen`, `openapi-typescript`).
+- **Auth:** browser sessions use `iacp_session` HttpOnly, Secure, SameSite=Lax cookie holding a short-lived JWT (EdDSA, 15 min) + refresh cookie (8 h). CLI/automation uses `Authorization: Bearer <PAT-style token>` scoped to a team and role (stored hashed). Actions callbacks use `Authorization: Bearer <GitHub OIDC JWT>`. CSRF: double-submit token header `X-CSRF-Token` for cookie-authenticated mutations.
 - **IDs:** UUIDs; requests also have a human-friendly `short_id`.
 - **Timestamps:** RFC 3339 UTC.
 - **Pagination:** cursor-based. `?limit=50` (max 200) `&cursor=<opaque>`. Response `{"data":[…], "next_cursor":"eyJzZXEiOjEyMzR9"|null}`. Cursor = base64 of the last sort key; stable under inserts.
@@ -617,7 +617,7 @@ RBAC column uses team roles (see [07-security-and-policy.md](07-security-and-pol
   "git_tag": "modules/sqs/v1.3.0",
   "git_sha": "9c1d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d",
   "status": "active",
-  "source": "git::https://github.com/acme/foundry.git//modules/sqs?ref=modules/sqs/v1.3.0",
+  "source": "git::https://github.com/acme/self-service-iac-platform.git//modules/sqs?ref=modules/sqs/v1.3.0",
   "tf_version_range": ">= 1.10, < 2.0",
   "aws_provider_range": "~> 5.80",
   "inputs_schema": {
@@ -725,7 +725,7 @@ Content-Type: application/json
 }
 ```
 
-If the change spans several dependent stacks, the backend splits it into **sequential requests ordered topologically**: the response carries a `chain` of request IDs, and each downstream request stays `draft` (`queued_behind` = its upstream) until the upstream is `applied`, so the downstream `foundry.deps.auto.tfvars.json` is rendered with fresh outputs. `apply.yml` refuses a push touching two dependent stacks.
+If the change spans several dependent stacks, the backend splits it into **sequential requests ordered topologically**: the response carries a `chain` of request IDs, and each downstream request stays `draft` (`queued_behind` = its upstream) until the upstream is `applied`, so the downstream `iacp.deps.auto.tfvars.json` is rendered with fresh outputs. `apply.yml` refuses a push touching two dependent stacks.
 
 `202 Accepted` (PR creation is asynchronous):
 
@@ -760,7 +760,7 @@ If the change spans several dependent stacks, the backend splits it into **seque
 
 The API validates existing inputs against the target version's schema, applies manifest-declared input renames (`migrations` in `module.yaml`), and rejects with `422 upgrade_requires_input_changes` listing fields if manual edits are needed. Major upgrades require `"acknowledge_breaking": true`.
 
-**Destroy** — `{"kind": "destroy", "stack_id": "…", "justification": "Feature retired", "confirm_stack_name": "order-events"}`. The generator writes a destroy marker (`foundry.stack.json` `"lifecycle": "destroy"`) and empties `main.tf` module blocks so the plan shows the destroys; production destroys require maintainer + `prevent_destroy`-protected resources need a prior update request to lift protection.
+**Destroy** — `{"kind": "destroy", "stack_id": "…", "justification": "Feature retired", "confirm_stack_name": "order-events"}`. The generator writes a destroy marker (`iacp.stack.json` `"lifecycle": "destroy"`) and empties `main.tf` module blocks so the plan shows the destroys; production destroys require maintainer + `prevent_destroy`-protected resources need a prior update request to lift protection.
 
 **Request detail** — `GET /v1/requests/{id}` (abridged)
 
@@ -771,11 +771,11 @@ The API validates existing inputs against the target version's schema, applies m
   "kind": "create",
   "status": "plan_ready",
   "stack": { "id": "b2c1f0a9-3e4d-4c5b-8a7f-1e2d3c4b5a69", "path": "environments/development/payments/order-events" },
-  "github": { "branch": "foundry/req-7k3p9x", "pr_number": 812, "pr_url": "https://github.com/acme/foundry/pull/812" },
+  "github": { "branch": "iacp/req-7k3p9x", "pr_number": 812, "pr_url": "https://github.com/acme/self-service-iac-platform/pull/812" },
   "plan": {
     "plan_hash": "3f9a1c0b7e2d4f6a8b0c1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6f708",
     "add": 11, "change": 0, "destroy": 0, "replace": 0,
-    "policy": { "passed": true, "deny": [], "warn": ["foundry.lambda.reserved_concurrency_recommended"] }
+    "policy": { "passed": true, "deny": [], "warn": ["iacp.lambda.reserved_concurrency_recommended"] }
   },
   "cost": { "currency": "USD", "monthly_before": 0.0, "monthly_after": 4.10, "monthly_delta": 4.10,
             "budget": { "limit": 2000.0, "committed": 1450.10, "remaining": 549.90, "decision": "allow" } },
@@ -855,7 +855,7 @@ The API validates existing inputs against the target version's schema, applies m
 
 ### 6.9 Pipeline runs (Actions callbacks)
 
-Called only by GitHub Actions jobs with `Authorization: Bearer <GitHub OIDC JWT>` (audience `https://api.foundry.acme.internal`). These are the only endpoints the execution plane uses to talk to the control plane.
+Called only by GitHub Actions jobs with `Authorization: Bearer <GitHub OIDC JWT>` (audience `https://api.iacp.acme.internal`). These are the only endpoints the execution plane uses to talk to the control plane.
 
 | Method | Path | Called by | Purpose |
 |---|---|---|---|
@@ -890,14 +890,14 @@ Verification order: JWKS signature → `iss == https://token.actions.githubuserc
   "plan": {
     "hash": "3f9a1c0b7e2d4f6a8b0c1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6f708",
     "counts": { "add": 11, "change": 0, "destroy": 0, "replace": 0 },
-    "artifact_uri": "s3://foundry-plan-artifacts-111111111111/11873399021/plan.json",
+    "artifact_uri": "s3://iacp-plan-artifacts-111111111111/11873399021/plan.json",
     "resource_changes": [
       { "address": "module.orders_queue.aws_sqs_queue.this", "actions": ["create"] },
       { "address": "module.orders_queue.aws_sqs_queue.dlq", "actions": ["create"] }
     ]
   },
   "policy": {
-    "opa": { "deny": [], "warn": ["foundry.lambda.reserved_concurrency_recommended"] },
+    "opa": { "deny": [], "warn": ["iacp.lambda.reserved_concurrency_recommended"] },
     "checkov": { "passed": 42, "failed": 0, "skipped": 1 },
     "tflint": { "errors": 0, "warnings": 0 }
   },
@@ -923,7 +923,7 @@ Subscribed events and handling:
 | `pull_request_review` | submitted, dismissed | approval → `approved` (if checks green); dismissed → back to `plan_ready` |
 | `workflow_run` | requested, in_progress, completed | create/update `pipeline_runs`; failed without callback → reconcile from logs/artifacts |
 | `check_run` | completed | required-check bookkeeping for status display |
-| `push` | (main) | detect hand edits to `environments/**` not originating from Foundry PRs → alert |
+| `push` | (main) | detect hand edits to `environments/**` not originating from the platform PRs → alert |
 | `installation`, `membership`, `team` | * | refresh installation token cache; resync team memberships |
 
 ### 6.11 Teams and environments (admin)
@@ -937,11 +937,11 @@ Subscribed events and handling:
 
 ## 7. Error model
 
-All errors use RFC 9457 Problem Details (`application/problem+json`) with Foundry extensions:
+All errors use RFC 9457 Problem Details (`application/problem+json`) with the platform extensions:
 
 ```json
 {
-  "type": "https://foundry.acme.internal/errors/validation_failed",
+  "type": "https://iacp.acme.internal/errors/validation_failed",
   "title": "Request inputs failed schema validation",
   "status": 422,
   "code": "validation_failed",
@@ -981,7 +981,7 @@ All errors use RFC 9457 Problem Details (`application/problem+json`) with Foundr
 ```
 backend/
 ├── cmd/
-│   └── foundry/                 # single binary: `foundry api | worker | migrate | verify-audit`
+│   └── iacp/                 # single binary: `iacp api | worker | migrate | verify-audit`
 │       └── main.go
 ├── api/
 │   └── openapi.yaml             # source of truth; oapi-codegen → internal/httpapi/gen
@@ -1015,7 +1015,7 @@ backend/
 │   ├── worker/                  # consumer loop, handlers registry, reconciler
 │   └── observability/           # slog JSON logger, EMF metrics, OTel tracing
 ├── pkg/
-│   └── foundryclient/           # generated Go client (used by CLI and tests)
+│   └── iacpclient/           # generated Go client (used by CLI and tests)
 ├── Dockerfile                   # distroless static, non-root
 └── Makefile
 ```

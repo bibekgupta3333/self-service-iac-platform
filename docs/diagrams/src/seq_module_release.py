@@ -17,7 +17,7 @@ def build() -> Sequence:
     s.participant("gh", "GitHub\nRepository", "github")
     s.participant("gha", "GitHub Actions\nmodule-release.yml", "github")
     s.participant("ls", "LocalStack /\nsandbox account", "aws")
-    s.participant("api", "Foundry API\n(Catalog service)")
+    s.participant("api", "Platform API\n(Catalog service)")
     s.participant("db", "PostgreSQL", "data")
     s.participant("portal", "Portal", "service")
     s.participant("dev", "Developers", "actor")

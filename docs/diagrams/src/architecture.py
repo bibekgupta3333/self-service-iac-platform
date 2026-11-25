@@ -1,4 +1,4 @@
-"""Logical / system architecture of the Foundry platform."""
+"""Logical / system architecture of the Self-Service IaC Platform."""
 
 from diagrams import Cluster, Diagram, Edge
 from diagrams.aws.integration import EventbridgeScheduler, SQS
@@ -17,29 +17,29 @@ from common import BLUE, EDGE, GRAPH, GREEN, NODE, ORANGE, PURPLE, cluster, out
 
 def build():
     graph = dict(GRAPH, ranksep="1.1", nodesep="0.8")
-    with Diagram("Foundry: system architecture", filename=out("architecture"),
+    with Diagram("Self-Service IaC Platform: system architecture", filename=out("architecture"),
                  show=False, direction="LR", graph_attr=graph, node_attr=NODE,
                  edge_attr=EDGE, outformat="png"):
         dev = Users("Developers /\nmaintainers")
 
-        with Cluster("Platform AWS account: Foundry control plane", graph_attr=cluster(BLUE)):
+        with Cluster("Platform AWS account: control plane", graph_attr=cluster(BLUE)):
             portal = Nextjs("Developer portal\n(Next.js)")
             with Cluster("Go backend", graph_attr=cluster("#E6EEF9")):
-                api = Go("Foundry API\n(REST, auth, catalog,\nrequests, generator)")
+                api = Go("Platform API\n(REST, auth, catalog,\nrequests, generator)")
                 worker = Go("Worker\n(status, TTL reaper,\ndrift, budgets)")
             queue = SQS("SQS\nevents queue")
             db = Postgresql("PostgreSQL\n(catalog, stacks,\nrequests, audit)")
             sched = EventbridgeScheduler("EventBridge\nScheduler")
 
         with Cluster("GitHub", graph_attr=cluster(PURPLE)):
-            app = Github("GitHub App + foundry monorepo\n(PR review + merge by humans)")
+            app = Github("GitHub App + iacp monorepo\n(PR review + merge by humans)")
             actions = GithubActions("GitHub Actions\npr-validate / apply /\ndrift / ttl / release")
 
         with Cluster("Platform AWS account: Terraform state", graph_attr=cluster(BLUE)):
-            state = S3("S3 foundry-tfstate-<acct>\n<env>/<team>/<stack>/\nterraform.tfstate")
+            state = S3("S3 iacp-tfstate-<acct>\n<env>/<team>/<stack>/\nterraform.tfstate")
 
         with Cluster("Workload AWS accounts", graph_attr=cluster(ORANGE)):
-            roles = IAMRole("foundry-plan /\nfoundry-apply roles")
+            roles = IAMRole("iacp-plan /\niacp-apply roles")
             envs = GenericOfficeBuilding("development / staging /\nproduction resources")
 
         purple, amber = "#6B46C1", "#B26B00"

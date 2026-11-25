@@ -9,7 +9,7 @@
 
 Terraform state must be protected from concurrent writes. Historically the S3 backend required a DynamoDB table for locking; since Terraform 1.10 the S3 backend supports native lockfiles using S3 conditional writes (`use_lockfile = true`), and DynamoDB locking is deprecated.
 
-Terraform's lock only covers a single operation. Foundry additionally needs to prevent two *requests* from editing the same stack concurrently: two open PRs for one stack would each be planned against stale config, and whichever merged second would apply a plan nobody approved.
+Terraform's lock only covers a single operation. The platform additionally needs to prevent two *requests* from editing the same stack concurrently: two open PRs for one stack would each be planned against stale config, and whichever merged second would apply a plan nobody approved.
 
 ## Decision
 

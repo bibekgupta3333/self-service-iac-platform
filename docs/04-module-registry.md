@@ -1,6 +1,6 @@
 # 04 — Module Registry
 
-> Purpose: define how Foundry packages, versions, publishes, discovers and governs Terraform modules — the "Docker Hub for Terraform modules" that every self-service request is built from.
+> Purpose: define how the platform packages, versions, publishes, discovers and governs Terraform modules — the "Docker Hub for Terraform modules" that every self-service request is built from.
 
 Related: [01-system-architecture.md](01-system-architecture.md) · [03-data-model-and-api.md](03-data-model-and-api.md) · [05-automation-pipeline.md](05-automation-pipeline.md) · [06-lifecycle-management.md](06-lifecycle-management.md) · [07-security-and-policy.md](07-security-and-policy.md) · [ADR-0003](adr/0003-monorepo-git-tag-module-versioning.md)
 
@@ -28,13 +28,13 @@ The registry has three layers. Git is the source of truth; the catalog is a deri
 
 | Layer | Where | What it holds | Mutable? |
 |---|---|---|---|
-| Source | `modules/<name>/` in the `foundry` monorepo | HCL, `module.yaml`, README, examples, tests | Yes (via PR to `main`) |
+| Source | `modules/<name>/` in the `iacp` monorepo | HCL, `module.yaml`, README, examples, tests | Yes (via PR to `main`) |
 | Release | Git tag `modules/<name>/vX.Y.Z` | Immutable snapshot of a module at a version | No (tags are protected) |
 | Catalog | Postgres `modules`, `module_versions` (see [03-data-model-and-api.md](03-data-model-and-api.md)) | Parsed manifest, input JSON Schema, outputs, changelog, status (`active`/`deprecated`/`yanked`) | Status only |
 
 The portal renders forms directly from the `inputs` JSON Schema stored in `module_versions`, the Config Generator renders HCL that references the tag, and the pipeline downloads the module from Git by tag. No module code is ever copied into `environments/`.
 
-| Docker Hub concept | Foundry equivalent |
+| Docker Hub concept | The platform equivalent |
 |---|---|
 | Repository (`library/nginx`) | Module (`modules/s3`) |
 | Image tag (`1.25.3`) | Git tag `modules/s3/v1.2.0` |
@@ -46,7 +46,7 @@ The portal renders forms directly from the `inputs` JSON Schema stored in `modul
 ## 2. Repository layout
 
 ```
-foundry/
+iacp/
 ├── modules/
 │   ├── s3/
 │   │   ├── module.yaml          # manifest (indexed into catalog)
@@ -79,16 +79,16 @@ Each module directory is self-contained: it must `terraform init` and `terraform
 
 ## 3. Module contract
 
-Every Foundry module implements the same contract so the generator, policies and portal can treat modules uniformly.
+Every platform module implements the same contract so the generator, policies and portal can treat modules uniformly.
 
 ### 3.1 Standard inputs (mandatory in every module)
 
 | Variable | Type | Rule | Purpose |
 |---|---|---|---|
 | `name` | `string` | `^[a-z][a-z0-9-]{2,40}$` | Logical resource name; final names are `${team}-${environment}-${name}` |
-| `team` | `string` | `^[a-z][a-z0-9-]{1,30}$`, must match a Foundry team slug | Ownership, tagging, IAM scoping |
+| `team` | `string` | `^[a-z][a-z0-9-]{1,30}$`, must match a platform team slug | Ownership, tagging, IAM scoping |
 | `environment` | `string` | one of `development`, `staging`, `production` | Drives environment-specific defaults |
-| `tags` | `map(string)` | max 30 entries, keys may not start with `foundry:` | Extra user tags, merged under mandatory tags |
+| `tags` | `map(string)` | max 30 entries, keys may not start with `iacp:` | Extra user tags, merged under mandatory tags |
 
 The Config Generator always injects `team`, `environment` and the mandatory tag set; users only supply `name` and the module-specific inputs. Modules compute:
 
@@ -96,10 +96,10 @@ The Config Generator always injects `team`, `environment` and the mandatory tag 
 locals {
   full_name = "${var.team}-${var.environment}-${var.name}"
   tags = merge(var.tags, {
-    "foundry:team"        = var.team
-    "foundry:environment" = var.environment
-    "foundry:module"      = "s3"
-    "foundry:managed-by"  = "foundry"
+    "iacp:team"        = var.team
+    "iacp:environment" = var.environment
+    "iacp:module"      = "s3"
+    "iacp:managed-by"  = "iacp"
   })
 }
 ```
@@ -128,7 +128,7 @@ Mandatory tags are applied last, so user tags cannot override them. The OPA poli
 | `kms_key_arn` | if encrypted | CMK used by the resource |
 | `<access>_policy_json` | if data-bearing | Least-privilege IAM policy documents for consumers |
 | `connection` | if network service | Object with `host`, `port`, `secret_arn` (never plaintext secrets) |
-| `foundry_metadata` | yes | `{ module = "s3", version = "1.2.0" }` for drift/inventory correlation |
+| `iacp_metadata` | yes | `{ module = "s3", version = "1.2.0" }` for drift/inventory correlation |
 
 Outputs listed in `module.yaml` under `outputs[].wireable: true` are the only ones the platform can inject into downstream stacks (see dependency management in [06-lifecycle-management.md](06-lifecycle-management.md)).
 
@@ -138,7 +138,7 @@ Outputs listed in `module.yaml` under `outputs[].wireable: true` are the only on
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `apiVersion` | string | yes | `foundry.dev/v1` |
+| `apiVersion` | string | yes | `iacp.dev/v1` |
 | `kind` | string | yes | `Module` |
 | `metadata.name` | string | yes | Must equal directory name |
 | `metadata.version` | SemVer string | yes | Must equal tag being released; CI enforces |
@@ -151,7 +151,7 @@ Outputs listed in `module.yaml` under `outputs[].wireable: true` are the only on
 | `compatibility.providers` | map | yes | provider source → constraint |
 | `compatibility.environments` | list | yes | Environments in which the module may be instantiated |
 | `inputs` | JSON Schema (draft 2020-12) | yes | Drives portal form + API validation; must agree with `variables.tf` |
-| `inputs.properties.*.x-foundry-*` | extension | no | `x-foundry-ui` (widget), `x-foundry-group`, `x-foundry-production-only`, `x-foundry-immutable` (forces replacement) |
+| `inputs.properties.*.x-iacp-*` | extension | no | `x-iacp-ui` (widget), `x-iacp-group`, `x-iacp-production-only`, `x-iacp-immutable` (forces replacement) |
 | `outputs` | list | yes | `name`, `description`, `sensitive`, `wireable` |
 | `dependencies` | list | no | Typed input slots that accept another module's output (e.g. `vpc_id` from `vpc`) |
 | `cost` | object | no | `baseline_monthly_usd`, `drivers[]` — portal hints before Infracost runs |
@@ -163,7 +163,7 @@ CI validates `module.yaml` against `modules/_shared/module.schema.json` and runs
 ### 4.2 Example: `modules/s3/module.yaml`
 
 ```yaml
-apiVersion: foundry.dev/v1
+apiVersion: iacp.dev/v1
 kind: Module
 metadata:
   name: s3
@@ -174,7 +174,7 @@ metadata:
   maturity: stable
   owners:
     - "@acme/platform-storage"
-  documentation: https://github.com/acme/foundry/tree/modules/s3/v1.2.0/modules/s3
+  documentation: https://github.com/acme/self-service-iac-platform/tree/modules/s3/v1.2.0/modules/s3
 
 compatibility:
   terraform: ">= 1.10, < 2.0"
@@ -192,34 +192,34 @@ inputs:
       type: string
       pattern: "^[a-z][a-z0-9-]{2,40}$"
       description: Logical bucket name. Final name is <team>-<environment>-<name>.
-      x-foundry-immutable: true
+      x-iacp-immutable: true
     versioning_enabled:
       type: boolean
       default: true
       description: Keep object versions. Forced true in production.
-      x-foundry-production-only: false
+      x-iacp-production-only: false
     kms_key_arn:
       type: [string, "null"]
       default: null
       pattern: "^arn:aws:kms:[a-z0-9-]+:[0-9]{12}:key/.+$"
       description: Existing CMK. If null, a dedicated CMK is created.
-      x-foundry-group: Encryption
+      x-iacp-group: Encryption
     noncurrent_version_expiration_days:
       type: integer
       minimum: 1
       maximum: 3650
       default: 90
-      x-foundry-group: Lifecycle
+      x-iacp-group: Lifecycle
     transition_to_ia_days:
       type: [integer, "null"]
       minimum: 30
       default: null
-      x-foundry-group: Lifecycle
+      x-iacp-group: Lifecycle
     force_destroy:
       type: boolean
       default: false
       description: Allow destroy with objects present. Denied in production by policy.
-      x-foundry-ui: danger-toggle
+      x-iacp-ui: danger-toggle
     access_logging_enabled:
       type: boolean
       default: true
@@ -235,7 +235,7 @@ outputs:
   - { name: kms_key_arn,        description: CMK ARN,                          wireable: true }
   - { name: read_policy_json,   description: IAM policy granting read access,  wireable: true }
   - { name: write_policy_json,  description: IAM policy granting write access, wireable: true }
-  - { name: foundry_metadata,   description: Module name and version,          wireable: false }
+  - { name: iacp_metadata,   description: Module name and version,          wireable: false }
 
 cost:
   baseline_monthly_usd: 1.00      # KMS CMK
@@ -323,18 +323,18 @@ Rules:
 - Deprecation carries `deprecation.reason`, `deprecation.replacement` (e.g. `s3 >= 1.3.0`) and `deprecation.sunset_date`. After the sunset date, the version behaves as yanked for *new* requests only.
 - Yanking never deletes the Git tag. Existing stacks must remain plannable and destroyable; a deleted tag would break `terraform init` for them.
 - Every state transition writes an `audit_events` row (`module_version.deprecated`, `module_version.yanked`).
-- OPA receives the catalog status as input data (`data.foundry.module_versions`) and denies plans whose module source references a yanked version, except for `destroy` requests.
+- OPA receives the catalog status as input data (`data.iacp.module_versions`) and denies plans whose module source references a yanked version, except for `destroy` requests.
 
 ## 8. How consumers pin versions
 
 Developers never write `source` lines by hand; the Config Generator renders them. Generated `environments/development/payments/orders-store/main.tf`:
 
 ```hcl
-# Code generated by Foundry. DO NOT EDIT.
+# Code generated by the platform. DO NOT EDIT.
 # request: req_01JD6K8T3V  stack: payments/orders-store  env: development
 
 module "orders_bucket" {
-  source = "git::https://github.com/acme/foundry.git//modules/s3?ref=modules/s3/v1.2.0"
+  source = "git::https://github.com/acme/self-service-iac-platform.git//modules/s3?ref=modules/s3/v1.2.0"
 
   name        = "orders"
   team        = "payments"
@@ -351,7 +351,7 @@ module "orders_bucket" {
 Pinning rules:
 
 - **Exact tag only.** `ref` is always a full `modules/<name>/vX.Y.Z` tag; branches, SHAs and ranges are rejected by the generator and by the OPA `module_source.rego` policy on the plan's `configuration` block.
-- **Approved source host only.** Only `git::https://github.com/acme/foundry.git//modules/*` is allowed; public registry modules are denied.
+- **Approved source host only.** Only `git::https://github.com/acme/self-service-iac-platform.git//modules/*` is allowed; public registry modules are denied.
 - **Integrity.** The pipeline resolves each tag to its commit SHA and compares it with `module_versions.commit_sha`; a mismatch (moved tag) fails the run.
 - **Upgrades** are always explicit requests (see [06-lifecycle-management.md](06-lifecycle-management.md#1-version-management)); the platform never floats a version.
 
@@ -377,7 +377,7 @@ Indexing is idempotent on `(module, version)`; re-indexing the same version with
 |---|---|---|---|---|
 | **s3** (MVP) | `aws_s3_bucket`, versioning, SSE config, public access block, ownership controls, lifecycle, bucket policy, `aws_kms_key` + alias, optional logging target | `name`, `versioning_enabled`, `kms_key_arn`, `noncurrent_version_expiration_days`, `transition_to_ia_days`, `force_destroy` | SSE-KMS with CMK + bucket key, all public access blocked, `BucketOwnerEnforced`, TLS-only policy, versioning on, `force_destroy=false` | `id`, `arn`, `name`, `kms_key_arn`, `read_policy_json`, `write_policy_json` |
 | **sqs** (MVP) | `aws_sqs_queue` (main + DLQ), redrive policy, redrive allow policy, queue policy, `aws_kms_key`, CloudWatch alarms (DLQ depth, age of oldest message) | `name`, `fifo`, `visibility_timeout_seconds`, `message_retention_seconds`, `max_receive_count`, `dlq_retention_seconds` | SSE-KMS CMK, DLQ always created, TLS-only policy, no wildcard principals, alarms on DLQ > 0 | `id` (URL), `arn`, `name`, `dlq_arn`, `dlq_url`, `kms_key_arn`, `consumer_policy_json`, `producer_policy_json` |
-| **lambda** (MVP) | `aws_lambda_function`, execution role + boundary, log group (retention + KMS), optional SQS event source mapping, optional function URL (disabled), alarms | `name`, `runtime`, `handler`, `artifact_s3_uri`, `memory_mb`, `timeout_seconds`, `environment_variables`, `sqs_trigger_arn`, `extra_policy_jsons` | Role with permission boundary `foundry-boundary`, no function URL, X-Ray active, log retention 30d, env vars encrypted with CMK, reserved concurrency set, code signing config in prod | `id`, `arn`, `name`, `role_arn`, `invoke_arn`, `log_group_name` |
+| **lambda** (MVP) | `aws_lambda_function`, execution role + boundary, log group (retention + KMS), optional SQS event source mapping, optional function URL (disabled), alarms | `name`, `runtime`, `handler`, `artifact_s3_uri`, `memory_mb`, `timeout_seconds`, `environment_variables`, `sqs_trigger_arn`, `extra_policy_jsons` | Role with permission boundary `iacp-boundary`, no function URL, X-Ray active, log retention 30d, env vars encrypted with CMK, reserved concurrency set, code signing config in prod | `id`, `arn`, `name`, `role_arn`, `invoke_arn`, `log_group_name` |
 | **ecs-service** | ECS service + task def, ALB target group + listener rule, ECR repository, security groups, log group, autoscaling | `name`, `image_tag`, `cpu`, `memory`, `desired_count`, `container_port`, `health_check_path`, `cluster_arn`, `vpc_id`, `subnet_ids` | Fargate only, private subnets, no public IP, ECR scan on push + immutable tags, read-only root FS, non-root user, HTTPS listener only | `id`, `arn`, `name`, `service_url`, `task_role_arn`, `ecr_repository_url`, `security_group_id` |
 | **postgres** | `aws_db_instance` (or Aurora later), subnet group, parameter group, security group, Secrets Manager secret (managed master password), KMS key, alarms | `name`, `engine_version`, `instance_class`, `allocated_storage_gb`, `multi_az`, `vpc_id`, `subnet_ids`, `allowed_security_group_ids` | Not publicly accessible, storage encrypted CMK, `rds.force_ssl=1`, managed master password, backups 7d (35d prod), deletion protection + final snapshot in prod, IAM auth on, Performance Insights encrypted | `id`, `arn`, `name`, `connection` {host, port, secret_arn}, `security_group_id` |
 | **redis** | `aws_elasticache_replication_group`, subnet group, parameter group, security group, auth token secret, KMS key | `name`, `node_type`, `num_cache_clusters`, `engine_version`, `vpc_id`, `subnet_ids`, `allowed_security_group_ids` | At-rest + in-transit encryption, AUTH token in Secrets Manager, automatic failover when >1 node, snapshots on, private subnets only | `id`, `arn`, `name`, `connection` {host, port, secret_arn}, `security_group_id` |
@@ -414,17 +414,17 @@ variable "name" {
 }
 
 variable "team" {
-  description = "Owning team slug. Injected by Foundry."
+  description = "Owning team slug. Injected by the platform."
   type        = string
 
   validation {
     condition     = can(regex("^[a-z][a-z0-9-]{1,30}$", var.team))
-    error_message = "team must be a valid Foundry team slug."
+    error_message = "team must be a valid the platform team slug."
   }
 }
 
 variable "environment" {
-  description = "Target environment. Injected by Foundry."
+  description = "Target environment. Injected by the platform."
   type        = string
 
   validation {
@@ -434,13 +434,13 @@ variable "environment" {
 }
 
 variable "tags" {
-  description = "Additional tags. Keys starting with 'foundry:' are reserved."
+  description = "Additional tags. Keys starting with 'iacp:' are reserved."
   type        = map(string)
   default     = {}
 
   validation {
-    condition     = length(var.tags) <= 30 && alltrue([for k in keys(var.tags) : !startswith(k, "foundry:")])
-    error_message = "At most 30 tags; the 'foundry:' prefix is reserved."
+    condition     = length(var.tags) <= 30 && alltrue([for k in keys(var.tags) : !startswith(k, "iacp:")])
+    error_message = "At most 30 tags; the 'iacp:' prefix is reserved."
   }
 }
 
@@ -595,13 +595,13 @@ output "write_policy_json" {
   value       = data.aws_iam_policy_document.write.json
 }
 
-output "foundry_metadata" {
+output "iacp_metadata" {
   description = "Module identity for inventory and drift correlation."
   value       = { module = "s3", version = "1.2.0" }
 }
 ```
 
-`foundry_metadata.version` is stamped by `module-release.yml` from `module.yaml`; a CI check fails if they differ.
+`iacp_metadata.version` is stamped by `module-release.yml` from `module.yaml`; a CI check fails if they differ.
 
 ## 12. Example interfaces: `modules/sqs` and `modules/lambda`
 
@@ -755,10 +755,10 @@ The `sqs_trigger_arn` and `extra_policy_jsons` inputs are declared as `dependenc
 - [ ] Bump level correct per SemVer table (interface diff + upgrade plan test green)
 - [ ] MAJOR: `### Migration` section written; `moved` blocks added where possible
 - [ ] Standard inputs `name`, `team`, `environment`, `tags` present and unchanged
-- [ ] Mandatory `foundry:*` tags applied to every taggable resource
+- [ ] Mandatory `iacp:*` tags applied to every taggable resource
 - [ ] Encryption at rest with CMK; TLS enforced in transit
 - [ ] No public exposure (public access block / private subnets / no public IP)
-- [ ] IAM: no `*` actions or resources; roles carry `foundry-boundary`
+- [ ] IAM: no `*` actions or resources; roles carry `iacp-boundary`
 - [ ] Any weakening option named `allow_*`/`enable_insecure_*`, default false
 - [ ] Inputs JSON Schema and `variables.tf` in parity (CI)
 - [ ] Standard outputs present; sensitive values not output

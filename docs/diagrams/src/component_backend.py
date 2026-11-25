@@ -19,7 +19,7 @@ def comp(label: str, fill: str = "#FFFFFF", border: str = "#1F3A5F") -> Node:
 
 def build():
     graph = dict(GRAPH, ranksep="0.9", nodesep="0.35", compound="true")
-    with Diagram("Foundry backend (Go): internal components",
+    with Diagram("Platform backend (Go): internal components",
                  filename=out("component-backend"), show=False, direction="LR",
                  graph_attr=graph, node_attr=NODE, edge_attr=EDGE, outformat="png"):
         portal = Nextjs("Portal")

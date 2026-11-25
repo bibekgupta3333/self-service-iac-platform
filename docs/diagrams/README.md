@@ -1,6 +1,6 @@
 # Diagrams
 
-All diagrams in the Foundry design docs are generated from code. The Python
+All diagrams in the platform design docs are generated from code. The Python
 sources live in [`src/`](src/) and the rendered PNGs in [`images/`](images/).
 Docs reference them relatively, e.g. `![Architecture](diagrams/images/architecture.png)`
 from a file in `docs/`.
@@ -37,7 +37,7 @@ Each script can also be run on its own, e.g. `.venv/bin/python docs/diagrams/src
 | Image | Source | Description |
 | --- | --- | --- |
 | [architecture.png](images/architecture.png) | `src/architecture.py` | Logical system architecture: developers, portal, Go API and worker, PostgreSQL, SQS, EventBridge Scheduler, GitHub App/repo/Actions, state bucket and workload accounts. |
-| [aws-infrastructure.png](images/aws-infrastructure.png) | `src/aws_infrastructure.py` | AWS accounts and networking: platform account VPC (ALB + WAF, ECS Fargate, RDS Multi-AZ, SQS, Scheduler, Secrets Manager, KMS, state bucket, CloudWatch), dev/staging/prod accounts with `foundry-plan` / `foundry-apply` roles, GitHub OIDC trust, CloudTrail to the log archive. |
+| [aws-infrastructure.png](images/aws-infrastructure.png) | `src/aws_infrastructure.py` | AWS accounts and networking: platform account VPC (ALB + WAF, ECS Fargate, RDS Multi-AZ, SQS, Scheduler, Secrets Manager, KMS, state bucket, CloudWatch), dev/staging/prod accounts with `iacp-plan` / `iacp-apply` roles, GitHub OIDC trust, CloudTrail to the log archive. |
 | [cicd-pipeline.png](images/cicd-pipeline.png) | `src/cicd_pipeline.py` | `pr-validate.yml` stages (fmt, validate, TFLint, Checkov, plan, OPA, Infracost, report), merge gates, and `apply.yml` stages (lock, re-plan + hash check, apply, smoke tests, outputs). |
 | [component-backend.png](images/component-backend.png) | `src/component_backend.py` | Internal components of the Go backend: HTTP edge (middleware, auth, OIDC verifier, webhook ingester), domain services, generator, GitHub App client, lock manager, audit writer, store, and worker handlers. |
 | [data-model.png](images/data-model.png) | `src/data_model.py` | PostgreSQL ERD with key columns and relationships, grouped into identity, catalog, stacks, requests/pipelines and audit. |
@@ -50,7 +50,7 @@ Each script can also be run on its own, e.g. `.venv/bin/python docs/diagrams/src
 
 ## Conventions
 
-- Colours: blue = Foundry components, purple = GitHub, amber = AWS, green = data
+- Colours: blue = the platform components, purple = GitHub, amber = AWS, green = data
   stores / success, red = failure paths.
 - Keep names identical to the design docs (workflow file names, role names,
   table names, status values). Change the source, re-render, and commit both

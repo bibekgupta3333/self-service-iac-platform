@@ -1,6 +1,6 @@
 # 05 — Automation Pipeline
 
-> Purpose: specify the GitHub Actions pipeline that turns a Foundry change request into validated, policy-checked, costed, approved and applied infrastructure, plus the scheduled lifecycle workflows.
+> Purpose: specify the GitHub Actions pipeline that turns a platform change request into validated, policy-checked, costed, approved and applied infrastructure, plus the scheduled lifecycle workflows.
 
 Related: [01-system-architecture.md](01-system-architecture.md) · [04-module-registry.md](04-module-registry.md) · [06-lifecycle-management.md](06-lifecycle-management.md) · [07-security-and-policy.md](07-security-and-policy.md) · ADRs [0001](adr/0001-pr-based-gitops-provisioning.md), [0002](adr/0002-terraform-executes-in-github-actions.md), [0005](adr/0005-github-oidc-for-aws-access.md), [0006](adr/0006-opa-conftest-and-checkov.md), [0008](adr/0008-github-app-for-automation.md)
 
@@ -30,26 +30,26 @@ Principles:
 
 - **Terraform runs only in GitHub Actions** ([ADR-0002](adr/0002-terraform-executes-in-github-actions.md)). The backend writes Git and reads results; it never holds AWS write credentials for workloads.
 - **Plan in PR, apply on merge.** The PR is the approval artefact; `main` is the desired state.
-- **Two roles per workload account.** `foundry-plan` (read-only + state read) for PR, drift and pre-apply checks; `foundry-apply` (scoped, boundary `foundry-boundary`) only in `apply.yml` jobs bound to a GitHub Environment.
+- **Two roles per workload account.** `iacp-plan` (read-only + state read) for PR, drift and pre-apply checks; `iacp-apply` (scoped, boundary `iacp-boundary`) only in `apply.yml` jobs bound to a GitHub Environment.
 - **What is applied is what was approved.** `apply.yml` re-plans and compares a normalized plan hash with the hash recorded at approval time.
-- **Every run reports back.** Each job posts status, plan summary, cost and outputs to the Foundry API using the job's GitHub OIDC token (audience `foundry-api`), so the portal and `pipeline_runs` stay in sync even if webhooks are delayed.
+- **Every run reports back.** Each job posts status, plan summary, cost and outputs to the Platform API using the job's GitHub OIDC token (audience `iacp-api`), so the portal and `pipeline_runs` stay in sync even if webhooks are delayed.
 
 ## 2. Stage reference
 
 | # | Stage | Tool | Trigger | Runs as | Failure behaviour | Artifacts / outputs |
 |---|---|---|---|---|---|---|
-| 1 | Generate config | Foundry Config Generator (Go, `backend/internal/generator`) | Request submitted in portal / API | Backend worker | Request stays `draft`, validation errors returned to user; nothing pushed | `main.tf`, `backend.tf`, `versions.tf`, `providers.tf`, `foundry.stack.json`, `.terraform.lock.hcl` |
-| 2 | Create PR | GitHub App (branch, commit, PR, labels) | Generator success | Backend worker | Retries with backoff (3x); then request `failed` with `github_error` | Branch `foundry/<request-id>`, PR with labels `foundry`, `env:<env>`, `team:<team>`; request → `pr_open` |
-| 3 | Format + validate | `terraform fmt -check`, `terraform validate` | `pull_request` | `foundry-plan` | Check fails; request → `failed` (generator bug: alerts platform team) | Job log |
+| 1 | Generate config | Platform Config Generator (Go, `backend/internal/generator`) | Request submitted in portal / API | Backend worker | Request stays `draft`, validation errors returned to user; nothing pushed | `main.tf`, `backend.tf`, `versions.tf`, `providers.tf`, `iacp.stack.json`, `.terraform.lock.hcl` |
+| 2 | Create PR | GitHub App (branch, commit, PR, labels) | Generator success | Backend worker | Retries with backoff (3x); then request `failed` with `github_error` | Branch `iacp/<request-id>`, PR with labels `iacp`, `env:<env>`, `team:<team>`; request → `pr_open` |
+| 3 | Format + validate | `terraform fmt -check`, `terraform validate` | `pull_request` | `iacp-plan` | Check fails; request → `failed` (generator bug: alerts platform team) | Job log |
 | 4 | Lint | TFLint + AWS ruleset | `pull_request` | none (offline) | Check fails | SARIF uploaded to code scanning |
-| 5 | Static security scan | Checkov (+ custom checks in `policies/checkov/`) | `pull_request` | none | Check fails on any `HIGH`/`CRITICAL` or custom `FOUNDRY_*` failure | `checkov.sarif`, summary in PR comment |
-| 6 | Plan | `terraform plan -lock=false -out=tfplan` | `pull_request` | `foundry-plan` | Check fails; error surfaced in PR comment and portal | `tfplan`, `plan.json`, normalized `plan.sha256` |
+| 5 | Static security scan | Checkov (+ custom checks in `policies/checkov/`) | `pull_request` | none | Check fails on any `HIGH`/`CRITICAL` or custom `IACP_*` failure | `checkov.sarif`, summary in PR comment |
+| 6 | Plan | `terraform plan -lock=false -out=tfplan` | `pull_request` | `iacp-plan` | Check fails; error surfaced in PR comment and portal | `tfplan`, `plan.json`, normalized `plan.sha256` |
 | 7 | Policy | OPA via `conftest test plan.json -p policies/opa` | after plan | none | `deny` → check fails; `warn` → shown in comment | `conftest.json` |
 | 8 | Cost | Infracost `breakdown` + `diff`; budget evaluated by OPA `budget.rego` | after plan | Infracost API key (secret) | Over-budget → fails unless `budget-override` approved by team admin | `infracost.json`; `cost_estimates` row |
-| 9 | Report | PR comment (sticky) + `POST /v1/runs` (OIDC JWT) | end of PR job | OIDC → Foundry API | Report failure does not fail check; reconciler fetches run later | `plan_summaries` row; request → `plan_ready` |
+| 9 | Report | PR comment (sticky) + `POST /v1/runs` (OIDC JWT) | end of PR job | OIDC → Platform API | Report failure does not fail check; reconciler fetches run later | `plan_summaries` row; request → `plan_ready` |
 | 10 | Approve + merge | CODEOWNERS review; GitHub Environment reviewer for production | human | — | Merge blocked until all required checks + reviews | request → `approved` |
-| 11 | Apply | `terraform plan` → hash check → `terraform apply tfplan` | `push` to `main` | `foundry-apply` in GitHub Environment `<env>` | Plan-hash mismatch → abort, request `failed` (`plan_mismatch`); apply error → stack `failed`, transient errors auto-retried by backend (max 2 retries with backoff) | `apply.log`, `outputs.json`; stack → `active` |
-| 12 | Post-apply tests | Smoke tests; Terratest for ephemeral stacks | after apply | `foundry-plan` | Stack marked `active` with `health=degraded`, team notified; no auto-destroy | `go test` JSON report |
+| 11 | Apply | `terraform plan` → hash check → `terraform apply tfplan` | `push` to `main` | `iacp-apply` in GitHub Environment `<env>` | Plan-hash mismatch → abort, request `failed` (`plan_mismatch`); apply error → stack `failed`, transient errors auto-retried by backend (max 2 retries with backoff) | `apply.log`, `outputs.json`; stack → `active` |
+| 12 | Post-apply tests | Smoke tests; Terratest for ephemeral stacks | after apply | `iacp-plan` | Stack marked `active` with `health=degraded`, team notified; no auto-destroy | `go test` JSON report |
 
 Statuses follow the request lifecycle `draft → pr_open → validating → plan_ready → approved → applying → applied | failed | rejected | cancelled` (see [06-lifecycle-management.md](06-lifecycle-management.md)).
 
@@ -63,12 +63,12 @@ environments/development/payments/orders-store/
 ├── backend.tf                    # S3 backend with use_lockfile = true
 ├── versions.tf                   # pinned terraform + provider versions
 ├── providers.tf                  # aws provider: region, assume_role-free (OIDC creds), default_tags
-├── foundry.deps.auto.tfvars.json # upstream outputs injected by the platform (optional)
-├── foundry.stack.json            # metadata used by CI (not read by Terraform)
+├── iacp.deps.auto.tfvars.json # upstream outputs injected by the platform (optional)
+├── iacp.stack.json            # metadata used by CI (not read by Terraform)
 └── .terraform.lock.hcl
 ```
 
-`foundry.stack.json`:
+`iacp.stack.json`:
 
 ```json
 {
@@ -90,9 +90,9 @@ Detection algorithm (`.github/scripts/changed-stacks.sh`, used by `pr-validate.y
 
 1. `git diff --name-only <base>...<head> -- environments/` (PR: merge base vs. head; push: `github.event.before..github.event.after`).
 2. Map each path to its stack root by taking the first four segments (`environments/<env>/<team>/<stack>`).
-3. Deduplicate; keep roots that still contain `foundry.stack.json`. Roots that were deleted (cleanup after destroy) are skipped — their state is already empty.
-4. Emit a JSON matrix: `[{ "path": "...", "env": "...", "account_id": "...", "stack_id": "...", "desired_state": "...", "ephemeral": false }]`, built from each `foundry.stack.json`.
-5. Guard rails: fail if more than 20 stacks changed (generator emits at most one stack per request; bulk changes require the `foundry/bulk` label and platform-team approval). Fail if two changed stacks have a `depends_on` edge between them — the backend serialises dependent stacks into separate requests (DAG ordering, see [06-lifecycle-management.md](06-lifecycle-management.md#7-dependency-management)).
+3. Deduplicate; keep roots that still contain `iacp.stack.json`. Roots that were deleted (cleanup after destroy) are skipped — their state is already empty.
+4. Emit a JSON matrix: `[{ "path": "...", "env": "...", "account_id": "...", "stack_id": "...", "desired_state": "...", "ephemeral": false }]`, built from each `iacp.stack.json`.
+5. Guard rails: fail if more than 20 stacks changed (generator emits at most one stack per request; bulk changes require the `iacp/bulk` label and platform-team approval). Fail if two changed stacks have a `depends_on` edge between them — the backend serialises dependent stacks into separate requests (DAG ordering, see [06-lifecycle-management.md](06-lifecycle-management.md#7-dependency-management)).
 
 Changes outside `environments/` do not plan stacks: `modules/**` triggers `module-release.yml`; `policies/**` triggers `opa test` / `conftest verify` and Checkov custom-check unit tests; `backend/**` and `portal/**` have their own app CI.
 
@@ -102,11 +102,11 @@ All third-party actions are pinned to a full commit SHA, written below as `@<sha
 
 ### 4.1 Shared reporting action
 
-`.github/actions/foundry-report/action.yml` — a composite action that exchanges the job's OIDC token for an API call. The API validates `iss`, `aud=foundry-api`, `repository=acme/foundry` and `job_workflow_ref` against an allow-list of workflow files on `main` or the PR.
+`.github/actions/iacp-report/action.yml` — a composite action that exchanges the job's OIDC token for an API call. The API validates `iss`, `aud=iacp-api`, `repository=acme/self-service-iac-platform` and `job_workflow_ref` against an allow-list of workflow files on `main` or the PR.
 
 ```yaml
-name: foundry-report
-description: Report pipeline status to the Foundry API using GitHub OIDC
+name: iacp-report
+description: Report pipeline status to the Platform API using GitHub OIDC
 inputs:
   event:      { required: true }   # plan_ready | plan_failed | apply_started | applied | apply_failed | drift
   stack-id:   { required: true }
@@ -116,11 +116,11 @@ runs:
   steps:
     - shell: bash
       env:
-        FOUNDRY_API_URL: ${{ vars.FOUNDRY_API_URL }}
+        IACP_API_URL: ${{ vars.IACP_API_URL }}
       run: |
         set -euo pipefail
         TOKEN=$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-          "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=foundry-api" | jq -r .value)
+          "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=iacp-api" | jq -r .value)
         BODY='${{ inputs.payload }}'
         [ -f "$BODY" ] && BODY=$(cat "$BODY")
         jq -n --arg event '${{ inputs.event }}' --arg stack '${{ inputs.stack-id }}' \
@@ -129,8 +129,8 @@ runs:
               '{event:$event, stack_id:$stack, run_id:$run, run_attempt:$attempt, commit_sha:$sha, data:$data}' \
         | curl -sS --retry 5 --retry-all-errors --max-time 20 \
             -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-            -X POST "$FOUNDRY_API_URL/v1/runs" --data-binary @- \
-          || echo "::warning::Foundry API report failed; reconciler will backfill"
+            -X POST "$IACP_API_URL/v1/runs" --data-binary @- \
+          || echo "::warning::Platform API report failed; reconciler will backfill"
 ```
 
 ### 4.2 `pr-validate.yml`
@@ -177,7 +177,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-      id-token: write          # OIDC for AWS + Foundry API
+      id-token: write          # OIDC for AWS + Platform API
       pull-requests: write     # sticky PR comment
       security-events: write   # SARIF upload
     strategy:
@@ -211,7 +211,7 @@ jobs:
           restore-keys: tf-providers-${{ runner.os }}-
 
       - name: Report validating
-        uses: ./.github/actions/foundry-report
+        uses: ./.github/actions/iacp-report
         with: { event: validating, stack-id: "${{ matrix.stack.stack_id }}" }
 
       - name: terraform fmt
@@ -220,7 +220,7 @@ jobs:
       - name: Configure AWS credentials (plan role)
         uses: aws-actions/configure-aws-credentials@<sha> # v4.0.2
         with:
-          role-to-assume: arn:aws:iam::${{ matrix.stack.account_id }}:role/foundry-plan
+          role-to-assume: arn:aws:iam::${{ matrix.stack.account_id }}:role/iacp-plan
           role-session-name: plan-${{ github.run_id }}-${{ matrix.stack.stack_id }}
           aws-region: ${{ env.STATE_REGION }}
           role-duration-seconds: 3600
@@ -259,13 +259,13 @@ jobs:
 
       - name: OPA / conftest
         run: |
-          curl -sSf -H "Authorization: Bearer $(.github/scripts/foundry-token.sh)" \
-            "${{ vars.FOUNDRY_API_URL }}/v1/internal/budget-context?stack_path=${{ matrix.stack.path }}" \
+          curl -sSf -H "Authorization: Bearer $(.github/scripts/iacp-token.sh)" \
+            "${{ vars.IACP_API_URL }}/v1/internal/budget-context?stack_path=${{ matrix.stack.path }}" \
             > "$RUNNER_TEMP/policy-data.json"     # team, budget, overrides, exceptions, module_versions status, RBAC context
           conftest test plan.json \
             --policy "$GITHUB_WORKSPACE/policies/opa" \
             --data "$RUNNER_TEMP/policy-data.json" \
-            --namespace foundry.plan --all-namespaces \
+            --namespace iacp.plan --all-namespaces \
             --output json > conftest.json || (cat conftest.json; exit 1)
 
       - name: Infracost
@@ -275,7 +275,7 @@ jobs:
           infracost breakdown --path tfplan --format json --out-file infracost.json
           conftest test infracost.json \
             --policy "$GITHUB_WORKSPACE/policies/opa/budget" \
-            --data "$RUNNER_TEMP/policy-data.json" --namespace foundry.budget
+            --data "$RUNNER_TEMP/policy-data.json" --namespace iacp.budget
 
       - name: Upload plan artifact
         if: always()
@@ -308,12 +308,12 @@ jobs:
         if: always()
         uses: marocchino/sticky-pull-request-comment@<sha> # v2.9.0
         with:
-          header: foundry-${{ matrix.stack.stack_id }}
+          header: iacp-${{ matrix.stack.stack_id }}
           path: ${{ runner.temp }}/comment.md
 
-      - name: Report result to Foundry
+      - name: Report result to the platform
         if: always()
-        uses: ./.github/actions/foundry-report
+        uses: ./.github/actions/iacp-report
         with:
           event: ${{ job.status == 'success' && 'plan_ready' || 'plan_failed' }}
           stack-id: ${{ matrix.stack.stack_id }}
@@ -421,19 +421,19 @@ jobs:
       - name: Verify platform lock and fetch approved plan hash
         id: approved
         run: |
-          RESP=$(curl -sSf -H "Authorization: Bearer $(${GITHUB_WORKSPACE}/.github/scripts/foundry-token.sh)" \
-            "${{ vars.FOUNDRY_API_URL }}/v1/internal/requests/by-path?stack_path=${{ matrix.stack.path }}&head_sha=$GITHUB_SHA")
+          RESP=$(curl -sSf -H "Authorization: Bearer $(${GITHUB_WORKSPACE}/.github/scripts/iacp-token.sh)" \
+            "${{ vars.IACP_API_URL }}/v1/internal/requests/by-path?stack_path=${{ matrix.stack.path }}&head_sha=$GITHUB_SHA")
           # 409 if the commit does not belong to the request holding the stack lock; 412 if that request is not `approved`
           echo "hash=$(echo "$RESP" | jq -r .approved_plan_hash)" >> "$GITHUB_OUTPUT"
           echo "fencing_token=$(echo "$RESP" | jq -r .fencing_token)" >> "$GITHUB_OUTPUT"   # sent with every callback; stale tokens are rejected
 
-      - uses: ./.github/actions/foundry-report
+      - uses: ./.github/actions/iacp-report
         with: { event: apply_started, stack-id: "${{ matrix.stack.stack_id }}" }
 
       - name: Configure AWS credentials (apply role)
         uses: aws-actions/configure-aws-credentials@<sha> # v4.0.2
         with:
-          role-to-assume: arn:aws:iam::${{ matrix.stack.account_id }}:role/foundry-apply
+          role-to-assume: arn:aws:iam::${{ matrix.stack.account_id }}:role/iacp-apply
           role-session-name: apply-${{ github.run_id }}-${{ matrix.stack.stack_id }}
           aws-region: ${{ env.STATE_REGION }}
           role-duration-seconds: 3600
@@ -479,7 +479,7 @@ jobs:
 
       - name: Report success
         if: success()
-        uses: ./.github/actions/foundry-report
+        uses: ./.github/actions/iacp-report
         with:
           event: applied
           stack-id: ${{ matrix.stack.stack_id }}
@@ -487,7 +487,7 @@ jobs:
 
       - name: Report failure
         if: failure()
-        uses: ./.github/actions/foundry-report
+        uses: ./.github/actions/iacp-report
         with:
           event: apply_failed
           stack-id: ${{ matrix.stack.stack_id }}
@@ -496,7 +496,7 @@ jobs:
 
 Notes:
 
-- `environment: production` makes the job wait for a required reviewer and changes the OIDC `sub` to `repo:acme/foundry:environment:production`; `foundry-apply` in the production account trusts **only** that subject (see [07-security-and-policy.md](07-security-and-policy.md)). The development/staging apply roles trust their matching environment subjects. Nothing else can assume an apply role.
+- `environment: production` makes the job wait for a required reviewer and changes the OIDC `sub` to `repo:acme/self-service-iac-platform:environment:production`; `iacp-apply` in the production account trusts **only** that subject (see [07-security-and-policy.md](07-security-and-policy.md)). The development/staging apply roles trust their matching environment subjects. Nothing else can assume an apply role.
 - The job-level `concurrency` group serialises applies per stack across all workflow runs; the platform lock row in Postgres (checked via `requests/by-path`, which returns the lock's fencing token) serialises at request level ([ADR-0004](adr/0004-s3-native-locking-plus-platform-lock.md)).
 - State locking during apply uses the S3 lockfile (`use_lockfile = true` in `backend.tf`).
 - Applies are never cancelled automatically; a cancelled apply leaves a stale lockfile — see the runbook in [06-lifecycle-management.md](06-lifecycle-management.md#3-state-locking).
@@ -535,7 +535,7 @@ jobs:
         with: { terraform_version: "1.10.5", terraform_wrapper: false }
       - uses: aws-actions/configure-aws-credentials@<sha> # v4.0.2
         with:
-          role-to-assume: arn:aws:iam::${{ matrix.stack.account_id }}:role/foundry-plan
+          role-to-assume: arn:aws:iam::${{ matrix.stack.account_id }}:role/iacp-plan
           aws-region: us-east-1
       - run: terraform init -lockfile=readonly
       - id: plan
@@ -547,10 +547,10 @@ jobs:
           [ $RC -eq 1 ] && exit 1
           terraform show -json drift.tfplan | jq '{drifted: [.resource_drift[]? | {address, actions: .change.actions}]}' > drift.json
       - if: steps.plan.outputs.rc == '2'
-        uses: ./.github/actions/foundry-report
+        uses: ./.github/actions/iacp-report
         with: { event: drift_detected, stack-id: "${{ matrix.stack.stack_id }}", payload: "${{ matrix.stack.path }}/drift.json" }
       - if: steps.plan.outputs.rc == '0'
-        uses: ./.github/actions/foundry-report
+        uses: ./.github/actions/iacp-report
         with: { event: drift_clean, stack-id: "${{ matrix.stack.stack_id }}" }
 ```
 
@@ -574,16 +574,16 @@ jobs:
       - name: Find expired ephemeral stacks
         run: |
           NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          find environments -name foundry.stack.json -print0 \
+          find environments -name iacp.stack.json -print0 \
             | xargs -0 jq -c --arg now "$NOW" \
                 'select(.ephemeral == true and .desired_state == "present" and .expires_at < $now) | {stack_id, expires_at}' \
             | jq -s --arg run "$GITHUB_RUN_ID" '{event: "ttl_reconcile", run_id: $run, data: {expired: .}}' > expired.json
           cat expired.json
       - name: Ask platform to reconcile
         run: |
-          curl -sSf -X POST -H "Authorization: Bearer $(.github/scripts/foundry-token.sh)" \
+          curl -sSf -X POST -H "Authorization: Bearer $(.github/scripts/iacp-token.sh)" \
             -H "Content-Type: application/json" --data-binary @expired.json \
-            "${{ vars.FOUNDRY_API_URL }}/v1/runs"   # event: ttl_reconcile
+            "${{ vars.IACP_API_URL }}/v1/runs"   # event: ttl_reconcile
 ```
 
 The API is idempotent: stacks already in `destroying`, or with an open destroy request, are ignored. Warnings go out 24 h before expiry (scheduler-driven). In non-production environments only, the platform bot auto-approves destroy PRs created by TTL expiry; production stacks cannot be ephemeral. This workflow never runs `terraform destroy` itself; destruction always flows through a destroy request and PR so it is reviewed, audited and policy-checked.
@@ -652,8 +652,8 @@ jobs:
       - id: app-token
         uses: actions/create-github-app-token@<sha> # v1.11.0
         with:
-          app-id: ${{ vars.FOUNDRY_APP_ID }}
-          private-key: ${{ secrets.FOUNDRY_APP_PRIVATE_KEY }}
+          app-id: ${{ vars.IACP_APP_ID }}
+          private-key: ${{ secrets.IACP_APP_PRIVATE_KEY }}
       - name: Tag and create release
         env: { GH_TOKEN: "${{ steps.app-token.outputs.token }}" }
         run: |
@@ -665,9 +665,9 @@ jobs:
           echo "{\"module\":\"${{ matrix.module }}\",\"version\":\"$V\",\"commit_sha\":\"$GITHUB_SHA\"}" > index.json
       - name: Index into catalog
         run: |
-          curl -sSf -X POST -H "Authorization: Bearer $(.github/scripts/foundry-token.sh)" \
+          curl -sSf -X POST -H "Authorization: Bearer $(.github/scripts/iacp-token.sh)" \
             -H "Content-Type: application/json" --data-binary @index.json \
-            "${{ vars.FOUNDRY_API_URL }}/v1/internal/catalog/index"
+            "${{ vars.IACP_API_URL }}/v1/internal/catalog/index"
 ```
 
 The tag push fails if the tag already exists, so re-running the job cannot move a released version. See [04-module-registry.md](04-module-registry.md#9-release-flow-and-catalog-indexing).
@@ -689,7 +689,7 @@ The tag push fails if the tag already exists, so re-running the job cannot move 
 | Block force pushes / deletions | yes |
 | Bypass actors | none on `main`. The GitHub App is **not** a bypass actor; it merges only via the normal PR rules |
 
-Tag ruleset `modules/**`: creation restricted to the Foundry GitHub App; update and deletion blocked for everyone.
+Tag ruleset `modules/**`: creation restricted to the platform GitHub App; update and deletion blocked for everyone.
 
 ### 5.2 CODEOWNERS
 
@@ -698,7 +698,7 @@ Tag ruleset `modules/**`: creation restricted to the Foundry GitHub App; update 
 *                                         @acme/platform-team
 
 # Generated stacks (lines generated per team; CODEOWNERS is last-match-wins, so order matters)
-/environments/development/                @acme/foundry-approvers             # dev: auto-approved by the platform after green checks
+/environments/development/                @acme/self-service-iac-platform-approvers             # dev: auto-approved by the platform after green checks
 /environments/staging/payments/           @acme/payments-maintainers
 /environments/staging/search/             @acme/search-maintainers
 /environments/production/payments/        @acme/payments-maintainers   # SRE gate is the production Environment reviewer
@@ -718,7 +718,7 @@ Tag ruleset `modules/**`: creation restricted to the Foundry GitHub App; update 
 
 The backend generates the per-team `environments/*/<team>/` lines from the `teams` table and keeps CODEOWNERS in sync through a platform PR whenever a team is created.
 
-For **development** stacks, the API auto-approves on behalf of the request when all checks pass and the requester holds `developer` on the team (an approving review is submitted by the dedicated `foundry-approver` machine user — GitHub Apps cannot be code owners — which is a CODEOWNER only for `environments/development/**` and whose token is held in Secrets Manager and used solely by the worker). Staging requires a human team `maintainer`; production requires a team `maintainer` **and** a GitHub Environment reviewer from `@acme/sre`.
+For **development** stacks, the API auto-approves on behalf of the request when all checks pass and the requester holds `developer` on the team (an approving review is submitted by the dedicated `iacp-approver` machine user — GitHub Apps cannot be code owners — which is a CODEOWNER only for `environments/development/**` and whose token is held in Secrets Manager and used solely by the worker). Staging requires a human team `maintainer`; production requires a team `maintainer` **and** a GitHub Environment reviewer from `@acme/sre`.
 
 ### 5.3 GitHub Environments
 
@@ -727,7 +727,7 @@ For **development** stacks, the API auto-approves on behalf of the request when 
 | `development` | none | 0 | `main` only | `vars.AWS_ACCOUNT_ID` |
 | `staging` | none (PR review is the gate) | 0 | `main` only | `vars.AWS_ACCOUNT_ID` |
 | `production` | 1 of `@acme/sre`, prevent self-review | 5 min | `main` only | `vars.AWS_ACCOUNT_ID` |
-| `module-release` | none | 0 | `main` only | `FOUNDRY_APP_PRIVATE_KEY` |
+| `module-release` | none | 0 | `main` only | `IACP_APP_PRIVATE_KEY` |
 
 ## 6. Caching and performance
 
@@ -736,7 +736,7 @@ For **development** stacks, the API auto-approves on behalf of the request when 
 | Terraform providers | `TF_PLUGIN_CACHE_DIR` + `actions/cache` | OS + hash of stack `.terraform.lock.hcl` | Generator writes lock files with `terraform providers lock -platform=linux_amd64 -platform=darwin_arm64`, so `-lockfile=readonly` verifies checksums even from cache |
 | TFLint plugins | `actions/cache` on `~/.tflint.d/plugins` | hash of `.tflint.hcl` | |
 | Go modules (Terratest) | `actions/setup-go` built-in cache | `tests/go.sum` | |
-| Checkov / conftest / Infracost binaries | Pre-built runner image `ghcr.io/acme/foundry-ci@sha256:...` (optional) | image digest | Cuts ~40s per job |
+| Checkov / conftest / Infracost binaries | Pre-built runner image `ghcr.io/acme/self-service-iac-platform-ci@sha256:...` (optional) | image digest | Cuts ~40s per job |
 | Terraform modules (Git) | Not cached | — | Always fetched by tag so the SHA integrity check in [04-module-registry.md](04-module-registry.md#8-how-consumers-pin-versions) is meaningful |
 | Infracost pricing | Infracost Cloud Pricing API cache | — | Self-hosted pricing API is an option for air-gapped setups |
 
@@ -888,9 +888,9 @@ func TestS3(t *testing.T) {
 		for _, tg := range tags.TagSet {
 			got[aws.ToString(tg.Key)] = aws.ToString(tg.Value)
 		}
-		assert.Equal(t, "platform", got["foundry:team"])
-		assert.Equal(t, "development", got["foundry:environment"])
-		assert.Equal(t, "s3", got["foundry:module"])
+		assert.Equal(t, "platform", got["iacp:team"])
+		assert.Equal(t, "development", got["iacp:environment"])
+		assert.Equal(t, "s3", got["iacp:module"])
 		assert.Equal(t, "terratest", got["purpose"])
 	})
 }
@@ -914,4 +914,4 @@ docker compose up -d localstack
 cd tests && go test -tags integration ./modules/... -run TestS3 -count=1 -v
 ```
 
-CI passes `-tags integration` explicitly (see `module-release.yml`). LocalStack covers S3, SQS, KMS, IAM, Lambda and CloudWatch Logs for the MVP modules; modules needing high-fidelity behaviour (RDS, ElastiCache, ECS) run their Terratest suite nightly against the `development` sandbox account using the `foundry-apply` role with a `terratest-*` name prefix and a 2-hour TTL tag.
+CI passes `-tags integration` explicitly (see `module-release.yml`). LocalStack covers S3, SQS, KMS, IAM, Lambda and CloudWatch Logs for the MVP modules; modules needing high-fidelity behaviour (RDS, ElastiCache, ECS) run their Terratest suite nightly against the `development` sandbox account using the `iacp-apply` role with a `terratest-*` name prefix and a 2-hour TTL tag.

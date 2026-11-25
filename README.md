@@ -1,4 +1,4 @@
-# Foundry — Self-Service Infrastructure-as-Code Platform
+# Self-Service IaC Platform
 
 A self-service cloud platform where developers request standardized AWS environments through reviewed pull requests, backed by reusable, versioned Terraform modules, automated plans, tests, security and policy checks, and deployment records you can audit.
 

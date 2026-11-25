@@ -21,7 +21,7 @@ def build() -> str:
         "digraph States {",
         f'  graph [rankdir=LR, fontname="{FONT}", fontsize=22, labelloc=t, pad=0.4, '
         'nodesep=0.5, ranksep=0.75, bgcolor=white, newrank=true, '
-        'label="Foundry: request and stack state machines\\n\\n"];',
+        'label="Self-Service IaC Platform: request and stack state machines\\n\\n"];',
         f'  node [shape=box, style="rounded,filled", fontname="{FONT}", fontsize=13, '
         'penwidth=1.5, margin="0.2,0.1", height=0.5];',
         f'  edge [fontname="{FONT}", fontsize=10.5, color="#4A5568", penwidth=1.2, '

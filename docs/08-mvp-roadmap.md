@@ -48,7 +48,7 @@ Durations assume one engineer; adjust linearly.
 | Tasks |
 |---|
 | Monorepo skeleton per layout in [01-system-architecture.md](01-system-architecture.md); `docker compose` with Postgres, LocalStack, backend, portal |
-| Platform bootstrap Terraform (applied once by an admin; see [02-aws-infrastructure.md](02-aws-infrastructure.md)): state bucket + CMK, GitHub OIDC provider, `foundry-plan`/`foundry-apply` roles + `foundry-boundary` in dev/staging accounts |
+| Platform bootstrap Terraform (applied once by an admin; see [02-aws-infrastructure.md](02-aws-infrastructure.md)): state bucket + CMK, GitHub OIDC provider, `iacp-plan`/`iacp-apply` roles + `iacp-boundary` in dev/staging accounts |
 | GitHub org setup: repo rulesets, GitHub App registration (permissions: contents rw, pull requests rw, checks r, actions rw, metadata r), Environments |
 | ADRs 0001–0008 accepted ([adr/README.md](adr/README.md)) |
 
@@ -75,7 +75,7 @@ Durations assume one engineer; adjust linearly.
 |---|
 | Auth: GitHub OAuth login, session cookie, team sync → `memberships` |
 | Request service + FSM (`draft → … → applied/failed`), platform lock + queue |
-| Config Generator: templates for `main.tf`, `backend.tf`, `versions.tf`, `providers.tf`, `foundry.stack.json`; golden-file tests; `terraform fmt` clean output |
+| Config Generator: templates for `main.tf`, `backend.tf`, `versions.tf`, `providers.tf`, `iacp.stack.json`; golden-file tests; `terraform fmt` clean output |
 | GitHub App client: branch, signed commit via Git Data API, PR with labels and body linking to the request |
 | Webhook ingester (`pull_request`, `workflow_run`, `check_run`) → SQS → worker status updates; delivery-ID dedupe |
 | `pr-validate.yml` (fmt, validate, plan, PR comment, API report) and `apply.yml` (re-plan, hash check, apply, outputs report) |
@@ -93,17 +93,17 @@ Durations assume one engineer; adjust linearly.
 
 | Tasks |
 |---|
-| TFLint + Checkov (+ custom `FOUNDRY_*` checks) in `pr-validate.yml`, SARIF upload |
+| TFLint + Checkov (+ custom `IACP_*` checks) in `pr-validate.yml`, SARIF upload |
 | OPA policies with unit tests (`opa test`): mandatory tags, encryption, no public access, module source allow-list + exact-tag pinning, IAM wildcard deny, environment restrictions (no `alpha` modules outside dev), yanked-version deny |
 | `GET /v1/internal/budget-context` endpoint supplying team, budget and module context to conftest |
-| `foundry-apply` role scoping per account + `foundry-boundary` verified with IAM Access Analyzer policy validation |
+| `iacp-apply` role scoping per account + `iacp-boundary` verified with IAM Access Analyzer policy validation |
 | Branch ruleset, CODEOWNERS generation, Environment protection |
 
 **Acceptance:**
 - A request with `force_destroy=true` in staging is blocked by OPA with a readable message in the PR comment and portal.
 - A hand-crafted PR using a public registry module or `?ref=main` is denied.
 - Policy test coverage ≥ 90% of rules with positive and negative cases (`opa test --coverage`).
-- No IAM principal in workload accounts other than `foundry-apply`/break-glass can create resources tagged `foundry:managed-by=foundry` (SCP or boundary check documented in [07-security-and-policy.md](07-security-and-policy.md)).
+- No IAM principal in workload accounts other than `iacp-apply`/break-glass can create resources tagged `iacp:managed-by=iacp` (SCP or boundary check documented in [07-security-and-policy.md](07-security-and-policy.md)).
 
 ### M4 — Dashboard and destroy (weeks 9–10)
 
@@ -138,7 +138,7 @@ Duration ~12 minutes. Pre-reqs: platform deployed, `payments` team with demo use
 | 4 | Open PR: generated HCL with exact `?ref=` pins; checks running | GitOps PR, no hand-written Terraform |
 | 5 | Sticky comment: plan (+9 resources), Checkov/OPA pass, Infracost +$1.40/mo | Security and cost visible before merge |
 | 6 | Edit the request to set `force_destroy=true` on S3 in `staging` copy | OPA deny message in PR + portal; request `failed` validation |
-| 7 | Merge the dev PR (auto-approved in dev) | `apply.yml` runs with `foundry-apply` via OIDC; status `applying → applied` |
+| 7 | Merge the dev PR (auto-approved in dev) | `apply.yml` runs with `iacp-apply` via OIDC; status `applying → applied` |
 | 8 | Show AWS console / CLI: bucket encrypted with CMK, public access blocked, DLQ present; CloudTrail session name `apply-<run>-<stack>` | Secure defaults are real; traceability |
 | 9 | Submit a second request on same stack while one is open | Queued behind the platform lock |
 | 10 | Audit tab: full timeline with hash-chain verified badge | Auditability |
@@ -168,7 +168,7 @@ Duration ~12 minutes. Pre-reqs: platform deployed, `payments` team with demo use
 | More packages | SNS, API Gateway, EventBridge, DynamoDB; external module contributions by product teams |
 | Policy self-service | Team-level policy exceptions with expiry and approval workflow |
 | Merge queue | GitHub merge queue to reduce "branch up to date" friction at higher PR volume |
-| CLI + Backstage plugin | `foundry` CLI over the same API; catalog surfaced in Backstage |
+| CLI + Backstage plugin | `iacp` CLI over the same API; catalog surfaced in Backstage |
 | SLOs | Platform SLOs (API availability 99.9%, p95 lead time) with error budgets |
 
 ## 6. Success metrics
@@ -178,7 +178,7 @@ Duration ~12 minutes. Pre-reqs: platform deployed, `payments` team with demo use
 | Lead time to infrastructure | `requests.created_at` → `applied_at`, median, dev | < 15 min | < 10 min |
 | Change failure rate | Failed applies / total applies (30 d) | < 10% | < 5% |
 | Pipeline policy catch rate | Requests blocked by policy before apply / requests with violations (seeded tests) | 100% of seeded violations | 100% |
-| Platform adoption | % of new AWS resources (by tag) created via Foundry | 1 pilot team | > 60% of teams |
+| Platform adoption | % of new AWS resources (by tag) created via the platform | 1 pilot team | > 60% of teams |
 | Drift count | Stacks in `drifted` at any time | n/a | < 2% of stacks, MTTR < 2 days |
 | Orphaned ephemeral cost | Spend on resources past `expires_at` | n/a | < 1% of dev spend |
 | Ticket deflection | Infra tickets to platform team per month | baseline | −50% |
@@ -198,7 +198,7 @@ Metrics are computed from `requests`, `pipeline_runs`, `drift_reports`, `cost_es
 
 **Resume bullets (examples):**
 
-- Designed and built *Foundry*, a self-service infrastructure platform (Go, PostgreSQL, Next.js, Terraform, GitHub Actions) that turns portal requests into policy-checked pull requests and applies them via GitHub OIDC with zero static cloud credentials.
+- Designed and built *Self-Service IaC Platform*, a self-service infrastructure platform (Go, PostgreSQL, Next.js, Terraform, GitHub Actions) that turns portal requests into policy-checked pull requests and applies them via GitHub OIDC with zero static cloud credentials.
 - Built a versioned Terraform module registry (SemVer git tags, JSON-Schema manifests, automated release and catalog indexing) with secure-by-default S3, SQS and Lambda packages validated by Checkov, OPA and Terratest on LocalStack.
 - Implemented a stateful orchestration engine with a request state machine, per-stack locking and queueing, approved-plan hash verification and a hash-chained audit log.
 - Added lifecycle automation — drift detection, TTL-based teardown, upgrade paths and Infracost-based budget enforcement — reducing orphaned dev spend and manual infra tickets.
@@ -213,7 +213,7 @@ Metrics are computed from `requests`, `pipeline_runs`, `drift_reports`, `cost_es
 | GitHub outage blocks provisioning | Low | High | Requests stay queued in DB; nothing applies outside Git by design; documented break-glass for emergencies |
 | LocalStack fidelity gaps hide real bugs | Medium | Medium | Nightly sandbox-account Terratest for every module; LocalStack only for fast feedback |
 | Module SemVer violations break consumers | Medium | High | Interface diff + upgrade-plan test gate; yanking; OPA deny on stateful replace |
-| Over-broad `foundry-apply` permissions | Low | Critical | Permission boundary, per-account scoping, Access Analyzer checks, SCP guardrails ([07-security-and-policy.md](07-security-and-policy.md)) |
+| Over-broad `iacp-apply` permissions | Low | Critical | Permission boundary, per-account scoping, Access Analyzer checks, SCP guardrails ([07-security-and-policy.md](07-security-and-policy.md)) |
 | Scope creep into the portal | High | Medium | Principle §2.1; API-first acceptance criteria; portal milestone time-boxed |
 | Infracost estimates inaccurate for usage-based services | High | Low | Treat as signal; compare with Cost Explorer actuals; usage files per module |
 | Single maintainer / bus factor | Medium | High | ADRs, runbooks, golden-file tests, documented demo environment rebuild |

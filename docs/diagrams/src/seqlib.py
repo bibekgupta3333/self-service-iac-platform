@@ -6,7 +6,7 @@ Usage
 
     s = Sequence("Provision request", subtitle="optional")
     s.participant("dev", "Developer", kind="actor")
-    s.participant("api", "Foundry API")
+    s.participant("api", "Platform API")
     s.msg("dev", "api", "POST /requests")
     s.ret("api", "dev", "201 Created")
     s.self_msg("api", "validate inputs")
@@ -44,7 +44,7 @@ NAVY = "#1F3A5F"
 MUTED = "#5B6675"
 KIND_FILL = {
     "actor": ("#FFF1DC", "#C9822B"),     # people
-    "service": ("#E6EEF9", "#1F3A5F"),   # Foundry components
+    "service": ("#E6EEF9", "#1F3A5F"),   # the platform components
     "github": ("#ECEAF7", "#4B3F8F"),    # GitHub / Actions
     "aws": ("#FFF6E5", "#B26B00"),       # AWS services / accounts
     "data": ("#E7F4EC", "#2E7D4F"),      # databases / stores

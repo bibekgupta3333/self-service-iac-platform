@@ -1,4 +1,4 @@
-"""AWS account and network topology for Foundry and the workload accounts."""
+"""AWS account and network topology for the platform and the workload accounts."""
 
 from diagrams import Cluster, Diagram, Edge
 from diagrams.aws.compute import ElasticContainerServiceService, Lambda
@@ -21,8 +21,8 @@ def workload(env: str, bg: str):
     with Cluster(f"{env} account", graph_attr=cluster(bg)):
         with Cluster("IAM roles (OIDC trust:\nrepo + branch / environment)",
                      graph_attr=cluster("white", style="dashed")):
-            plan = IAMRole("foundry-plan\n(read-only)")
-            apply = IAMRole("foundry-apply\n(boundary:\nfoundry-boundary)")
+            plan = IAMRole("iacp-plan\n(read-only)")
+            apply = IAMRole("iacp-apply\n(boundary:\niacp-boundary)")
         with Cluster("Provisioned stacks (examples)", graph_attr=cluster("white", style="dashed")):
             s3 = S3("S3 + KMS")
             sqs = SQS("SQS + DLQ")
@@ -35,13 +35,13 @@ def workload(env: str, bg: str):
 
 def build():
     graph = dict(GRAPH, ranksep="0.9", nodesep="0.45", newrank="true")
-    with Diagram("Foundry: AWS infrastructure", filename=out("aws-infrastructure"),
+    with Diagram("Self-Service IaC Platform: AWS infrastructure", filename=out("aws-infrastructure"),
                  show=False, direction="TB", graph_attr=graph, node_attr=NODE,
                  edge_attr=EDGE, outformat="png"):
         users = Users("Developers")
         gha = GithubActions("GitHub Actions\n(OIDC provider\ntoken.actions.\ngithubusercontent.com)")
 
-        with Cluster("platform account (Foundry)", graph_attr=cluster(BLUE)):
+        with Cluster("platform account (control plane)", graph_attr=cluster(BLUE)):
             with Cluster("VPC (3 AZs)", graph_attr=cluster("white")):
                 with Cluster("Public subnets", graph_attr=cluster(GREEN)):
                     waf = WAF("AWS WAF")
@@ -59,7 +59,7 @@ def build():
                 secrets = SecretsManager("Secrets Manager\n(GitHub App key,\nDB creds)")
                 cw = Cloudwatch("CloudWatch\nlogs / metrics / alarms")
             with Cluster("Terraform state", graph_attr=cluster("white", style="dashed")):
-                state = S3("foundry-tfstate-<acct>\n(versioned, TLS-only,\nuse_lockfile)")
+                state = S3("iacp-tfstate-<acct>\n(versioned, TLS-only,\nuse_lockfile)")
                 kms = KMS("KMS CMK")
 
         with Cluster("Workload accounts", graph_attr=cluster("#FFFDF8")):

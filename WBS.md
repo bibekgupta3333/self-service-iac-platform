@@ -1,6 +1,6 @@
 # Work Breakdown Structure (WBS)
 
-Hierarchical breakdown of all work for Foundry. Each leaf is a deliverable sized at 0.5–3 days (one engineer).
+Hierarchical breakdown of all work for the platform. Each leaf is a deliverable sized at 0.5–3 days (one engineer).
 Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes as work lands, and update [CHANGELOG.md](CHANGELOG.md).
 
 **Legend:** `[x]` done · `[ ]` to do · **Est** = engineer-days · **Dep** = depends on
@@ -43,8 +43,8 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 | [ ] 2.1 | Monorepo skeleton (`modules/ policies/ environments/ tests/ backend/ portal/ .github/`) | 0.5 | 1 |
 | [ ] 2.2 | `docker-compose.yml`: Postgres, LocalStack, backend, portal; Makefile targets | 1 | 2.1 |
 | [ ] 2.3 | Bootstrap Terraform: state bucket (SSE-KMS, versioning, TLS-only), CMK | 1 | 2.1 |
-| [ ] 2.4 | GitHub OIDC provider + `foundry-plan` / `foundry-apply` roles + `foundry-boundary` (dev, staging) | 1 | 2.3 |
-| [ ] 2.5 | GitHub setup: repo rulesets, GitHub App registration, Environments, `foundry-approver` user | 1 | 2.1 |
+| [ ] 2.4 | GitHub OIDC provider + `iacp-plan` / `iacp-apply` roles + `iacp-boundary` (dev, staging) | 1 | 2.3 |
+| [ ] 2.5 | GitHub setup: repo rulesets, GitHub App registration, Environments, `iacp-approver` user | 1 | 2.1 |
 | [ ] 2.6 | Smoke stack `environments/development/platform/smoke/` plans via OIDC | 0.5 | 2.4 |
 
 **Exit:** `docker compose up` is healthy, and the smoke stack plans in Actions with no static credentials.
@@ -71,7 +71,7 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 | [ ] 4.4 | Auth: GitHub OAuth login, sessions/JWT, team sync → memberships, RBAC middleware | 2 | 4.2 |
 | [ ] 4.5 | Request service + state machine + `Idempotency-Key` | 2 | 4.2 |
 | [ ] 4.6 | Platform per-stack lock, fencing token, queueing (`queued_behind`) | 1 | 4.5 |
-| [ ] 4.7 | Config generator: templates (main/backend/versions/providers/`foundry.stack.json`), golden tests | 2 | 4.3 |
+| [ ] 4.7 | Config generator: templates (main/backend/versions/providers/`iacp.stack.json`), golden tests | 2 | 4.3 |
 | [ ] 4.8 | GitHub App client: branch, commit, PR, labels, workflow_dispatch | 1.5 | 2.5 |
 | [ ] 4.9 | Webhook ingester (HMAC, delivery dedupe) → SQS → worker status updates | 1.5 | 4.5 |
 | [ ] 4.10 | OIDC JWT verifier for `POST /v1/runs` and `/v1/internal/*` | 1 | 4.1 |
@@ -87,13 +87,13 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 | [ ] 5.3 | `apply.yml`: lock claim, re-plan, plan-hash verify, apply (apply role), outputs report | 2 | 5.2, 4.6 |
 | [ ] 5.4 | Concurrency groups per stack, caching (providers, plugins) | 0.5 | 5.2 |
 | [ ] 5.5 | Infracost step + PR comment (informational in MVP) | 1 | 5.2 |
-| [ ] 5.6 | Reusable `.github/actions/foundry-report` composite action | 1 | 5.2 |
+| [ ] 5.6 | Reusable `.github/actions/iacp-report` composite action | 1 | 5.2 |
 | [ ] 5.7 | Smoke tests / Terratest post-apply for ephemeral envs | 1 | 3.5, 5.3 |
 
 ## 6. Security & policy — M3
 | ID | Task | Est | Dep |
 |----|------|-----|-----|
-| [ ] 6.1 | TFLint config + Checkov (+ custom `FOUNDRY_*` checks), SARIF upload | 1.5 | 5.2 |
+| [ ] 6.1 | TFLint config + Checkov (+ custom `IACP_*` checks), SARIF upload | 1.5 | 5.2 |
 | [ ] 6.2 | OPA policies: tags, encryption, no public access, source allow-list + exact pin, IAM wildcard deny, env restrictions, yanked versions | 3 | 5.2 |
 | [ ] 6.3 | `opa test` suite with ≥ 90% rule coverage | 1 | 6.2 |
 | [ ] 6.4 | `GET /v1/internal/budget-context` for conftest input | 0.5 | 4.2 |
@@ -133,7 +133,7 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 - [ ] 9.3 More packages: SNS, API Gateway, EventBridge, DynamoDB
 - [ ] 9.4 Policy exceptions self-service with expiry
 - [ ] 9.5 GitHub merge queue
-- [ ] 9.6 `foundry` CLI + Backstage plugin
+- [ ] 9.6 `iacp` CLI + Backstage plugin
 - [ ] 9.7 Platform SLOs and error budgets
 
 ## 10. Project management & release (ongoing)

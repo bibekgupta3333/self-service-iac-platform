@@ -1,4 +1,4 @@
-"""Entity-relationship diagram of the Foundry PostgreSQL schema."""
+"""Entity-relationship diagram of the platform PostgreSQL schema."""
 
 from dotutil import render_dot
 
@@ -99,7 +99,7 @@ def build() -> str:
         "digraph ERD {",
         '  graph [rankdir=LR, fontname="%s", fontsize=22, labelloc=t, pad=0.4, '
         'nodesep=0.45, ranksep=0.9, splines=spline, bgcolor=white, '
-        'label="Foundry: PostgreSQL data model (key columns)\\n\\n"];' % FONT,
+        'label="Self-Service IaC Platform: PostgreSQL data model (key columns)\\n\\n"];' % FONT,
         f'  node [shape=plaintext, fontname="{FONT}", fontsize=11];',
         f'  edge [fontname="{FONT}", fontsize=10, color="#5B6675", dir=both, '
         'penwidth=1.2];',

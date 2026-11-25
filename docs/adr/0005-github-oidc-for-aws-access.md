@@ -14,10 +14,10 @@ Workflows need AWS credentials to plan and apply. Static IAM user keys stored as
 - Each AWS account has an IAM OIDC identity provider for `token.actions.githubusercontent.com`.
 - Workflows call `sts:AssumeRoleWithWebIdentity` via `aws-actions/configure-aws-credentials`.
 - Two roles per workload account:
-  - `foundry-plan`: read-only + state read; trust `sub` = `repo:<org>/foundry:pull_request` and `repo:<org>/foundry:ref:refs/heads/main` (drift).
-  - `foundry-apply`: scoped write with permission boundary `foundry-boundary`; trust `sub` = `repo:<org>/foundry:environment:<env>` only, so it is usable solely by jobs bound to the protected GitHub Environment.
+  - `iacp-plan`: read-only + state read; trust `sub` = `repo:<org>/iacp:pull_request` and `repo:<org>/iacp:ref:refs/heads/main` (drift).
+  - `iacp-apply`: scoped write with permission boundary `iacp-boundary`; trust `sub` = `repo:<org>/iacp:environment:<env>` only, so it is usable solely by jobs bound to the protected GitHub Environment.
 - Trust policies also pin `aud = sts.amazonaws.com` and, where supported, `job_workflow_ref` to the approved workflow files.
-- The same OIDC tokens (audience `foundry-api`) authenticate workflow callbacks to the Foundry API.
+- The same OIDC tokens (audience `iacp-api`) authenticate workflow callbacks to the Platform API.
 - No static AWS keys exist anywhere in GitHub or the backend.
 
 ## Consequences
