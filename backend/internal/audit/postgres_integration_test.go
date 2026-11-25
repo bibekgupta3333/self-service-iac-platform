@@ -25,9 +25,11 @@ func TestWriterAndVerifierAgainstPostgres(t *testing.T) {
 	for i := range 5 {
 		err := txr.InTx(ctx, func(tx pgx.Tx) error {
 			_, err := w.Append(ctx, tx, audit.Event{
-				ActorType: audit.ActorSystem, ActorID: "worker", Action: "test.event",
+				ActorType: audit.ActorSystem, ActorID: "worker", ActorIP: "::ffff:198.51.100.4", Action: "test.event",
 				SubjectType: "request", SubjectID: fmt.Sprintf("req-%d", i), TeamID: &team,
-				Payload: json.RawMessage(fmt.Sprintf(`{"z": %d, "a": [1, 2.50, "x"], "nested": {"b": true, "a": null}}`, i)),
+				Payload: json.RawMessage(fmt.Sprintf(`{"z": %d, "a": [1, 2.50, "x", 1e2, 0.10],
+					"big": 9007199254740993, "huge": 123456789012345678901234567890.5,
+					"nested": {"b": true, "a": null, "s": "<&>é"}}`, i)),
 			})
 			return err
 		})

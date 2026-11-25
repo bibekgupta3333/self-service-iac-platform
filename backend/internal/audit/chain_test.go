@@ -37,7 +37,7 @@ func TestCanonicalJSONIsIndependentOfPayloadSpelling(t *testing.T) {
 	if string(ca) != string(cb) {
 		t.Fatalf("canonical forms differ:\n%s\n%s", ca, cb)
 	}
-	want := `{"action":"request.created","actor_id":"4b1f2a0e-8a71-4b0c-9c1e-2f1d5e6a7b80","actor_type":"user","correlation_id":"","id":"00000000-0000-0000-0000-000000000001","occurred_at":"2026-11-24T10:00:01.000512Z","payload":{"kind":"create","n":1},"subject_id":"req-7k3p9x","subject_type":"request","team_id":""}`
+	want := `{"action":"request.created","actor_id":"4b1f2a0e-8a71-4b0c-9c1e-2f1d5e6a7b80","actor_ip":"","actor_type":"user","correlation_id":"","id":"00000000-0000-0000-0000-000000000001","occurred_at":"2026-11-24T10:00:01.000512Z","payload":{"kind":"create","n":1},"subject_id":"req-7k3p9x","subject_type":"request","team_id":""}`
 	if string(ca) != want {
 		t.Fatalf("canonical =\n%s\nwant\n%s", ca, want)
 	}
@@ -50,7 +50,7 @@ func TestChainHashKnownValue(t *testing.T) {
 	}
 	// Pinned so any change to the canonical form is a deliberate, reviewed decision:
 	// existing chains stop verifying if it changes.
-	const want = "9de36f6763389ce108177d240c0e6dedfc11860dd85802fc5984729341bb2eaf"
+	const want = "c5635676c8915dabbac6bd4edf688942f95a0e3d332221b8597c386d4eb3003c"
 	if got := hex.EncodeToString(h); got != want {
 		t.Fatalf("hash = %s, want %s", got, want)
 	}

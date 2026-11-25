@@ -37,6 +37,7 @@ type Event struct {
 	OccurredAt    time.Time
 	ActorType     string
 	ActorID       string
+	ActorIP       string // optional; normalised by CanonicalIP before hashing and storing
 	Action        string // e.g. request.created
 	SubjectType   string // request | stack | module_version | ...
 	SubjectID     string
@@ -57,6 +58,7 @@ type Record struct {
 type canonicalEvent struct {
 	Action        string `json:"action"`
 	ActorID       string `json:"actor_id"`
+	ActorIP       string `json:"actor_ip"`
 	ActorType     string `json:"actor_type"`
 	CorrelationID string `json:"correlation_id"`
 	ID            string `json:"id"`
@@ -69,14 +71,18 @@ type canonicalEvent struct {
 
 // CanonicalJSON returns the deterministic encoding of e that is hashed into the chain.
 //
-// The payload is decoded and re-encoded, so key order, whitespace and number spelling
-// (1e2 vs 100) do not matter: the same logical payload read back from jsonb hashes the same.
+// The payload goes through CanonicalPayload, so key order, whitespace and number spelling
+// (1e2 vs 100, 2.50 vs 2.5) do not matter, while every digit of a number is kept: the
+// same logical payload read back from jsonb hashes the same, and changing any value
+// (including beyond float64 precision) changes the hash.
 func CanonicalJSON(e Event) ([]byte, error) {
-	var payload any = map[string]any{}
-	if len(bytes.TrimSpace(e.Payload)) > 0 {
-		if err := json.Unmarshal(e.Payload, &payload); err != nil {
-			return nil, fmt.Errorf("canonical payload: %w", err)
-		}
+	payload, err := CanonicalPayload(e.Payload)
+	if err != nil {
+		return nil, err
+	}
+	ip, err := CanonicalIP(e.ActorIP)
+	if err != nil {
+		return nil, err
 	}
 	team := ""
 	if e.TeamID != nil {
@@ -85,11 +91,12 @@ func CanonicalJSON(e Event) ([]byte, error) {
 	c := canonicalEvent{
 		Action:        e.Action,
 		ActorID:       e.ActorID,
+		ActorIP:       ip,
 		ActorType:     e.ActorType,
 		CorrelationID: e.CorrelationID,
 		ID:            e.ID.String(),
 		OccurredAt:    e.OccurredAt.UTC().Format(timeLayout),
-		Payload:       payload,
+		Payload:       json.RawMessage(payload),
 		SubjectID:     e.SubjectID,
 		SubjectType:   e.SubjectType,
 		TeamID:        team,

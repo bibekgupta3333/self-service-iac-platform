@@ -2,7 +2,6 @@ package audit
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -37,8 +36,14 @@ func (w *Writer) Append(ctx context.Context, tx pgx.Tx, e Event) (Record, error)
 	if e.OccurredAt.IsZero() {
 		e.OccurredAt = w.clock.Now()
 	}
-	if len(e.Payload) == 0 {
-		e.Payload = json.RawMessage(`{}`)
+	// Store exactly the canonical bytes that are hashed; jsonb reads them back unchanged.
+	payload, err := CanonicalPayload(e.Payload)
+	if err != nil {
+		return Record{}, err
+	}
+	e.Payload = payload
+	if e.ActorIP, err = CanonicalIP(e.ActorIP); err != nil {
+		return Record{}, err
 	}
 	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", chainLockKey); err != nil {
 		return Record{}, fmt.Errorf("audit chain lock: %w", err)
@@ -56,11 +61,11 @@ func (w *Writer) Append(ctx context.Context, tx pgx.Tx, e Event) (Record, error)
 		corr = &e.CorrelationID
 	}
 	err = tx.QueryRow(ctx, `
-		INSERT INTO audit_events (id, occurred_at, actor_type, actor_id, action, subject_type, subject_id,
+		INSERT INTO audit_events (id, occurred_at, actor_type, actor_id, actor_ip, action, subject_type, subject_id,
 		                          team_id, correlation_id, payload, prev_hash, hash)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		VALUES ($1, $2, $3, $4, nullif($5, '')::inet, $6, $7, $8, $9, $10, $11, $12, $13)
 		RETURNING seq`,
-		e.ID, e.OccurredAt, e.ActorType, e.ActorID, e.Action, e.SubjectType, e.SubjectID,
+		e.ID, e.OccurredAt, e.ActorType, e.ActorID, e.ActorIP, e.Action, e.SubjectType, e.SubjectID,
 		e.TeamID, corr, []byte(e.Payload), rec.PrevHash, rec.Hash,
 	).Scan(&rec.Seq)
 	if err != nil {
@@ -100,8 +105,8 @@ func (v *Verifier) Verify(ctx context.Context, fromSeq, toSeq int64) (VerifyResu
 	}
 
 	rows, err := v.q.Query(ctx, `
-		SELECT seq, id, occurred_at, actor_type, actor_id, action, subject_type, subject_id,
-		       team_id, coalesce(correlation_id, ''), payload, prev_hash, hash
+		SELECT seq, id, occurred_at, actor_type, actor_id, coalesce(host(actor_ip), ''), action, subject_type,
+		       subject_id, team_id, coalesce(correlation_id, ''), payload, prev_hash, hash
 		FROM audit_events
 		WHERE seq >= $1 AND ($2 <= 0 OR seq <= $2)
 		ORDER BY seq`, fromSeq, toSeq)
@@ -111,7 +116,7 @@ func (v *Verifier) Verify(ctx context.Context, fromSeq, toSeq int64) (VerifyResu
 	records, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Record, error) {
 		var r Record
 		var payload []byte
-		err := row.Scan(&r.Seq, &r.ID, &r.OccurredAt, &r.ActorType, &r.ActorID, &r.Action, &r.SubjectType,
+		err := row.Scan(&r.Seq, &r.ID, &r.OccurredAt, &r.ActorType, &r.ActorID, &r.ActorIP, &r.Action, &r.SubjectType,
 			&r.SubjectID, &r.TeamID, &r.CorrelationID, &payload, &r.PrevHash, &r.Hash)
 		r.Payload = payload
 		return r, err
