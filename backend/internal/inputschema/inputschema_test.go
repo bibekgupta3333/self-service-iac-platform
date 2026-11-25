@@ -71,6 +71,39 @@ func TestCompileRejects(t *testing.T) {
 	}
 }
 
+func TestHugeNumbersDoNotPanic(t *testing.T) {
+	for _, raw := range []string{
+		`{"name":"orders-dev","visibility_timeout_seconds":1e9999999}`,
+		`{"name":"orders-dev","visibility_timeout_seconds":-1e9999999}`,
+		`{"name":"orders-dev","nested":[{"x":1e400}]}`,
+	} {
+		if _, err := Decode(json.RawMessage(raw)); err == nil {
+			t.Errorf("Decode(%s) accepted an out-of-range number", raw)
+		}
+	}
+	if _, err := Decode(json.RawMessage(`{"big":9007199254740993,"small":1e-300}`)); err != nil {
+		t.Errorf("in-range numbers rejected: %v", err)
+	}
+	// Even if a huge number reaches Validate directly, the library panic is contained.
+	num, err := Compile(json.RawMessage(`{"type":"object","properties":{"n":{"type":"number","minimum":0,"maximum":10}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst := map[string]any{"n": json.Number("1e9999999")}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Log("library no longer panics on huge numbers; the guard is now belt-and-braces")
+			}
+		}()
+		_ = num.s.Validate(inst)
+	}()
+	got := num.Validate(inst)
+	if len(got) != 1 || got[0].Code != "invalid" {
+		t.Fatalf("got %+v, want one invalid violation", got)
+	}
+}
+
 func TestPointer(t *testing.T) {
 	if got := Pointer([]string{"a/b", "c~d", "0"}); got != "/a~1b/c~0d/0" {
 		t.Fatalf("Pointer = %q", got)

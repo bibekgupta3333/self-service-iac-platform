@@ -139,7 +139,7 @@ func ValidateResources(resources []ResolvedResource) []apperr.FieldError {
 		}
 		doc, err := inputschema.Decode(raw)
 		if err != nil {
-			errs = append(errs, apperr.FieldError{Pointer: ptr + "/inputs", Code: "type", Message: "must be a JSON object"})
+			errs = append(errs, apperr.FieldError{Pointer: ptr + "/inputs", Code: "type", Message: "must be a JSON object: " + err.Error()})
 			continue
 		}
 		masked, refs := maskRefs(doc, "")

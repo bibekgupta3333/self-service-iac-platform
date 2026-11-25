@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -57,12 +58,51 @@ func Compile(raw json.RawMessage) (*Schema, error) {
 }
 
 // Decode parses JSON into the value model the validator expects (json.Number for numbers).
+// Numbers outside the float64 range (for example 1e9999999) are rejected: no module input
+// needs them, and the validator library cannot compare them safely.
 func Decode(raw json.RawMessage) (any, error) {
-	return jsonschema.UnmarshalJSON(bytes.NewReader(raw))
+	v, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	if ptr, ok := firstOutOfRange(v, ""); !ok {
+		return nil, fmt.Errorf("number at %q is out of range", ptr)
+	}
+	return v, nil
+}
+
+// firstOutOfRange walks v and returns the pointer of the first number that does not fit
+// in a float64. Pure.
+func firstOutOfRange(v any, ptr string) (string, bool) {
+	switch t := v.(type) {
+	case json.Number:
+		if _, err := strconv.ParseFloat(t.String(), 64); err != nil {
+			return ptr, false
+		}
+	case map[string]any:
+		for k, e := range t {
+			if p, ok := firstOutOfRange(e, ptr+Pointer([]string{k})); !ok {
+				return p, false
+			}
+		}
+	case []any:
+		for i, e := range t {
+			if p, ok := firstOutOfRange(e, ptr+"/"+strconv.Itoa(i)); !ok {
+				return p, false
+			}
+		}
+	}
+	return "", true
 }
 
 // Validate checks instance (as returned by Decode) and returns violations sorted by pointer.
-func (s *Schema) Validate(instance any) []Violation {
+// A panic inside the validator library becomes a single violation instead of a crash.
+func (s *Schema) Validate(instance any) (out []Violation) {
+	defer func() {
+		if p := recover(); p != nil {
+			out = []Violation{{Code: "invalid", Message: "input could not be validated"}}
+		}
+	}()
 	err := s.s.Validate(instance)
 	if err == nil {
 		return nil
@@ -72,7 +112,7 @@ func (s *Schema) Validate(instance any) []Violation {
 		return []Violation{{Code: "invalid", Message: err.Error()}}
 	}
 	p := message.NewPrinter(language.English)
-	out := leaves(ve, p, nil)
+	out = leaves(ve, p, nil)
 	slices.SortFunc(out, func(a, b Violation) int {
 		if c := strings.Compare(a.Pointer, b.Pointer); c != 0 {
 			return c

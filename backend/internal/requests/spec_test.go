@@ -120,6 +120,9 @@ func TestValidateResources(t *testing.T) {
 		}, want: []string{"/resources/1/inputs/queue_arn:invalid_ref"}},
 		{name: "not an object", mutate: func(c *CreateInput) { c.Resources[0].Inputs = json.RawMessage(`[1]`) },
 			want: []string{"/resources/0/inputs:type"}},
+		{name: "huge number is rejected, not a panic", mutate: func(c *CreateInput) {
+			c.Resources[0].Inputs = json.RawMessage(`{"name":"orders-dev","visibility_timeout_seconds":1e9999999}`)
+		}, want: []string{"/resources/0/inputs:type"}},
 		{name: "yanked", mutate: func(*CreateInput) {}, yank: true, want: []string{"/resources/0/version:module_version_unavailable"}},
 	}
 	for _, tt := range tests {
