@@ -12,6 +12,19 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 - `docker-compose.yml` with LocalStack 4.4 and PostgreSQL 17, both with health checks, plus `.env.example`.
 - `Makefile` targets for the local stack, Terraform checks, OPA tests, module tests and Go/Python tests; `.editorconfig`; `.terraform-version` (1.13.5).
 
+- Policy as code (WBS 6.1–6.3):
+  - `.tflint.hcl` with the pinned terraform and aws rulesets.
+  - OPA policies on plan JSON under `policies/opa`:
+    - required `iacp:*` tags, S3/SQS encryption with KMS key rotation, no public S3 access, ACLs or policies
+    - IAM wildcard deny, allowed regions, exact `?ref=modules/<name>/vX.Y.Z` module pins, and no `force_destroy` outside development
+    - 91 tests at 100% coverage
+  - Conftest plan fixtures with `verify.sh`.
+  - Custom Checkov checks `IACP_AWS_001`–`003` (tags, S3 KMS CMK, Lambda tracing and concurrency) with a pytest suite.
+- CI workflow `.github/workflows/ci.yml`:
+  - Jobs: Terraform fmt/validate, TFLint and Checkov; OPA and conftest; module tests against a LocalStack service container; Go tests with a Postgres service; Terratest; Python tests.
+  - Every action is pinned by commit SHA, permissions are read-only, and each job skips when its code doesn't exist yet.
+- `.github/pull_request_template.md` and `.github/CODEOWNERS`.
+
 ### Security
 - The local stack binds LocalStack and Postgres to loopback only. Images are pinned by digest.
 - `make` forces LocalStack dummy credentials and unexports `AWS_PROFILE` and session tokens.
@@ -23,7 +36,7 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 - M0 Foundations (remaining): smoke stack against LocalStack. The real-AWS state bucket and OIDC roles are deferred by ADR-0009.
 - M1 Module registry: `modules/s3`, `modules/sqs`, `modules/lambda`, `module.yaml` schema, `module-release.yml`.
 - M2 Orchestration engine: Go API, config generator, GitHub App PRs, webhooks, `pr-validate.yml`, `apply.yml`.
-- M3 Security gates: TFLint, Checkov, OPA policies, budget context, environment protection.
+- M3 Security gates (remaining): SARIF upload, budget context, approval and budget policies, environment protection.
 - M4 Portal and destroy: Next.js dashboard, destroy flow, Infracost comments.
 
 ## [0.1.0] - 2026-11-24

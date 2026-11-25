@@ -94,9 +94,9 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 ## 6. Security & policy — M3
 | ID | Task | Est | Dep |
 |----|------|-----|-----|
-| [ ] 6.1 | TFLint config + Checkov (+ custom `IACP_*` checks), SARIF upload | 1.5 | 5.2 |
-| [ ] 6.2 | OPA policies: tags, encryption, no public access, source allow-list + exact pin, IAM wildcard deny, env restrictions, yanked versions | 3 | 5.2 |
-| [ ] 6.3 | `opa test` suite with ≥ 90% rule coverage | 1 | 6.2 |
+| [x] 6.1 | TFLint config + Checkov (+ custom `IACP_*` checks); SARIF upload pending | 1.5 | 5.2 |
+| [x] 6.2 | OPA policies: tags, encryption, no public access, source allow-list + exact pin, IAM wildcard deny, env restrictions; yanked-version check pending backend context | 3 | 5.2 |
+| [x] 6.3 | `opa test` suite with ≥ 90% rule coverage | 1 | 6.2 |
 | [ ] 6.4 | `GET /v1/internal/budget-context` for conftest input | 0.5 | 4.2 |
 | [ ] 6.5 | Apply-role scoping + boundary validated with IAM Access Analyzer | 1 | 2.4 |
 | [ ] 6.6 | CODEOWNERS generation, branch ruleset, Environment protection for staging/prod | 1 | 2.5 |
