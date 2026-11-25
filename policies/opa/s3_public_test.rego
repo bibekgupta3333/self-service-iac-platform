@@ -120,6 +120,53 @@ test_policy_wildcard_aws_principal_list_denied if {
 	count(s3.deny) == 1 with input as t.plan([bucket, pab({}), bucket_policy(doc)])
 }
 
+test_policy_not_principal_denied if {
+	doc := {"Statement": [{"Effect": "Allow", "NotPrincipal": {"AWS": "arn:aws:iam::111111111111:root"}, "Action": "s3:GetObject"}]}
+	some m in s3.deny with input as t.plan([bucket, pab({}), bucket_policy(doc)])
+	contains(m, `policy allows public access (Principal "*" or NotPrincipal)`)
+}
+
+test_policy_wildcard_condition_value_denied if {
+	doc := allow_all({"Condition": {"StringLike": {"aws:SourceArn": "*"}}})
+	count(s3.deny) == 1 with input as t.plan([bucket, pab({}), bucket_policy(doc)])
+}
+
+test_policy_negated_condition_denied if {
+	doc := allow_all({"Condition": {"StringNotEquals": {"aws:SourceAccount": "111111111111"}}})
+	count(s3.deny) == 1 with input as t.plan([bucket, pab({}), bucket_policy(doc)])
+}
+
+test_policy_if_exists_condition_denied if {
+	doc := allow_all({"Condition": {"StringEqualsIfExists": {"aws:PrincipalOrgID": "o-abc123"}}})
+	count(s3.deny) == 1 with input as t.plan([bucket, pab({}), bucket_policy(doc)])
+}
+
+test_policy_source_account_condition_allowed if {
+	doc := allow_all({"Condition": {"StringEquals": {"aws:SourceAccount": ["111111111111"]}}})
+	count(s3.deny) == 0 with input as t.plan([bucket, pab({}), bucket_policy(doc)])
+}
+
+acl_grant(uri) := t.rc_in("data", "aws_s3_bucket_acl", "this", {"access_control_policy": [{"grant": [{
+	"permission": "READ",
+	"grantee": [{"type": "Group", "uri": uri}],
+}]}]})
+
+test_public_acl_grant_denied if {
+	some m in s3.deny with input as t.plan([bucket, pab({}), acl_grant("http://acs.amazonaws.com/groups/global/AllUsers")])
+	m == concat("", [
+		"[iacp.s3.no_public_acl] module.data.aws_s3_bucket_acl.this: ACL grants READ to http://acs.amazonaws.com/groups/global/AllUsers. ",
+		"Fix: remove the public grant (use bucket owner enforced object ownership)",
+	])
+}
+
+test_authenticated_users_grant_denied if {
+	count(s3.deny) == 1 with input as t.plan([bucket, pab({}), acl_grant("http://acs.amazonaws.com/groups/global/AuthenticatedUsers")])
+}
+
+test_log_delivery_grant_allowed if {
+	count(s3.deny) == 0 with input as t.plan([bucket, pab({}), acl_grant("http://acs.amazonaws.com/groups/s3/LogDelivery")])
+}
+
 test_computed_bucket_policy_warns if {
 	p := t.computed_policy("aws_s3_bucket_policy", "p")
 	count(s3.deny) == 0 with input as t.plan([p])

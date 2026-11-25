@@ -46,6 +46,25 @@ deny contains m if {
 	)
 }
 
+public_grantee_uris := {
+	"http://acs.amazonaws.com/groups/global/AllUsers",
+	"http://acs.amazonaws.com/groups/global/AuthenticatedUsers",
+}
+
+deny contains m if {
+	some rc in f.changed_of_type("aws_s3_bucket_acl")
+	some acp in f.after(rc).access_control_policy
+	some grant in acp.grant
+	some grantee in grant.grantee
+	grantee.uri in public_grantee_uris
+	not f.exempt("iacp.s3.no_public_acl", rc.address)
+	m := f.msg(
+		"iacp.s3.no_public_acl", rc.address,
+		sprintf("ACL grants %s to %s", [grant.permission, grantee.uri]),
+		"remove the public grant (use bucket owner enforced object ownership)",
+	)
+}
+
 # --- Bucket policies -------------------------------------------------------------
 
 restricting_condition_keys := {"aws:principalorgid", "aws:sourcearn", "aws:sourceaccount", "aws:sourcevpce", "aws:sourcevpc"}
@@ -54,17 +73,29 @@ wildcard_principal("*")
 
 wildcard_principal(p) if "*" in f.as_array(p.AWS)
 
+# restricted(statement): a positive (not negated, not IfExists) condition on an
+# org/source key with a concrete value.
 restricted(statement) if {
-	some _, conditions in statement.Condition
-	some key, _ in conditions
+	some op, conditions in statement.Condition
+	not contains(op, "Not")
+	not endswith(op, "IfExists")
+	some key, value in conditions
 	lower(key) in restricting_condition_keys
+	every v in f.as_array(value) { not wildcard_value(v) }
 }
+
+wildcard_value(v) if regex.match(`^[*?]*$`, v)
+
+# public(s): grants to everyone, via Principal "*" or Allow + NotPrincipal.
+public(s) if wildcard_principal(s.Principal)
+
+public(s) if s.NotPrincipal
 
 public_statements(p) := [s |
 	some doc in f.policy_documents(p, "policy")
 	some s in f.as_array(doc.Statement)
 	s.Effect == "Allow"
-	wildcard_principal(s.Principal)
+	public(s)
 	not restricted(s)
 ]
 
@@ -74,7 +105,7 @@ deny contains m if {
 	not f.exempt("iacp.s3.no_public_policy", p.address)
 	m := f.msg(
 		"iacp.s3.no_public_policy", p.address,
-		`policy allows Principal "*" without a restricting condition`,
+		`policy allows public access (Principal "*" or NotPrincipal) without a restricting condition`,
 		"scope the principal or add an aws:PrincipalOrgID / aws:SourceArn / aws:SourceAccount / aws:SourceVpce condition",
 	)
 }
