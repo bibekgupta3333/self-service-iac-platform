@@ -52,7 +52,7 @@ Migrations live in `backend/migrations/` (goose, `NNNN_name.sql`); queries in `b
 
 ```sql
 -- 0001_init.sql
-CREATE EXTENSION IF NOT EXISTS pgcrypto;   -- gen_random_uuid(), digest()
+-- gen_random_uuid() is built in (PostgreSQL 13+); audit hashes are computed in Go, so no pgcrypto.
 CREATE EXTENSION IF NOT EXISTS citext;
 
 -- ---------- enums ----------
@@ -475,8 +475,9 @@ GRANT INSERT, SELECT ON audit_events TO iacp_app;
 
 Notes:
 
-- **Canonical form** (`audit.CanonicalJSON`): a JSON object with keys in alphabetical order: `action`, `actor_id`, `actor_type`, `correlation_id`, `id`, `occurred_at` (`YYYY-MM-DDTHH:MM:SS.ffffffZ`), `payload`, `subject_id`, `subject_type`, `team_id` (empty string when null). The payload is decoded and re-encoded with sorted keys, so the jsonb round trip (key order, whitespace, number spelling) does not change the hash, and the verifier can recompute it from stored or exported rows. A known-value test pins the format; changing it invalidates existing chains.
-- Hashing in Go rather than in the trigger ([ADR-0010](adr/0010-audit-hash-chain-computed-in-go.md)) keeps the chain logic a pure, unit-testable function (`ChainHash`, `VerifyChain`) while the database still guarantees linkage and immutability. `GET /v1/audit/verify` recomputes a `seq` range.
+- **Canonical form** (`audit.CanonicalJSON`): a JSON object with keys in alphabetical order: `action`, `actor_id`, `actor_ip` (canonical address text, empty when null), `actor_type`, `correlation_id`, `id`, `occurred_at` (`YYYY-MM-DDTHH:MM:SS.ffffffZ`), `payload`, `subject_id`, `subject_type`, `team_id` (empty string when null). The payload is decoded with exact numbers and re-encoded with sorted keys, and every number is rewritten as a plain decimal that keeps all significant digits (`1e2` becomes `100`, `2.50` becomes `2.5`). The writer stores those canonical bytes; they are a fixed point of jsonb's output, so the round trip does not change the hash, the verifier can recompute it from stored or exported rows, and changing any digit (even beyond float64 precision) is detected. A known-value test pins the format; changing it invalidates existing chains.
+- Hashing in Go rather than in the trigger ([ADR-0010](adr/0010-audit-hash-chain-computed-in-go.md)) keeps the chain logic a pure, unit-testable function (`ChainHash`, `VerifyChain`) while the database still guarantees linkage and immutability. `GET /v1/audit/verify` recomputes a `seq` range of at most 10,000 events per call and returns `has_more` when the chain continues.
+- **Roles:** the API connects as `iacp_app` (INSERT and SELECT on `audit_events`, DML elsewhere, nothing on `goose_db_version`); migrations run as the schema owner on a separate connection (migration `0004_app_role_grants.sql`). The app role cannot disable triggers or set `session_replication_role`.
 - **Verification job** (worker, nightly): streams `audit_events` in `seq` order, recomputes the chain, emits metric `the platform/AuditChainValid` (alarm on 0).
 - **Anchoring:** at 00:15 UTC the worker writes `{seq, hash, occurred_at}` of the chain head plus an NDJSON export of the previous day to `s3://iacp-audit-anchor-111111111111/yyyy/mm/dd/` (Object Lock compliance, 7 y). Any later tampering with Postgres (even by a superuser disabling triggers) is detectable against the anchors.
 - The single advisory lock serialises audit inserts (~ tens/sec sustained); measured headroom is ample for 500 requests/day. If needed, partition chains per team.
@@ -567,7 +568,7 @@ stateDiagram-v2
 - **Timestamps:** RFC 3339 UTC.
 - **Pagination:** cursor-based. `?limit=50` (max 200) `&cursor=<opaque>`. Response `{"data":[…], "next_cursor":"eyJzZXEiOjEyMzR9"|null}`. Cursor = base64 of the last sort key; stable under inserts.
 - **Filtering/sorting:** explicit query params per endpoint (`status`, `team`, `env`, `module`); `sort=-created_at`.
-- **Idempotency:** all `POST` creating resources accept `Idempotency-Key` (required for `POST /requests`). Same key + same body hash within 24 h → the original resource is returned with header `Idempotent-Replayed: true` (the key row stores `{"request_id": …}`, so a replay shows the request's current state; a create that fails validation stores nothing, so the key can be retried); same key + different body → `422 idempotency_key_reuse`.
+- **Idempotency:** all `POST` creating resources accept `Idempotency-Key` (required for `POST /requests`). Same key + same body hash within 24 h → the original resource is returned with header `Idempotent-Replayed: true` (the key row stores `{"request_id": …}`, so a replay shows the request's current state; a create that fails validation stores nothing, so the key can be retried); same key + different body → `422 idempotency_key_reuse`. Keys expire after 24 h: a claim deletes an expired row for the same key first, and `PurgeExpiredIdempotencyKeys` lets the worker sweep old rows.
 - **Concurrency control:** resources return `ETag` (row version); `PATCH`/`DELETE` honour `If-Match` → `412` on mismatch.
 - **Rate limits:** 600 req/min per user, 60 req/min for `POST /requests`; headers `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`.
 - **Correlation:** `X-Request-Id` echoed/generated; appears in logs and audit events.
@@ -614,7 +615,7 @@ RBAC column uses team roles (see [07-security-and-policy.md](07-security-and-pol
 | GET | `/catalog/modules/{name}/upgrade-path?from=1.2.0&to=latest` | Intermediate versions, breaking flags, concatenated changelog. | any |
 | GET | `/catalog/modules/{name}/usage` | Stacks using each version (fleet view). | maintainer of owning team / admin |
 | POST | `/catalog/modules/{name}/versions/{version}/deprecate` | Mark deprecated with note. | module owner / admin |
-| POST | `/internal/catalog/index` | Index a released version: `{module, version, git_tag, commit_sha}`; backend fetches `module.yaml` at that SHA (called by `module-release.yml`). | OIDC JWT: `module-release.yml@refs/heads/main` |
+| POST | `/internal/catalog/index` | Index a released version: `{module, version, git_tag, commit_sha}`; backend fetches `module.yaml` at that SHA (called by `module-release.yml`). Until the GitHub client lands, the parsed manifest is sent inline. A re-index that changes owners or other metadata writes a `module.updated` audit event. | OIDC JWT: `module-release.yml@refs/heads/main` (interim: shared bearer token `IACP_INTERNAL_TOKEN`, constant-time compare; no token configured means 401) |
 
 `GET /v1/catalog/modules/sqs/versions/1.3.0`
 
@@ -670,7 +671,7 @@ Stacks are never created or destroyed directly; mutation is always a request.
 
 | Method | Path | Description | RBAC |
 |---|---|---|---|
-| POST | `/requests` | Create request (`kind`: create, update, upgrade, destroy, reconcile, rollback). Requires `Idempotency-Key`. | developer (any env); maintainer to create `destroy` in production |
+| POST | `/requests` | Create request (`kind`: create, update, upgrade, destroy, reconcile, rollback). Requires `Idempotency-Key`. | developer (any env); maintainer to create `destroy` in production. Enforced now from `memberships` (platform admins count as admin); full RBAC middleware arrives with WBS 4.4 |
 | GET | `/requests?team=&status=&kind=&mine=true` | List. | viewer |
 | GET | `/requests/{id}` | Detail incl. PR, pipeline runs, plan, cost, timeline. | viewer |
 | POST | `/requests/{id}/preview` | Dry-run render: returns generated files + diff without opening a PR. | developer |
