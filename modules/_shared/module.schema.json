@@ -150,7 +150,11 @@
       "additionalProperties": false,
       "required": ["input", "accepts"],
       "properties": {
-        "input": { "$ref": "#/$defs/identifier" },
+        "input": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$",
+          "description": "Input name, or a dotted path to an attribute of an object input (e.g. sqs_trigger.queue_arn)."
+        },
         "description": { "type": "string" },
         "accepts": {
           "type": "array",
