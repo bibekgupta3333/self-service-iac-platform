@@ -16,6 +16,7 @@ import (
 
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/catalog"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/fp"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/tfname"
 )
 
 // Header starts every generated file.
@@ -65,10 +66,8 @@ func (id StackIdentity) StateKey() string {
 }
 
 var (
-	identRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
-	nameRe  = regexp.MustCompile(`^[a-z][a-z0-9-]{1,40}$`)
-	shaRe   = regexp.MustCompile(`^[0-9a-f]{40}$`)
-	refRe   = regexp.MustCompile(`^([a-z][a-z0-9_]{0,62})\.([a-z][a-z0-9_]*)$`)
+	nameRe = regexp.MustCompile(`^[a-z][a-z0-9-]{1,40}$`)
+	shaRe  = regexp.MustCompile(`^[0-9a-f]{40}$`)
 )
 
 // decodedResource is a Resource with its inputs parsed (numbers kept as json.Number).
@@ -96,7 +95,7 @@ func prepare(spec StackSpec) ([]decodedResource, error) {
 	}
 	out := make([]decodedResource, 0, len(spec.Resources))
 	for _, r := range spec.Resources {
-		if !identRe.MatchString(r.Name) {
+		if !tfname.IsIdentifier(r.Name) {
 			return nil, fmt.Errorf("resource name %q is not an HCL identifier", r.Name)
 		}
 		if !nameRe.MatchString(r.Module) {
@@ -128,41 +127,21 @@ func decodeInputs(raw json.RawMessage) (map[string]any, error) {
 	if err := dec.Decode(&m); err != nil {
 		return nil, fmt.Errorf("inputs must be a JSON object: %w", err)
 	}
-	for k := range m {
-		if !identRe.MatchString(k) {
-			return nil, fmt.Errorf("input name %q is not an HCL identifier", k)
-		}
-		if k == "source" || k == "version" || k == "providers" || k == "depends_on" || k == "count" || k == "for_each" {
-			return nil, fmt.Errorf("input name %q is reserved by Terraform", k)
+	for _, k := range fp.SortedKeys(m) {
+		if err := tfname.ValidateInputName(k); err != nil {
+			return nil, err
 		}
 	}
 	return m, nil
 }
 
-// asRef reports whether v is {"$ref": "<instance>.<output>"} and returns the parts.
-func asRef(v any) (inst, output string, ok bool) {
-	m, isMap := v.(map[string]any)
-	if !isMap || len(m) != 1 {
-		return "", "", false
-	}
-	s, isStr := m["$ref"].(string)
-	if !isStr {
-		return "", "", false
-	}
-	parts := refRe.FindStringSubmatch(s)
-	if parts == nil {
-		return "", "", false
-	}
-	return parts[1], parts[2], true
-}
-
 func checkRefs(v any, self string, byName map[string]Resource) error {
 	if m, ok := v.(map[string]any); ok {
-		if raw, has := m["$ref"]; has && len(m) == 1 {
-			inst, out, valid := asRef(m)
-			if !valid {
-				return fmt.Errorf("malformed reference %v", raw)
+		if ref, isRef, err := tfname.ParseRef(m); isRef {
+			if err != nil {
+				return fmt.Errorf("malformed reference: %w", err)
 			}
+			inst, out := ref.Resource, ref.Output
 			target, exists := byName[inst]
 			switch {
 			case inst == self:

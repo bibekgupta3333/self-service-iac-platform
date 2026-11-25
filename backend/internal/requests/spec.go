@@ -18,6 +18,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/catalog"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/fp"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/inputschema"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/tfname"
 )
 
 // CreateInput is the body of POST /v1/requests (docs/03 §6.4).
@@ -47,10 +48,8 @@ type ResourceInput struct {
 }
 
 var (
-	slugRe         = regexp.MustCompile(`^[a-z][a-z0-9-]{1,38}$`)
-	stackNameRe    = regexp.MustCompile(`^[a-z][a-z0-9-]{1,40}$`)
-	instanceNameRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
-	refRe          = regexp.MustCompile(`^([a-z][a-z0-9_]{0,62})\.([a-z][a-z0-9_]*)$`)
+	slugRe      = regexp.MustCompile(`^[a-z][a-z0-9-]{1,38}$`)
+	stackNameRe = regexp.MustCompile(`^[a-z][a-z0-9-]{1,40}$`)
 )
 
 // MaxResources bounds the number of module instances per stack.
@@ -95,7 +94,7 @@ func ValidateShape(in CreateInput) []apperr.FieldError {
 	}
 	for i, r := range in.Resources {
 		ptr := fmt.Sprintf("/resources/%d", i)
-		if !instanceNameRe.MatchString(r.Name) {
+		if !tfname.IsIdentifier(r.Name) {
 			add(ptr+"/name", "pattern", "must be an HCL identifier (^[a-z][a-z0-9_]{0,62}$)")
 		}
 		if r.Module == "" {
@@ -142,9 +141,18 @@ func ValidateResources(resources []ResolvedResource) []apperr.FieldError {
 			errs = append(errs, apperr.FieldError{Pointer: ptr + "/inputs", Code: "type", Message: "must be a JSON object: " + err.Error()})
 			continue
 		}
+		if obj, ok := doc.(map[string]any); ok {
+			// The generator renders these names as module arguments; reject what it would reject.
+			for _, name := range fp.SortedKeys(obj) {
+				if err := tfname.ValidateInputName(name); err != nil {
+					errs = append(errs, apperr.FieldError{Pointer: ptr + "/inputs" + inputschema.Pointer([]string{name}),
+						Code: "invalid_input_name", Message: err.Error()})
+				}
+			}
+		}
 		masked, refs := maskRefs(doc, "")
 		for _, ref := range refs {
-			if msg := checkRef(ref.target, r.Input.Name, byName); msg != "" {
+			if msg := checkRef(ref, r.Input.Name, byName); msg != "" {
 				errs = append(errs, apperr.FieldError{Pointer: ptr + "/inputs" + ref.pointer, Code: "invalid_ref", Message: msg})
 			}
 		}
@@ -160,7 +168,8 @@ func ValidateResources(resources []ResolvedResource) []apperr.FieldError {
 
 type inputRef struct {
 	pointer string // JSON pointer within the inputs object
-	target  string // "<instance>.<output>"
+	ref     tfname.Ref
+	err     error // set when the {"$ref"} object is malformed
 }
 
 // refPlaceholder replaces references during schema validation.
@@ -171,8 +180,8 @@ const refPlaceholder = "${iacp:ref}"
 func maskRefs(v any, ptr string) (any, []inputRef) {
 	switch t := v.(type) {
 	case map[string]any:
-		if target, ok := AsRef(t); ok {
-			return refPlaceholder, []inputRef{{pointer: ptr, target: target}}
+		if ref, isRef, err := tfname.ParseRef(t); isRef {
+			return refPlaceholder, []inputRef{{pointer: ptr, ref: ref, err: err}}
 		}
 		out := make(map[string]any, len(t))
 		var refs []inputRef
@@ -194,21 +203,11 @@ func maskRefs(v any, ptr string) (any, []inputRef) {
 	}
 }
 
-// AsRef reports whether m is a reference object {"$ref": "<instance>.<output>"}.
-func AsRef(m map[string]any) (string, bool) {
-	if len(m) != 1 {
-		return "", false
+func checkRef(r inputRef, self string, byName map[string]catalog.ModuleVersion) string {
+	if r.err != nil {
+		return r.err.Error()
 	}
-	s, ok := m["$ref"].(string)
-	return s, ok
-}
-
-func checkRef(target, self string, byName map[string]catalog.ModuleVersion) string {
-	m := refRe.FindStringSubmatch(target)
-	if m == nil {
-		return fmt.Sprintf("reference %q must have the form <resource>.<output>", target)
-	}
-	inst, out := m[1], m[2]
+	target, inst, out := r.ref.String(), r.ref.Resource, r.ref.Output
 	if inst == self {
 		return fmt.Sprintf("resource %q cannot reference itself", self)
 	}

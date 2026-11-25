@@ -120,6 +120,15 @@ func TestValidateResources(t *testing.T) {
 		}, want: []string{"/resources/1/inputs/queue_arn:invalid_ref"}},
 		{name: "not an object", mutate: func(c *CreateInput) { c.Resources[0].Inputs = json.RawMessage(`[1]`) },
 			want: []string{"/resources/0/inputs:type"}},
+		{name: "reserved and invalid input names are caught at create time", mutate: func(c *CreateInput) {
+			// The lambda fixture schema has no additionalProperties limit on env, so only the name rules catch these.
+			c.Resources[1].Inputs = json.RawMessage(`{"name":"p","queue_arn":{"$ref":"orders_queue.queue_arn"},"env":{}}`)
+			c.Resources[0].Inputs = json.RawMessage(`{"name":"orders-dev","source":"evil","Bad-Name":1}`)
+		}, want: []string{"/resources/0/inputs/Bad-Name:invalid_input_name", "/resources/0/inputs/source:invalid_input_name",
+			"/resources/0/inputs:additionalProperties"}},
+		{name: "non-string ref", mutate: func(c *CreateInput) {
+			c.Resources[1].Inputs = json.RawMessage(`{"name":"p","queue_arn":{"$ref":42}}`)
+		}, want: []string{"/resources/1/inputs/queue_arn:invalid_ref"}},
 		{name: "huge number is rejected, not a panic", mutate: func(c *CreateInput) {
 			c.Resources[0].Inputs = json.RawMessage(`{"name":"orders-dev","visibility_timeout_seconds":1e9999999}`)
 		}, want: []string{"/resources/0/inputs:type"}},

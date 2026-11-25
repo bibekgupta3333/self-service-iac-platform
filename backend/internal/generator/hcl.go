@@ -11,6 +11,7 @@ import (
 	"github.com/zclconf/go-cty/cty"
 
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/fp"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/tfname"
 )
 
 var hclIdentRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*$`)
@@ -19,8 +20,11 @@ var hclIdentRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*$`)
 // Strings are escaped by hclwrite (including "${" template sequences), so user input
 // can never inject Terraform expressions; only {"$ref"} objects become references.
 func valueTokens(v any) (hclwrite.Tokens, error) {
-	if inst, out, ok := asRef(v); ok {
-		return moduleRef(inst, out), nil
+	if ref, isRef, err := tfname.ParseRef(v); isRef {
+		if err != nil {
+			return nil, err
+		}
+		return moduleRef(ref.Resource, ref.Output), nil
 	}
 	switch t := v.(type) {
 	case nil:
