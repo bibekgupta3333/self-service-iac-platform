@@ -4,15 +4,14 @@ name: iacp
 
 services:
   localstack:
-    image: localstack/localstack:4.4
+    image: localstack/localstack:4.4@sha256:b52c16663c70b7234f217cb993a339b46686e30a1a5d9279cb5feeb2202f837c
     container_name: iacp-localstack
     ports:
-      - "4566:4566"            # LocalStack edge port (all AWS APIs)
+      - "127.0.0.1:4566:4566"  # LocalStack edge port (all AWS APIs), loopback only
     environment:
       SERVICES: s3,sqs,sns,lambda,iam,sts,kms,logs,cloudwatch,secretsmanager,events
       AWS_DEFAULT_REGION: us-east-1
       DEBUG: "0"
-      LAMBDA_EXECUTOR: docker
     volumes:
       - localstack-data:/var/lib/localstack
       - /var/run/docker.sock:/var/run/docker.sock   # Lambda runs functions in sibling containers
@@ -23,10 +22,10 @@ services:
       retries: 30
 
   postgres:
-    image: postgres:17-alpine
+    image: postgres:17-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73
     container_name: iacp-postgres
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"  # loopback only: the password is a known local default
     environment:
       POSTGRES_DB: iacp
       POSTGRES_USER: iacp
