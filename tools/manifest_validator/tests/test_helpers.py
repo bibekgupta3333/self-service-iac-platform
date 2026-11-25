@@ -86,5 +86,9 @@ class TestDiffing:
         assert diffing.json_path(["metadata", "owners", 0]) == "metadata.owners[0]"
         assert diffing.json_path([]) == "<root>"
 
+    def test_schema_errors(self):
+        assert diffing.schema_errors({"type": "integer", "minimum": 1}, 5) == []
+        assert diffing.schema_errors({"type": "integer", "minimum": 1}, 0) == ["0 is less than the minimum of 1"]
+
     def test_format_names(self):
         assert diffing.format_names(["a", "b"]) == "'a', 'b'"

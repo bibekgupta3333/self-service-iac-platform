@@ -2,6 +2,7 @@
 
 from .checks import (
     INJECTED_INPUTS,
+    InputsSchemaChecker,
     MetadataChecker,
     OutputParityChecker,
     SchemaValidator,
@@ -15,6 +16,7 @@ from .validator import ManifestValidator
 
 __all__ = [
     "INJECTED_INPUTS",
+    "InputsSchemaChecker",
     "Finding",
     "ManifestLoader",
     "ManifestValidator",

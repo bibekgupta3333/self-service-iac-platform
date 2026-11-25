@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Iterable
 
 from jsonschema import Draft202012Validator, FormatChecker
+from jsonschema.exceptions import SchemaError
 
 from . import diffing, hcl
 from .models import Finding, ModulePackage
@@ -53,6 +54,28 @@ class SchemaValidator(Check):
         errors = sorted(self._validator.iter_errors(package.manifest), key=lambda e: list(e.absolute_path))
         return [
             self.finding(package, f"{diffing.json_path(e.absolute_path)}: {e.message}") for e in errors
+        ]
+
+
+class InputsSchemaChecker(Check):
+    """``inputs`` must be a valid JSON Schema and every ``default`` must satisfy its own property."""
+
+    code = "inputs-schema"
+
+    def check(self, package: ModulePackage) -> list[Finding]:
+        inputs = _get(package.manifest, "inputs")
+        if not isinstance(inputs, dict):
+            return []
+        try:
+            Draft202012Validator.check_schema(inputs)
+        except SchemaError as exc:
+            return [self.finding(package, f"inputs is not a valid JSON Schema: {exc.message}")]
+        properties = inputs.get("properties") or {}
+        return [
+            self.finding(package, f"input '{name}': default {prop['default']!r} is invalid: {message}")
+            for name, prop in sorted(properties.items())
+            if isinstance(prop, dict) and "default" in prop
+            for message in diffing.schema_errors(prop, prop["default"])
         ]
 
 

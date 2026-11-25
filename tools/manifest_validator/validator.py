@@ -7,6 +7,7 @@ from typing import Sequence
 
 from .checks import (
     Check,
+    InputsSchemaChecker,
     MetadataChecker,
     OutputParityChecker,
     SchemaValidator,
@@ -31,7 +32,14 @@ class ManifestValidator:
     def for_root(cls, modules_root: Path, schema_path: Path | None = None) -> "ManifestValidator":
         modules_root = Path(modules_root)
         schema = SchemaValidator.from_file(schema_path or modules_root / SCHEMA_RELATIVE_PATH)
-        checks = [schema, MetadataChecker(), VariableParityChecker(), OutputParityChecker(), VersionStampChecker()]
+        checks = [
+            schema,
+            InputsSchemaChecker(),
+            MetadataChecker(),
+            VariableParityChecker(),
+            OutputParityChecker(),
+            VersionStampChecker(),
+        ]
         return cls(ManifestLoader(modules_root), checks)
 
     def validate_package(self, package: ModulePackage) -> list[Finding]:

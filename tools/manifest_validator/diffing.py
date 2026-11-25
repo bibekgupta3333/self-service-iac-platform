@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Mapping
 
+from jsonschema import Draft202012Validator
+
 # Terraform type family -> JSON Schema types it can accept.
 _COMPATIBLE: Mapping[str, frozenset[str]] = {
     "string": frozenset({"string"}),
@@ -33,6 +35,12 @@ def types_compatible(tf_family: str | None, schema_types: frozenset[str]) -> boo
         return True
     allowed = _COMPATIBLE.get(tf_family)
     return bool(allowed) and bool(schema_types) and schema_types <= allowed
+
+
+def schema_errors(schema: Mapping[str, Any], value: Any) -> list[str]:
+    """Messages for every way ``value`` violates ``schema`` (empty when valid). Pure: no I/O."""
+    validator = Draft202012Validator(dict(schema))
+    return sorted(error.message for error in validator.iter_errors(value))
 
 
 def format_names(names: Iterable[str]) -> str:

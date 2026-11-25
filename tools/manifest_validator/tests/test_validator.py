@@ -139,6 +139,32 @@ class TestManifestValidator:
         report = ManifestValidator.for_root(modules_root).run()
         assert "locals.module_version is not set" in messages(report)
 
+    def test_default_violating_its_pattern(self, make_module, manifest, modules_root):
+        manifest["inputs"]["properties"]["name"].update({"pattern": "^[a-z]+$", "default": "Bad_Name"})
+        make_module(manifest=manifest)
+        report = ManifestValidator.for_root(modules_root).run()
+        assert codes(report) == ["inputs-schema"]
+        assert "input 'name': default 'Bad_Name' is invalid" in messages(report)
+
+    def test_default_violating_property_names(self, make_module, manifest, modules_root):
+        manifest["inputs"]["properties"]["tags"].update(
+            {"propertyNames": {"not": {"pattern": "^iacp:"}}, "default": {"iacp:team": "x"}}
+        )
+        make_module(manifest=manifest)
+        report = ManifestValidator.for_root(modules_root).run()
+        assert "input 'tags'" in messages(report)
+
+    def test_valid_defaults_pass(self, make_module, manifest, modules_root):
+        manifest["inputs"]["properties"]["size"]["default"] = 3
+        make_module(manifest=manifest)
+        assert ManifestValidator.for_root(modules_root).run().ok
+
+    def test_inputs_not_a_valid_schema(self, make_module, manifest, modules_root):
+        manifest["inputs"]["properties"]["size"]["minimum"] = "one"
+        make_module(manifest=manifest)
+        report = ManifestValidator.for_root(modules_root).run()
+        assert "inputs is not a valid JSON Schema" in messages(report)
+
     def test_checks_are_pluggable(self, make_module, manifest, modules_root):
         manifest["outputs"].append({"name": "arn", "description": "ARN"})
         make_module(manifest=manifest)
