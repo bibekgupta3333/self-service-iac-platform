@@ -60,10 +60,12 @@ rule "terraform_required_version" {
   enabled = true
 }
 
-# Module sources must be pinned to a semver ref (?ref=modules/<name>/vX.Y.Z).
+# Module sources must be pinned to a ref (never a default branch). The exact
+# ?ref=modules/<name>/vX.Y.Z format is enforced on the plan by OPA
+# (iacp.forbidden.module_source); "semver" would reject that tag format.
 rule "terraform_module_pinned_source" {
   enabled = true
-  style   = "semver"
+  style   = "flexible"
 }
 
 rule "terraform_unused_declarations" {
