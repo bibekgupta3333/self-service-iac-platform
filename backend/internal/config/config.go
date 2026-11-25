@@ -19,7 +19,14 @@ const Prefix = "IACP_"
 // DefaultDatabaseURL points at the docker compose Postgres (local development only).
 const DefaultDatabaseURL = "postgres://iacp:iacp-local-only@localhost:5432/iacp?sslmode=disable"
 
-// AuthMode selects the Authenticator implementation.
+// DefaultHTTPAddr binds loopback only; the container image overrides it (see Dockerfile).
+const DefaultHTTPAddr = "127.0.0.1:8080"
+
+// MinInternalTokenLen is the minimum length of IACP_INTERNAL_TOKEN.
+const MinInternalTokenLen = 32
+
+// AuthMode selects the Authenticator implementation. There is no default: an
+// unconfigured process refuses to start rather than trusting every caller.
 type AuthMode string
 
 const (
@@ -37,6 +44,9 @@ type Config struct {
 	AuthMode        AuthMode
 	DevUserLogin    string
 	ModuleRepoURL   string
+	// InternalToken authenticates /v1/internal/* callers until the GitHub OIDC
+	// verifier lands (WBS 4.10). Empty means every internal call is rejected.
+	InternalToken string
 }
 
 // LookupFunc returns the value of an environment variable and whether it was set.
@@ -66,17 +76,25 @@ func Load(lookup LookupFunc) (Config, error) {
 	errs = append(errs, err)
 
 	cfg := Config{
-		HTTPAddr:        get("HTTP_ADDR", ":8080"),
+		HTTPAddr:        get("HTTP_ADDR", DefaultHTTPAddr),
 		DatabaseURL:     get("DATABASE_URL", DefaultDatabaseURL),
 		LogLevel:        level,
 		ShutdownTimeout: timeout,
 		AutoMigrate:     autoMigrate,
-		AuthMode:        AuthMode(get("AUTH_MODE", string(AuthModeDev))),
+		AuthMode:        AuthMode(get("AUTH_MODE", "")),
 		DevUserLogin:    get("DEV_USER", "local-dev"),
 		ModuleRepoURL:   get("MODULE_REPO_URL", "https://github.com/bibekgupta3333/self-service-iac-platform.git"),
+		InternalToken:   get("INTERNAL_TOKEN", ""),
 	}
-	if cfg.AuthMode != AuthModeDev {
+	switch cfg.AuthMode {
+	case AuthModeDev:
+	case "":
+		errs = append(errs, fmt.Errorf("%sAUTH_MODE must be set explicitly (supported: dev)", Prefix))
+	default:
 		errs = append(errs, fmt.Errorf("%sAUTH_MODE: unsupported value %q (supported: dev)", Prefix, cfg.AuthMode))
+	}
+	if cfg.InternalToken != "" && len(cfg.InternalToken) < MinInternalTokenLen {
+		errs = append(errs, fmt.Errorf("%sINTERNAL_TOKEN must be at least %d characters", Prefix, MinInternalTokenLen))
 	}
 	if err := errors.Join(errs...); err != nil {
 		return Config{}, fmt.Errorf("load config: %w", err)
