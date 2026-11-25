@@ -45,14 +45,28 @@ actions(s) := [lower(a) | some a in f.as_array(object.get(s, "Action", []))]
 
 full_wildcard(action) if action in {"*", "*:*"}
 
-read_only(action) if regex.match(`^[a-z0-9-]+:(get|list|describe|head|batchget|query|scan|search|lookup|view)`, action)
+read_only(action) if {
+	regex.match(`^[a-z0-9-]+:(get|list|describe|head|batchget|query|scan|search|lookup|view)`, action)
+	not sensitive_read(action)
+}
+
+# Reads that expose secrets or data; on Resource "*" they are as risky as writes.
+sensitive_read(action) if regex.match(`^(secretsmanager:get(secretvalue|\*)|ssm:get(parameter.*|\*)|s3:get(object.*|\*))$`, action)
 
 write_action(action) if {
 	not read_only(action)
 	not action in resource_star_only
 }
 
-all_resources(s) if "*" in f.as_array(object.get(s, "Resource", []))
+# all_resources(s): Resource "*" or an ARN whose resource part is "*" (arn:aws:s3:::*).
+all_resources(s) if {
+	some r in f.as_array(object.get(s, "Resource", []))
+	wildcard_resource(r)
+}
+
+wildcard_resource("*")
+
+wildcard_resource(r) if regex.match(`^arn:[^:]+:[^:]*:[^:]*:[^:]*:\*$`, r)
 
 # --- Rules -----------------------------------------------------------------------
 
@@ -90,8 +104,20 @@ deny contains m if {
 	not f.exempt("iacp.iam.wildcard_resource", rc.address)
 	m := f.msg(
 		"iacp.iam.wildcard_resource", rc.address,
-		sprintf("statement %q grants write actions %v on Resource \"*\"", [object.get(s, "Sid", "<no sid>"), writes]),
+		sprintf("statement %q grants write or sensitive actions %v on all resources", [object.get(s, "Sid", "<no sid>"), writes]),
 		"scope Resource to the ARNs the workload owns",
+	)
+}
+
+deny contains m if {
+	some rc in f.changed
+	some s in allow_statements(rc)
+	s.NotResource
+	not f.exempt("iacp.iam.not_resource", rc.address)
+	m := f.msg(
+		"iacp.iam.not_resource", rc.address,
+		sprintf("statement %q uses Allow with NotResource", [object.get(s, "Sid", "<no sid>")]),
+		"replace NotResource with an explicit Resource list",
 	)
 }
 

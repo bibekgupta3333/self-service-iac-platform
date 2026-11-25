@@ -45,9 +45,41 @@ test_not_action_denied if {
 }
 
 test_write_on_all_resources_denied if {
-	p := policy([allow(["s3:GetObject", "s3:PutObject"], "*")])
+	p := policy([allow(["s3:ListBucket", "s3:PutObject"], "*")])
 	some m in iam.deny with input as t.plan([p])
-	contains(m, `[iacp.iam.wildcard_resource] aws_iam_role_policy.p: statement "S" grants write actions ["s3:putobject"]`)
+	contains(m, `[iacp.iam.wildcard_resource] aws_iam_role_policy.p: statement "S" grants write or sensitive actions ["s3:putobject"] on all resources`)
+}
+
+test_sensitive_reads_on_all_resources_denied if {
+	p := policy([allow(["secretsmanager:GetSecretValue", "ssm:GetParametersByPath", "s3:GetObject", "s3:Get*"], "*")])
+	some m in iam.deny with input as t.plan([p])
+	contains(m, `["s3:get*", "s3:getobject", "secretsmanager:getsecretvalue", "ssm:getparametersbypath"]`)
+}
+
+test_sensitive_reads_on_scoped_resources_allowed if {
+	p := policy([allow(["secretsmanager:GetSecretValue"], "arn:aws:secretsmanager:us-east-1:111111111111:secret:orders-*")])
+	count(iam.deny) == 0 with input as t.plan([p])
+}
+
+test_account_wide_arn_wildcard_treated_as_all_resources if {
+	p := policy([allow("s3:PutObject", "arn:aws:s3:::*")])
+	t.rule_ids(iam.deny) == {"[iacp.iam.wildcard_resource]"} with input as t.plan([p])
+}
+
+test_arn_with_scoped_prefix_not_wildcard if {
+	p := policy([allow("s3:PutObject", "arn:aws:s3:::orders-*")])
+	count(iam.deny) == 0 with input as t.plan([p])
+}
+
+test_not_resource_denied if {
+	p := policy([{"Sid": "S", "Effect": "Allow", "Action": "s3:GetObject", "NotResource": "arn:aws:s3:::secret/*"}])
+	some m in iam.deny with input as t.plan([p])
+	startswith(m, `[iacp.iam.not_resource] aws_iam_role_policy.p: statement "S" uses Allow with NotResource`)
+}
+
+test_deny_with_not_resource_allowed if {
+	p := policy([{"Effect": "Deny", "Action": "s3:*", "NotResource": "arn:aws:s3:::orders/*"}])
+	count(iam.deny) == 0 with input as t.plan([p])
 }
 
 test_service_wildcard_on_all_resources_denied if {
