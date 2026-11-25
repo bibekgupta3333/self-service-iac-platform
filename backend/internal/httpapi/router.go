@@ -25,10 +25,13 @@ type RouteRegistrar interface {
 
 // Deps are the collaborators the router needs.
 type Deps struct {
-	Logger  *slog.Logger
-	Auth    Authenticator
-	Ready   Pinger
-	Catalog *CatalogHandler
+	Logger *slog.Logger
+	// Auth authenticates users on /v1.
+	Auth Authenticator
+	// Internal authenticates automation on /v1/internal; nil means DenyAuthenticator.
+	Internal Authenticator
+	Ready    Pinger
+	Catalog  *CatalogHandler
 	// Public lists further handlers mounted under authenticated /v1.
 	Public []RouteRegistrar
 }
@@ -52,15 +55,27 @@ func NewRouter(d Deps) http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "database": "up"})
 	})
 
+	internal := d.Internal
+	if internal == nil {
+		internal = DenyAuthenticator{}
+	}
 	r.Route("/v1", func(v1 chi.Router) {
-		v1.Use(requireAuth(d.Auth))
-		if d.Catalog != nil {
-			d.Catalog.Routes(v1)
-			v1.Route("/internal", d.Catalog.InternalRoutes)
-		}
-		for _, h := range d.Public {
-			h.Routes(v1)
-		}
+		// Machine endpoints never fall under the user authenticator (dev mode included).
+		v1.Route("/internal", func(in chi.Router) {
+			in.Use(requireAuth(internal))
+			if d.Catalog != nil {
+				d.Catalog.InternalRoutes(in)
+			}
+		})
+		v1.Group(func(user chi.Router) {
+			user.Use(requireAuth(d.Auth))
+			if d.Catalog != nil {
+				d.Catalog.Routes(user)
+			}
+			for _, h := range d.Public {
+				h.Routes(user)
+			}
+		})
 	})
 	r.NotFound(func(w http.ResponseWriter, req *http.Request) {
 		writeError(w, req, apperr.NotFound("no route for %s %s", req.Method, req.URL.Path))

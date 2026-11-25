@@ -64,11 +64,18 @@ func run() error {
 	catalogSvc := catalog.NewService(catalog.NewPostgresRepository(pool, auditWriter), clock, cfg.ModuleRepoURL)
 	requestSvc := requests.NewService(requests.NewPostgresRepository(pool, auditWriter), catalogSvc, clock, ids)
 
+	if cfg.InternalToken == "" {
+		slog.Warn("IACP_INTERNAL_TOKEN is not set: /v1/internal endpoints reject every request")
+	}
+	internalAuth := httpapi.NewTokenAuthenticator(cfg.InternalToken,
+		identity.Principal{Login: "internal-token", Type: identity.ActorGitHubActions})
+
 	handler := httpapi.NewRouter(httpapi.Deps{
-		Logger:  logger,
-		Auth:    auth,
-		Ready:   pool,
-		Catalog: httpapi.NewCatalogHandler(catalogSvc),
+		Logger:   logger,
+		Auth:     auth,
+		Internal: internalAuth,
+		Ready:    pool,
+		Catalog:  httpapi.NewCatalogHandler(catalogSvc),
 		Public: []httpapi.RouteRegistrar{
 			httpapi.NewRequestHandler(requestSvc),
 			httpapi.NewAuditHandler(audit.NewVerifier(pool)),

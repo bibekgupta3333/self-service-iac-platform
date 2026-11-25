@@ -71,13 +71,18 @@ func (p okPinger) Ping(context.Context) error { return p.err }
 
 var devPrincipal = identity.Principal{UserID: uuid.MustParse("4b1f2a0e-8a71-4b0c-9c1e-2f1d5e6a7b80"), Login: "dev", Type: identity.ActorUser}
 
+var releaseBot = identity.Principal{Login: "internal-token", Type: identity.ActorGitHubActions}
+
+const testInternalToken = "test-internal-token-0123456789abcdef"
+
 func newTestRouter(cat CatalogService, ready Pinger, extra ...RouteRegistrar) http.Handler {
 	return NewRouter(Deps{
-		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		Auth:    DevAuthenticator{Principal: devPrincipal},
-		Ready:   ready,
-		Catalog: NewCatalogHandler(cat),
-		Public:  extra,
+		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Auth:     DevAuthenticator{Principal: devPrincipal},
+		Internal: NewTokenAuthenticator(testInternalToken, releaseBot),
+		Ready:    ready,
+		Catalog:  NewCatalogHandler(cat),
+		Public:   extra,
 	})
 }
 
@@ -166,7 +171,7 @@ func TestCatalogHandlers(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rec := do(t, h, tt.method, tt.path, tt.body)
+			rec := do(t, h, tt.method, tt.path, tt.body, "Authorization", "Bearer "+testInternalToken)
 			if rec.Code != tt.wantStatus {
 				t.Fatalf("status = %d, want %d; body %s", rec.Code, tt.wantStatus, rec.Body)
 			}
@@ -182,8 +187,8 @@ func TestCatalogHandlers(t *testing.T) {
 			}
 		})
 	}
-	if len(cat.indexed) != 2 || cat.indexed[0] != devPrincipal {
-		t.Fatalf("index should receive the authenticated principal: %+v", cat.indexed)
+	if len(cat.indexed) != 2 || cat.indexed[0] != releaseBot {
+		t.Fatalf("index should receive the internal principal, not the dev user: %+v", cat.indexed)
 	}
 }
 
