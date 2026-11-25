@@ -11,22 +11,6 @@ terraform {
   }
 }
 
-variable "name" {
-  description = "Base name for the bucket and queue."
-  type        = string
-}
-
-variable "secure" {
-  description = "Whether to apply the platform's secure defaults."
-  type        = bool
-}
-
-variable "force_destroy" {
-  description = "Allow destroying a non-empty bucket."
-  type        = bool
-  default     = false
-}
-
 resource "aws_kms_key" "this" {
   description         = "${var.name} data key"
   enable_key_rotation = var.secure
@@ -73,9 +57,4 @@ resource "aws_iam_policy" "consumer" {
       Resource = var.secure ? "arn:aws:sqs:us-east-1:000000000000:${var.name}-events" : "*"
     }]
   })
-}
-
-output "bucket" {
-  description = "Bucket name."
-  value       = aws_s3_bucket.this.bucket
 }

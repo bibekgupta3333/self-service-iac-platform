@@ -1,0 +1,1 @@
+# Fixture root: no outputs.
