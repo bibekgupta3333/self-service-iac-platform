@@ -53,5 +53,24 @@ plan_with_config(rcs, resources) := {
 	"configuration": {"root_module": {"resources": resources}},
 }
 
+# policy_doc_data builds a deferred data.aws_iam_policy_document read with the given
+# statement blocks (computed values appear as null, as in a real plan).
+policy_doc_data(name, statements) := {
+	"address": sprintf("data.aws_iam_policy_document.%s", [name]),
+	"mode": "data",
+	"type": "aws_iam_policy_document",
+	"name": name,
+	"change": {"actions": ["read"], "after": {"statement": statements}, "after_unknown": {"json": true}},
+}
+
+# policy_ref is the `policy = data.aws_iam_policy_document.<name>.json` expression.
+policy_ref(name) := {"policy": {"references": [
+	sprintf("data.aws_iam_policy_document.%s.json", [name]),
+	sprintf("data.aws_iam_policy_document.%s", [name]),
+]}}
+
+# computed_policy builds a resource whose policy is only known after apply.
+computed_policy(type, name) := with_unknown(rc(type, name, {}), {"policy": true})
+
 # rule_ids extracts the "[rule.id]" prefixes from a set of messages.
 rule_ids(messages) := {id | some m in messages; id := regex.find_n(`^\[[a-z0-9._]+\]`, m, 1)[0]}

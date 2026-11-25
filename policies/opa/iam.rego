@@ -25,11 +25,9 @@ resource_star_only := {
 # documents(rc): every JSON policy document carried by a resource.
 documents(rc) := top_level_documents(rc) | inline_documents(rc)
 
-top_level_documents(rc) := {json.unmarshal(doc) |
-	rc.type in policy_types
-	doc := f.after(rc).policy
-	is_string(doc)
-}
+top_level_documents(rc) := f.policy_documents(rc, "policy") if rc.type in policy_types
+
+top_level_documents(rc) := set() if not rc.type in policy_types
 
 inline_documents(rc) := {json.unmarshal(inline.policy) |
 	rc.type == "aws_iam_role"
@@ -94,5 +92,18 @@ deny contains m if {
 		"iacp.iam.wildcard_resource", rc.address,
 		sprintf("statement %q grants write actions %v on Resource \"*\"", [object.get(s, "Sid", "<no sid>"), writes]),
 		"scope Resource to the ARNs the workload owns",
+	)
+}
+
+# A document computed at apply time (e.g. jsonencode() with a computed Resource) cannot be
+# checked from the plan; surface it instead of passing silently.
+warn contains m if {
+	some rc in f.changed
+	rc.type in policy_types
+	f.policy_unknown(rc, "policy")
+	m := f.msg(
+		"iacp.iam.policy_unknown", rc.address,
+		"policy document is only known after apply, so it was not checked",
+		"build it with data.aws_iam_policy_document (checked at plan time) and review it by hand",
 	)
 }

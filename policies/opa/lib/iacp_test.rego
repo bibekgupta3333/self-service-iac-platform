@@ -118,6 +118,37 @@ test_data_resource_ref if {
 	f.resource_ref({"mode": "data", "type": "aws_iam_policy_document", "name": "d"}) == "data.aws_iam_policy_document.d"
 }
 
+# --- Policy documents ------------------------------------------------------------
+
+test_normalize_statement_defaults_and_drops_empty if {
+	f.normalize_statement({
+		"sid": null, "effect": null, "actions": ["s3:GetObject"], "not_actions": null,
+		"resources": [null], "not_resources": null, "principals": [], "not_principals": [], "condition": [],
+	}) == {"Effect": "Allow", "Action": ["s3:GetObject"], "Resource": [null]}
+}
+
+test_normalize_statement_principals_and_conditions if {
+	s := f.normalize_statement({
+		"effect": "Deny",
+		"principals": [{"type": "AWS", "identifiers": ["arn:aws:iam::1:root"]}],
+		"not_principals": [{"type": "*", "identifiers": ["*"]}],
+		"condition": [
+			{"test": "StringEquals", "variable": "aws:SourceAccount", "values": ["1"]},
+			{"test": "Bool", "variable": "aws:SecureTransport", "values": ["true"]},
+		],
+	})
+	s.Effect == "Deny"
+	s.Principal == {"AWS": ["arn:aws:iam::1:root"]}
+	s.NotPrincipal == "*"
+	s.Condition == {"StringEquals": {"aws:SourceAccount": ["1"]}, "Bool": {"aws:SecureTransport": ["true"]}}
+}
+
+test_known_policy_document_preferred if {
+	r := t.rc("aws_iam_policy", "p", {"policy": `{"Statement":[]}`})
+	f.policy_documents(r, "policy") == {{"Statement": []}}
+	not f.policy_unknown(r, "policy")
+}
+
 test_msg_format if {
 	f.msg("x.y", "aws_s3_bucket.a", "bad", "do good") == "[x.y] aws_s3_bucket.a: bad. Fix: do good"
 }

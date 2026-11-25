@@ -62,9 +62,49 @@ test_role_inline_policy_checked if {
 	count(iam.deny) == 2 with input as t.plan([r])
 }
 
-test_unknown_policy_ignored if {
-	p := t.with_unknown(t.rc("aws_iam_policy", "p", {}), {"policy": true})
+# jsonencode({Action = "*", Resource = aws_sqs_queue.q.arn}): nothing to read at plan time.
+test_computed_jsonencode_policy_warns if {
+	p := t.computed_policy("aws_iam_role_policy", "p")
 	count(iam.deny) == 0 with input as t.plan([p])
+	iam.warn == {concat("", [
+		"[iacp.iam.policy_unknown] aws_iam_role_policy.p: policy document is only known after apply, so it was not checked. ",
+		"Fix: build it with data.aws_iam_policy_document (checked at plan time) and review it by hand",
+	])} with input as t.plan([p])
+}
+
+test_known_policy_does_not_warn if {
+	p := policy([allow("sqs:SendMessage", "arn:aws:sqs:us-east-1:111111111111:q")])
+	count(iam.warn) == 0 with input as t.plan([p])
+}
+
+# data.aws_iam_policy_document with Action "*" and a computed Resource.
+test_policy_document_wildcard_action_with_computed_resource_denied if {
+	p := t.computed_policy("aws_iam_role_policy", "p")
+	d := t.policy_doc_data("d", [{"effect": "Allow", "actions": ["*"], "resources": [null], "principals": [], "condition": []}])
+	inp := t.plan_with_config([p, d], [t.cfg(p.type, "p", t.policy_ref("d"))])
+	t.rule_ids(iam.deny) == {"[iacp.iam.wildcard_action]"} with input as inp
+	count(iam.warn) == 0 with input as inp
+}
+
+test_policy_document_scoped_actions_allowed if {
+	p := t.computed_policy("aws_iam_policy", "p")
+	d := t.policy_doc_data("d", [{"actions": ["sqs:SendMessage"], "resources": [null]}])
+	count(iam.deny) == 0 with input as t.plan_with_config([p, d], [t.cfg(p.type, "p", t.policy_ref("d"))])
+}
+
+test_policy_document_of_other_resource_not_used if {
+	p := t.computed_policy("aws_iam_policy", "p")
+	d := t.policy_doc_data("other", [{"actions": ["*"], "resources": [null]}])
+	inp := t.plan_with_config([p, d], [t.cfg(p.type, "p", t.policy_ref("d"))])
+	count(iam.deny) == 0 with input as inp
+	count(iam.warn) == 1 with input as inp
+}
+
+test_constant_policy_in_configuration_checked if {
+	p := t.computed_policy("aws_iam_policy", "p")
+	doc := json.marshal({"Statement": [allow("*", "arn:aws:s3:::b")]})
+	inp := t.plan_with_config([p], [t.cfg(p.type, "p", {"policy": {"constant_value": doc}})])
+	t.rule_ids(iam.deny) == {"[iacp.iam.wildcard_action]"} with input as inp
 }
 
 test_exception_suppresses_wildcard_resource if {

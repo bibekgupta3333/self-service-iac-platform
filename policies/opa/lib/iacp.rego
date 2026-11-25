@@ -117,6 +117,89 @@ linked_to_bucket(child, bucket) if {
 	name == after(bucket).bucket
 }
 
+# --- Policy documents --------------------------------------------------------------
+
+# policy_documents(rc, attr): the IAM JSON documents held in rc's attribute attr, from
+#   1. the planned value, when known;
+#   2. a literal string in configuration (constant_value);
+#   3. a referenced data.aws_iam_policy_document, whose statements keep their known
+#      parts (actions, principals) even when resources are computed.
+policy_documents(rc, attr) := (known_documents(rc, attr) | constant_documents(rc, attr)) | data_documents(rc, attr)
+
+known_documents(rc, attr) := {json.unmarshal(doc) |
+	doc := after(rc)[attr]
+	is_string(doc)
+}
+
+known_string(rc, attr) if is_string(after(rc)[attr])
+
+constant_documents(rc, attr) := {json.unmarshal(doc) |
+	not known_string(rc, attr)
+	doc := config_expr(rc, attr).constant_value
+	is_string(doc)
+}
+
+data_documents(rc, attr) := {{"Statement": [normalize_statement(s) | some s in after(d).statement]} |
+	not known_string(rc, attr)
+	some d in input.resource_changes
+	d.mode == "data"
+	d.type == "aws_iam_policy_document"
+	refers_to(rc, attr, d)
+}
+
+# policy_unknown(rc, attr): the document is computed at apply time and cannot be read
+# from the plan at all (for example jsonencode() with a computed Resource).
+policy_unknown(rc, attr) if {
+	after_unknown(rc, attr)
+	count(policy_documents(rc, attr)) == 0
+}
+
+# normalize_statement maps an aws_iam_policy_document statement block to IAM JSON
+# keys. Empty keys are dropped; unknown list items stay null.
+normalize_statement(s) := {k: v |
+	some k, v in {
+		"Sid": object.get(s, "sid", null),
+		"Effect": effect(object.get(s, "effect", null)),
+		"Action": object.get(s, "actions", null),
+		"NotAction": object.get(s, "not_actions", null),
+		"Resource": object.get(s, "resources", null),
+		"NotResource": object.get(s, "not_resources", null),
+		"Principal": principal(object.get(s, "principals", null)),
+		"NotPrincipal": principal(object.get(s, "not_principals", null)),
+		"Condition": condition(object.get(s, "condition", null)),
+	}
+	non_empty(v)
+}
+
+effect(null) := "Allow"
+
+effect(e) := e if e != null
+
+principal(ps) := "*" if {
+	some p in ps
+	p.type == "*"
+}
+
+principal(null) := null
+
+principal(ps) := {p.type: p.identifiers | some p in ps} if {
+	is_array(ps)
+	every p in ps { p.type != "*" }
+}
+
+condition(cs) := {op: {c.variable: c.values | some c in cs; c.test == op} |
+	some c0 in cs
+	op := c0.test
+} if is_array(cs)
+
+condition(null) := null
+
+non_empty(v) if {
+	v != null
+	v != []
+	v != {}
+}
+
 # --- Environment -------------------------------------------------------------
 
 # environment_of(rc): the context environment, else the resource's

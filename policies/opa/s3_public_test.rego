@@ -120,6 +120,45 @@ test_policy_wildcard_aws_principal_list_denied if {
 	count(s3.deny) == 1 with input as t.plan([bucket, pab({}), bucket_policy(doc)])
 }
 
+test_computed_bucket_policy_warns if {
+	p := t.computed_policy("aws_s3_bucket_policy", "p")
+	count(s3.deny) == 0 with input as t.plan([p])
+	t.rule_ids(s3.warn) == {"[iacp.s3.policy_unknown]"} with input as t.plan([p])
+}
+
+# Principal "*" with Resource = "${aws_s3_bucket.a.arn}/*" via a policy document.
+test_policy_document_wildcard_principal_denied if {
+	p := t.computed_policy("aws_s3_bucket_policy", "p")
+	d := t.policy_doc_data("d", [{
+		"effect": "Allow", "actions": ["s3:GetObject"], "resources": [null],
+		"principals": [{"type": "*", "identifiers": ["*"]}], "condition": [],
+	}])
+	inp := t.plan_with_config([p, d], [t.cfg(p.type, "p", t.policy_ref("d"))])
+	t.rule_ids(s3.deny) == {"[iacp.s3.no_public_policy]"} with input as inp
+	count(s3.warn) == 0 with input as inp
+}
+
+test_policy_document_aws_wildcard_principal_denied if {
+	p := t.computed_policy("aws_s3_bucket_policy", "p")
+	d := t.policy_doc_data("d", [{"actions": ["s3:GetObject"], "principals": [{"type": "AWS", "identifiers": ["*"]}]}])
+	count(s3.deny) == 1 with input as t.plan_with_config([p, d], [t.cfg(p.type, "p", t.policy_ref("d"))])
+}
+
+test_policy_document_org_condition_allowed if {
+	p := t.computed_policy("aws_s3_bucket_policy", "p")
+	d := t.policy_doc_data("d", [{
+		"actions": ["s3:GetObject"], "principals": [{"type": "*", "identifiers": ["*"]}],
+		"condition": [{"test": "StringEquals", "variable": "aws:PrincipalOrgID", "values": ["o-abc123"]}],
+	}])
+	count(s3.deny) == 0 with input as t.plan_with_config([p, d], [t.cfg(p.type, "p", t.policy_ref("d"))])
+}
+
+test_policy_document_account_principal_allowed if {
+	p := t.computed_policy("aws_s3_bucket_policy", "p")
+	d := t.policy_doc_data("d", [{"actions": ["s3:GetObject"], "principals": [{"type": "AWS", "identifiers": ["arn:aws:iam::111111111111:root"]}]}])
+	count(s3.deny) == 0 with input as t.plan_with_config([p, d], [t.cfg(p.type, "p", t.policy_ref("d"))])
+}
+
 test_policy_irrelevant_condition_denied if {
 	doc := allow_all({"Condition": {"Bool": {"aws:SecureTransport": "true"}}})
 	count(s3.deny) == 1 with input as t.plan([bucket, pab({}), bucket_policy(doc)])

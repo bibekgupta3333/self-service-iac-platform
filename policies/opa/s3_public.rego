@@ -60,8 +60,9 @@ restricted(statement) if {
 	lower(key) in restricting_condition_keys
 }
 
-public_statements(policy) := [s |
-	some s in f.as_array(json.unmarshal(policy).Statement)
+public_statements(p) := [s |
+	some doc in f.policy_documents(p, "policy")
+	some s in f.as_array(doc.Statement)
 	s.Effect == "Allow"
 	wildcard_principal(s.Principal)
 	not restricted(s)
@@ -69,11 +70,21 @@ public_statements(policy) := [s |
 
 deny contains m if {
 	some p in f.changed_of_type("aws_s3_bucket_policy")
-	count(public_statements(f.after(p).policy)) > 0
+	count(public_statements(p)) > 0
 	not f.exempt("iacp.s3.no_public_policy", p.address)
 	m := f.msg(
 		"iacp.s3.no_public_policy", p.address,
 		`policy allows Principal "*" without a restricting condition`,
 		"scope the principal or add an aws:PrincipalOrgID / aws:SourceArn / aws:SourceAccount / aws:SourceVpce condition",
+	)
+}
+
+warn contains m if {
+	some p in f.changed_of_type("aws_s3_bucket_policy")
+	f.policy_unknown(p, "policy")
+	m := f.msg(
+		"iacp.s3.policy_unknown", p.address,
+		"bucket policy is only known after apply, so it was not checked for public access",
+		"build it with data.aws_iam_policy_document (checked at plan time) and review it by hand",
 	)
 }
