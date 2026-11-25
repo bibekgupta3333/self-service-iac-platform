@@ -44,14 +44,18 @@ validate: ## terraform validate every module
 	  terraform -chdir=$$m init -backend=false -input=false >/dev/null && terraform -chdir=$$m validate || exit 1; \
 	done
 
-tflint: ## Lint Terraform with TFLint
-	tflint --init >/dev/null && tflint --recursive
+TFLINT_CONFIG := $(CURDIR)/.tflint.hcl
+
+tflint: ## Lint Terraform with TFLint (absolute config path: --recursive ignores a relative one)
+	tflint --init --config "$(TFLINT_CONFIG)" >/dev/null && tflint --recursive --config "$(TFLINT_CONFIG)"
 
 checkov: ## Static security scan of modules
-	checkov -d modules --quiet --compact $(if $(wildcard policies/checkov/*.py),--external-checks-dir policies/checkov,)
+	checkov -d modules --framework terraform --quiet --compact $(if $(wildcard policies/checkov/*.py),--external-checks-dir policies/checkov,)
 
-policy-test: ## Unit-test OPA policies
-	@if ls policies/opa/*.rego >/dev/null 2>&1; then opa test policies/opa -v; else echo "no policies yet"; fi
+policy-test: ## Unit-test OPA policies and verify conftest fixtures
+	opa test policies/opa --coverage --threshold 90 >/dev/null
+	opa test policies/opa
+	policies/fixtures/verify.sh
 
 lint: fmt-check validate tflint checkov policy-test ## All static checks
 

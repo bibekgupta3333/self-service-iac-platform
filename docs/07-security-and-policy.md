@@ -90,30 +90,38 @@ Review cadence: IAM Access Analyzer unused-access findings reviewed monthly; `ia
 ```
 policies/
 ├── opa/
-│   ├── lib/iacp.rego               # helpers: resources by type, exemptions, tags
-│   ├── tags.rego                      # iacp.tags
-│   ├── encryption.rego                # iacp.encryption
-│   ├── s3_public.rego                 # iacp.s3
-│   ├── regions_and_sizes.rego         # iacp.placement
-│   ├── budget.rego                    # iacp.budget   (input = infracost JSON)
-│   ├── prod_approval.rego             # iacp.approval (pre-apply gate)
-│   ├── forbidden.rego                 # iacp.forbidden (external/provisioners/sources)
-│   └── *_test.rego                    # opa test fixtures, 100 % rule coverage required
+│   ├── lib/iacp.rego                  # lib.iacp: pure helpers (selection, tags, environment, exceptions, messages)
+│   ├── main.rego                      # main: aggregates every iacp.* package for `conftest test -p policies/opa`
+│   ├── tags.rego                      # iacp.tags        (required iacp:* tags; iacp.tags.mismatch vs context)
+│   ├── encryption.rego                # iacp.encryption  (S3 SSE-KMS, SQS SSE / CMK outside dev, KMS rotation)
+│   ├── s3_public.rego                 # iacp.s3          (public access block, public ACLs, public bucket policies)
+│   ├── iam.rego                       # iacp.iam         (Action "*", NotAction/NotResource, write or sensitive actions on all resources, admin managed policies)
+│   ├── placement.rego                 # iacp.placement   (allowed regions; instance sizes are planned)
+│   ├── forbidden.rego                 # iacp.forbidden   (pinned module source, force_destroy outside development, data external/http, provisioners)
+│   ├── budget.rego                    # iacp.budget      (planned; input = infracost JSON)
+│   ├── prod_approval.rego             # iacp.approval    (planned; pre-apply gate)
+│   └── *_test.rego                    # opa test cases; CI gate: coverage >= 90 %
+├── fixtures/                          # sample plan JSONs + verify.sh (outside opa/: opa test loads JSON as data)
 └── checkov/
-    ├── checks/
-    │   ├── sqs_redrive.py             # CKV_FDY_001
-    │   └── lambda_tracing.yaml        # CKV2_FDY_002
-    └── .checkov.yaml
+    ├── __init__.py                    # makes the dir loadable by --external-checks-dir policies/checkov
+    ├── iacp_aws_001_required_tags.py  # IACP_AWS_001
+    ├── iacp_aws_002_s3_sse_kms.py     # IACP_AWS_002
+    ├── iacp_aws_003_lambda_tracing_concurrency.py  # IACP_AWS_003
+    └── tests/                         # pytest suite (no __init__.py, so Checkov never loads it)
 ```
+
+The pipeline must always pass the stack context (`--data context.json`). Without it the policies fall back to safe defaults: allowed regions `us-east-1`/`us-west-2`, module sources from `github.com/bibekgupta3333/self-service-iac-platform` (override with `allowed_module_repos`), no ownership-tag comparison, and environment `unknown`. A resource's own `iacp:environment` tag is never trusted to relax a rule, so `unknown` is treated as non-development and `force_destroy` and SQS-managed SSE stay denied (fail closed). Every message has the form `[rule.id] <address>: <problem>. Fix: <remedy>`.
+
+Bucket controls (SSE, public access block, policy, ACL) are linked to a bucket through the `bucket` expression's configuration references (or equal names known at plan time); a control that cannot be linked does not count. Every bucket that will exist is evaluated, so weakening or deleting a control on an unchanged bucket is caught. Policy documents computed at apply time are read from a referenced `data.aws_iam_policy_document` (its actions and principals stay known when resources are computed); a document that still cannot be read produces an `iacp.iam.policy_unknown` / `iacp.s3.policy_unknown` warning for the reviewer.
 
 `pr-validate.yml` evaluation:
 
 ```bash
 terraform show -json tfplan > plan.json
 curl -sf -H "Authorization: Bearer $OIDC" "$IACP_API/v1/internal/budget-context?stack_path=$STACK" > context.json
-conftest test plan.json      --policy policies/opa --data context.json --namespace iacp.tags \
-  --namespace iacp.encryption --namespace iacp.s3 --namespace iacp.placement --namespace iacp.forbidden \
-  --output json > opa-plan.json
+# Default namespace `main` aggregates every iacp.* plan package (tags, encryption, s3,
+# iam, placement, forbidden), so no rule can be left out by a missing --namespace.
+conftest test plan.json      --policy policies/opa --data context.json --output json > opa-plan.json
 conftest test infracost.json --policy policies/opa --data context.json --namespace iacp.budget --output json > opa-budget.json
 ```
 
@@ -185,7 +193,7 @@ package iacp.tags
 import rego.v1
 import data.lib.iacp as f
 
-required := {"iacp:team", "iacp:env", "iacp:stack", "iacp:managed-by", "cost-center"}
+required := {"iacp:team", "iacp:environment", "iacp:stack", "iacp:managed-by"}
 
 # Resource types that do not support tags are skipped.
 untaggable := {"aws_iam_role_policy", "aws_iam_role_policy_attachment", "aws_lambda_event_source_mapping",
@@ -208,7 +216,7 @@ deny contains m if {
 	some rc in f.changed
 	tags := object.get(rc.change.after, "tags_all", {})
 	tags["iacp:team"] != f.ctx.team
-	m := f.msg("iacp.tags.team_mismatch", rc.address,
+	m := f.msg("iacp.tags.mismatch", rc.address,
 		sprintf("iacp:team=%q does not match owning team %q", [tags["iacp:team"], f.ctx.team]))
 }
 ```
@@ -493,38 +501,32 @@ deny contains msg if {
 
 ### 6.9 Forbidden constructs
 
-```rego
-# policies/opa/forbidden.rego
-package iacp.forbidden
+Implemented in `policies/opa/forbidden.rego` (none of these can be waived):
 
-import rego.v1
+| Rule ID | Denies |
+|---------|--------|
+| `iacp.forbidden.module_source` | a root module call whose source is not `git::https://github.com/<allowed repo>.git//modules/<name>?ref=modules/<name>/vX.Y.Z` (same `<name>` in path and ref; never a branch such as `main`) |
+| `iacp.forbidden.force_destroy` | `force_destroy = true` on any resource unless the context environment is `development` |
+| `iacp.forbidden.data_source` | `data "external"` and `data "http"` anywhere in the configuration, including nested modules (they run programs or reach arbitrary URLs during plan) |
+| `iacp.forbidden.provisioner` | any resource with a provisioner (`local-exec`, `remote-exec`, `file`) |
 
-deny contains msg if {
-	some r in input.configuration.root_module.module_calls[name]
-	src := r.source
-	not regex.match(`^git::https://github\.com/acme/self-service-iac-platform\.git//modules/[a-z0-9-]+\?ref=modules/[a-z0-9-]+/v\d+\.\d+\.\d+$`, src)
-	msg := sprintf("[iacp.forbidden.module_source] module.%s source %q is not a pinned the platform module", [name, src])
-}
+The data-source and provisioner rules read `configuration` rather than `resource_changes`, so a data source that is fully known at plan time (and therefore absent from `resource_changes`) is still caught. Denying `null_resource` / `terraform_data` outright is planned but not enforced; such resources only become dangerous with a provisioner, which is denied.
 
-deny contains msg if {
-	some rc in input.resource_changes
-	rc.type in {"external", "http"}
-	rc.mode == "data"
-	msg := sprintf("[iacp.forbidden.data_source] %s is not allowed", [rc.address])
-}
-
-deny contains msg if {
-	some rc in input.resource_changes
-	rc.type in {"null_resource", "terraform_data"}
-	msg := sprintf("[iacp.forbidden.provisioner_carrier] %s is not allowed", [rc.address])
-}
-```
-
-Policy tests (`opa test policies/opa -v --coverage`) run in `pr-validate.yml` whenever `policies/**` changes; coverage gate 100 % of rules.
+Policy tests (`opa test policies/opa -v --coverage`) run in `ci.yml` on every PR and push to `main`; the coverage gate is 90 % (currently about 99.9 %). `policies/fixtures/verify.sh` runs conftest with a stack context against a compliant plan (no denies or warnings allowed) and a non-compliant plan that must trip every deny and warn rule ID.
 
 ### 6.10 Custom Checkov checks
 
-Checkov runs on the generated root module **and** on each module's `examples/` during release (`checkov -d . --external-checks-dir policies/checkov/checks --download-external-modules true --framework terraform`).
+Checkov runs on the generated root module **and** on each module's `examples/` during release (`checkov -d . --external-checks-dir policies/checkov --download-external-modules true --framework terraform`).
+
+Implemented custom checks (class-based `BaseResourceCheck`, unit tested in `policies/checkov/tests/`):
+
+| ID | Resource | Rule |
+|----|----------|------|
+| `IACP_AWS_001` | taggable AWS resources | `tags` sets `iacp:team`, `iacp:environment`, `iacp:managed-by` (`iacp:stack` comes from provider `default_tags` and is checked by OPA) |
+| `IACP_AWS_002` | `aws_s3_bucket_server_side_encryption_configuration` | `sse_algorithm` is `aws:kms` or `aws:kms:dsse` with `kms_master_key_id` set |
+| `IACP_AWS_003` | `aws_lambda_function` | `tracing_config.mode = "Active"` and `reserved_concurrent_executions >= 0` |
+
+The `CKV_FDY_*` examples below are design sketches for further checks.
 
 Python check — SQS queues must have a dead-letter queue:
 
@@ -626,7 +628,7 @@ Enforcement points: API middleware (`rbac.Authorize`), GitHub branch protection/
 1. **Request.** A maintainer calls `POST /v1/policy-exceptions` (or clicks *Request exception* on a failed rule in the PR comment): `rule_id`, `stack_id`, optional `resource_address`, `reason`, compensating control, `ticket_url`, `expires_at` (≤ 90 days).
 2. **Review.** `@acme/security` is notified; an approver (≠ requester, enforced by DB constraint) approves or rejects with comment. Audit events `policy_exception.requested/approved/rejected`.
 3. **Effect.** Approved exceptions appear in `context.json.exceptions`; rules call `f.exempt(rule_id, address)`. The PR comment lists *Waived: iacp.encryption.sqs_kms (exc-91, expires 2026-12-31)* so reviewers see it. Re-plan is triggered automatically for the waiting request.
-4. **Scope limits.** Non-waivable rules: `iacp.forbidden.*`, `iacp.approval.*`, `iacp.tags.team_mismatch`, `iacp.s3.no_public_policy` in production. Budget is not an exception — it uses budget overrides (admin).
+4. **Scope limits.** Non-waivable rules: `iacp.forbidden.*`, `iacp.approval.*`, `iacp.tags.mismatch`, `iacp.s3.no_public_policy` in production. `exempt()` in `policies/opa/lib/iacp.rego` refuses `iacp.forbidden.*` and production `iacp.s3.no_public_policy` itself, whatever the exception list contains; `iacp.tags.mismatch` has no exception hook at all. Budget is not an exception — it uses budget overrides (admin).
 5. **Expiry.** Worker expires exceptions at `expires_at` (status `expired`), notifies 7 days before; the next drift run evaluates policies too, so an expired exception turns the stack's compliance status red and opens a remediation task.
 6. **Reporting.** Monthly exception report (count by rule/team, age, renewals) to security leadership; renewals > 2 require CISO approval.
 

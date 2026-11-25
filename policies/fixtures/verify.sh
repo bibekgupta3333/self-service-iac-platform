@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Runs conftest against the plan fixtures with the stack context in context.json:
+#   - compliant.plan.json must produce no denies and no warnings;
+#   - noncompliant.plan.json must be denied by every deny rule ID and warned by
+#     every warn rule ID listed below (so each rule is exercised end to end).
+#
+# Usage: policies/fixtures/verify.sh   (needs conftest and jq)
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+policy="$here/../opa"
+context="$here/context.json"
+
+expected_denies=(
+  iacp.encryption.kms_rotation
+  iacp.encryption.s3_cmk
+  iacp.encryption.s3_kms
+  iacp.encryption.sqs_kms
+  iacp.encryption.sqs_sse
+  iacp.forbidden.data_source
+  iacp.forbidden.force_destroy
+  iacp.forbidden.module_source
+  iacp.forbidden.provisioner
+  iacp.iam.admin_policy
+  iacp.iam.not_resource
+  iacp.iam.wildcard_action
+  iacp.iam.wildcard_resource
+  iacp.placement.region
+  iacp.placement.region_missing
+  iacp.s3.no_public
+  iacp.s3.no_public_acl
+  iacp.s3.no_public_policy
+  iacp.tags.mismatch
+  iacp.tags.required
+)
+
+expected_warnings=(
+  iacp.iam.full_access_policy
+  iacp.iam.policy_unknown
+  iacp.placement.region_unverified
+  iacp.s3.policy_unknown
+)
+
+echo "conftest: compliant.plan.json (expect no denies or warnings)"
+conftest test "$here/compliant.plan.json" -p "$policy" --data "$context" --fail-on-warn
+
+echo "conftest: noncompliant.plan.json (expect every rule)"
+result="$(conftest test "$here/noncompliant.plan.json" -p "$policy" --data "$context" --output json || true)"
+
+ids() { jq -r --arg kind "$1" '.[][$kind][]?.msg | capture("^\\[(?<id>[^\\]]+)\\]").id' <<<"$result" | sort -u; }
+
+status=0
+check() {
+  local kind="$1" actual="$2"
+  shift 2
+  for id in "$@"; do
+    if grep -qx "$id" <<<"$actual"; then
+      echo "  ok      $kind $id"
+    else
+      echo "  MISSING $kind $id" >&2
+      status=1
+    fi
+  done
+}
+
+check failures "$(ids failures)" "${expected_denies[@]}"
+check warnings "$(ids warnings)" "${expected_warnings[@]}"
+exit "$status"

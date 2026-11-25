@@ -1,0 +1,382 @@
+# Repository CI (local-first, ADR-0009): everything runs offline or against
+# LocalStack / PostgreSQL service containers. No cloud credentials are used.
+#
+# Every job is gated on the `detect` job so it skips cleanly until the
+# directory it covers (modules/, backend/, tests/, tools/) exists.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  TF_IN_AUTOMATION: "1"
+  TF_INPUT: "0"
+  TFLINT_VERSION: v0.59.1
+  OPA_VERSION: 1.22.4
+  CONFTEST_VERSION: 0.71.1
+  CONFTEST_SHA256: c3f6b2a753bd56e377a1e51a95ae3e057f926f2e9139f7d5b5dfbbaf810f7985
+  ACTIONLINT_VERSION: 1.7.12
+  ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+  PYTHON_VERSION: "3.12"
+  OPA_COVERAGE_MIN: "90"
+  # Dummy credentials for LocalStack only; never real keys.
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  AWS_DEFAULT_REGION: us-east-1
+
+jobs:
+  detect:
+    name: detect
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      terraform_version: ${{ steps.detect.outputs.terraform_version }}
+      modules: ${{ steps.detect.outputs.modules }}
+      module_tests: ${{ steps.detect.outputs.module_tests }}
+      backend: ${{ steps.detect.outputs.backend }}
+      terratest: ${{ steps.detect.outputs.terratest }}
+      python_tools: ${{ steps.detect.outputs.python_tools }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - id: detect
+        name: Detect which parts of the repo exist
+        shell: bash
+        run: |
+          shopt -s nullglob globstar
+          # true when any argument exists (literal paths are not dropped by nullglob).
+          has() {
+            local f
+            for f in "$@"; do
+              if [ -e "$f" ]; then echo true; return; fi
+            done
+            echo false
+          }
+          {
+            echo "terraform_version=$(cat .terraform-version 2>/dev/null || echo 1.13.5)"
+            echo "modules=$(has modules/*/*.tf)"
+            echo "module_tests=$(has modules/*/tests/*.tftest.hcl)"
+            echo "backend=$(has backend/go.mod)"
+            echo "terratest=$(has tests/go.mod)"
+            echo "python_tools=$(has tools/**/test_*.py)"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  actionlint:
+    name: actionlint (workflows)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint (checksum verified)
+        run: |
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSLo "$RUNNER_TEMP/$tarball" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
+          echo "${ACTIONLINT_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/bin" actionlint
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # shellcheck is preinstalled on ubuntu runners; actionlint uses it for run: blocks.
+      - name: actionlint
+        run: actionlint -color
+
+  terraform:
+    name: terraform (fmt, validate, tflint, checkov)
+    needs: detect
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: ${{ needs.detect.outputs.terraform_version }}
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        run: terraform fmt -recursive -check -diff
+
+      - name: terraform validate (modules and examples)
+        if: needs.detect.outputs.modules == 'true'
+        shell: bash
+        run: |
+          shopt -s nullglob
+          status=0
+          for dir in modules/*/ modules/*/examples/*/; do
+            ls "$dir"*.tf >/dev/null 2>&1 || continue
+            echo "::group::validate $dir"
+            terraform -chdir="$dir" init -backend=false -input=false >/dev/null \
+              && terraform -chdir="$dir" validate || status=1
+            echo "::endgroup::"
+          done
+          exit "$status"
+
+      - uses: terraform-linters/setup-tflint@90f302c255ef959cbfb4bd10581afecdb7ece3e6 # v4.1.1
+        with:
+          tflint_version: ${{ env.TFLINT_VERSION }}
+          github_token: ${{ github.token }}
+
+      - name: tflint
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          tflint --version
+          tflint --init --config "$GITHUB_WORKSPACE/.tflint.hcl"
+          tflint --recursive --config "$GITHUB_WORKSPACE/.tflint.hcl" --format compact
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        if: needs.detect.outputs.modules == 'true'
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: policies/checkov/requirements.txt
+
+      - name: checkov (built-in + IACP_* custom checks)
+        if: needs.detect.outputs.modules == 'true'
+        run: |
+          python -m pip install --quiet -r policies/checkov/requirements.txt
+          checkov --directory modules --framework terraform \
+            --external-checks-dir policies/checkov \
+            --quiet --compact
+
+  policy:
+    name: policy (opa, conftest, checkov checks)
+    needs: detect
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: open-policy-agent/setup-opa@b2b258e089860efaadaaf71bf6e3aecb4a3eeff1 # v2.4.0
+        with:
+          version: ${{ env.OPA_VERSION }}
+
+      - name: Install conftest (checksum verified)
+        run: |
+          tarball="conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSLo "$RUNNER_TEMP/$tarball" \
+            "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/${tarball}"
+          echo "${CONFTEST_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/bin" conftest
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: opa fmt and check
+        run: |
+          opa fmt --list --fail policies/opa
+          opa check --strict policies/opa
+
+      - name: opa test (coverage >= ${{ env.OPA_COVERAGE_MIN }}%)
+        run: |
+          opa test policies/opa -v
+          coverage="$(opa test policies/opa --coverage --format json | jq '.coverage')"
+          echo "OPA coverage: ${coverage}%"
+          echo "### OPA policy coverage: ${coverage}%" >> "$GITHUB_STEP_SUMMARY"
+          jq -en --argjson c "$coverage" --argjson min "$OPA_COVERAGE_MIN" '$c >= $min' >/dev/null \
+            || { echo "::error::OPA coverage ${coverage}% is below ${OPA_COVERAGE_MIN}%"; exit 1; }
+
+      - name: conftest on plan fixtures
+        run: |
+          conftest --version
+          policies/fixtures/verify.sh
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: policies/checkov/requirements.txt
+
+      - name: pytest (custom Checkov checks)
+        run: |
+          python -m pip install --quiet -r policies/checkov/requirements.txt
+          python -m pytest -q policies/checkov
+
+  module-tests:
+    name: module tests (terraform test on LocalStack)
+    needs: detect
+    if: needs.detect.outputs.module_tests == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      localstack:
+        image: localstack/localstack:4.4@sha256:b52c16663c70b7234f217cb993a339b46686e30a1a5d9279cb5feeb2202f837c
+        ports:
+          - 4566:4566
+        env:
+          SERVICES: s3,sqs,sns,lambda,iam,sts,kms,logs,cloudwatch,secretsmanager,events
+          AWS_DEFAULT_REGION: us-east-1
+        volumes:
+          - /var/run/docker.sock:/var/run/docker.sock
+        options: >-
+          --health-cmd "curl -sf http://localhost:4566/_localstack/health"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      AWS_ENDPOINT_URL: http://localhost:4566
+      # Virtual-host S3 addressing: *.localhost.localstack.cloud resolves to 127.0.0.1.
+      AWS_ENDPOINT_URL_S3: http://s3.localhost.localstack.cloud:4566
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: ${{ needs.detect.outputs.terraform_version }}
+          terraform_wrapper: false
+
+      - name: terraform test
+        shell: bash
+        run: |
+          shopt -s nullglob
+          status=0
+          for dir in modules/*/; do
+            tests=("$dir"tests/*.tftest.hcl)
+            [ "${#tests[@]}" -gt 0 ] || { echo "skip $dir (no tests/)"; continue; }
+            echo "::group::terraform test $dir"
+            terraform -chdir="$dir" init -backend=false -input=false >/dev/null \
+              && terraform -chdir="$dir" test || status=1
+            echo "::endgroup::"
+          done
+          exit "$status"
+
+  go:
+    name: go (backend)
+    needs: detect
+    if: needs.detect.outputs.backend == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_DB: iacp
+          POSTGRES_USER: iacp
+          POSTGRES_PASSWORD: iacp-ci-only
+        options: >-
+          --health-cmd "pg_isready -U iacp -d iacp"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      IACP_INTEGRATION: "1"
+      IACP_DATABASE_URL: postgres://iacp:iacp-ci-only@localhost:5432/iacp?sslmode=disable
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needed on:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test (with PostgreSQL integration tests)
+        run: go test -race -count=1 ./...
+
+  terratest:
+    name: terratest (LocalStack)
+    needs: detect
+    if: needs.detect.outputs.terratest == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    services:
+      localstack:
+        image: localstack/localstack:4.4@sha256:b52c16663c70b7234f217cb993a339b46686e30a1a5d9279cb5feeb2202f837c
+        ports:
+          - 4566:4566
+        env:
+          SERVICES: s3,sqs,sns,lambda,iam,sts,kms,logs,cloudwatch,secretsmanager,events
+          AWS_DEFAULT_REGION: us-east-1
+        volumes:
+          - /var/run/docker.sock:/var/run/docker.sock
+        options: >-
+          --health-cmd "curl -sf http://localhost:4566/_localstack/health"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      AWS_ENDPOINT_URL: http://localhost:4566
+      # Virtual-host S3 addressing: *.localhost.localstack.cloud resolves to 127.0.0.1.
+      AWS_ENDPOINT_URL_S3: http://s3.localhost.localstack.cloud:4566
+    defaults:
+      run:
+        working-directory: tests
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: ${{ needs.detect.outputs.terraform_version }}
+          terraform_wrapper: false
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: tests/go.mod
+          cache-dependency-path: tests/go.sum
+
+      - name: go test (Terratest)
+        run: go test -count=1 -timeout 30m ./...
+
+  python:
+    name: python (tools)
+    needs: detect
+    if: needs.detect.outputs.python_tools == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install tool dependencies
+        shell: bash
+        run: |
+          shopt -s nullglob
+          python -m pip install --quiet pytest
+          for req in tools/requirements*.txt tools/*/requirements*.txt; do
+            python -m pip install --quiet -r "$req"
+          done
+
+      - name: pytest (tools)
+        run: python -m pytest -q tools
