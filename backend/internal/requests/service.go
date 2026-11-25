@@ -1,0 +1,345 @@
+package requests
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"slices"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/audit"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/catalog"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/inputschema"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
+)
+
+// Team is the subset of a team the request service needs.
+type Team struct {
+	ID   uuid.UUID
+	Slug string
+}
+
+// Environment is the subset of an environment the request service needs.
+type Environment struct {
+	ID             uuid.UUID
+	Name           string
+	DefaultRegion  string
+	AllowedRegions []string
+	AllowEphemeral bool
+	MaxTTLHours    *int
+}
+
+// NewStack is a stack row created by a create request.
+type NewStack struct {
+	ID            uuid.UUID
+	TeamID        uuid.UUID
+	EnvironmentID uuid.UUID
+	Name          string
+	Path          string
+	StateKey      string
+	Region        string
+	IsEphemeral   bool
+	ExpiresAt     *time.Time
+	CreatedBy     uuid.UUID
+	CreatedAt     time.Time
+}
+
+// IdempotencyRecord is a stored Idempotency-Key.
+type IdempotencyRecord struct {
+	RequestHash string
+	RequestID   *uuid.UUID
+}
+
+// Store is the transactional persistence port used while creating a request.
+// Every method runs inside the same database transaction.
+type Store interface {
+	// ClaimIdempotencyKey inserts the key; it returns false if the key already exists.
+	// A concurrent claim of the same key blocks until the first transaction finishes.
+	ClaimIdempotencyKey(ctx context.Context, userID uuid.UUID, key, requestHash string) (bool, error)
+	GetIdempotencyKey(ctx context.Context, userID uuid.UUID, key string) (IdempotencyRecord, error)
+	CompleteIdempotencyKey(ctx context.Context, userID uuid.UUID, key string, requestID uuid.UUID) error
+	TeamBySlug(ctx context.Context, slug string) (Team, error)
+	EnvironmentByName(ctx context.Context, name string) (Environment, error)
+	StackExists(ctx context.Context, environmentID, teamID uuid.UUID, name string) (bool, error)
+	InsertStack(ctx context.Context, s NewStack) error
+	InsertRequest(ctx context.Context, r *Request) error
+	GetRequest(ctx context.Context, id uuid.UUID) (*Request, error)
+	AppendAudit(ctx context.Context, e audit.Event) error
+}
+
+// ListFilter narrows List.
+type ListFilter struct {
+	Team      string
+	Status    Status
+	Kind      Kind
+	CreatedBy *uuid.UUID
+	Limit     int
+	After     *Cursor
+}
+
+// Repository is the persistence port of the request service.
+type Repository interface {
+	// InTx runs fn with a Store bound to one transaction.
+	InTx(ctx context.Context, fn func(Store) error) error
+	Get(ctx context.Context, id uuid.UUID) (*Request, error)
+	List(ctx context.Context, f ListFilter) ([]*Request, error)
+}
+
+// VersionLookup resolves pinned module versions (implemented by catalog.Service).
+type VersionLookup interface {
+	GetVersion(ctx context.Context, name, version string) (catalog.ModuleVersion, error)
+}
+
+// CreateCommand is a validated-at-the-edge create call.
+type CreateCommand struct {
+	Input          CreateInput
+	IdempotencyKey string
+	RequestHash    string // RequestHash(method, path, body)
+	CorrelationID  string
+}
+
+// CreateResult is the outcome of Create.
+type CreateResult struct {
+	Request  *Request
+	Replayed bool // true when an earlier call with the same Idempotency-Key is returned
+}
+
+// Service implements request use cases.
+type Service struct {
+	repo     Repository
+	versions VersionLookup
+	clock    platform.Clock
+	ids      platform.IDGenerator
+}
+
+// NewService returns a request Service.
+func NewService(repo Repository, versions VersionLookup, clock platform.Clock, ids platform.IDGenerator) *Service {
+	return &Service{repo: repo, versions: versions, clock: clock, ids: ids}
+}
+
+// Create validates and records a change request. With the same Idempotency-Key and
+// body it returns the original request; with a different body it fails with
+// idempotency_key_reuse.
+func (s *Service) Create(ctx context.Context, by identity.Principal, cmd CreateCommand) (CreateResult, error) {
+	if err := ValidateIdempotencyKey(cmd.IdempotencyKey); err != nil {
+		return CreateResult{}, err
+	}
+	if by.UserID == uuid.Nil {
+		return CreateResult{}, &apperr.Error{Kind: apperr.KindUnauthenticated, Code: "unauthenticated",
+			Message: "requests must be created by a user"}
+	}
+	var res CreateResult
+	err := s.repo.InTx(ctx, func(st Store) error {
+		claimed, err := st.ClaimIdempotencyKey(ctx, by.UserID, cmd.IdempotencyKey, cmd.RequestHash)
+		if err != nil {
+			return fmt.Errorf("claim idempotency key: %w", err)
+		}
+		if !claimed {
+			res, err = s.replay(ctx, st, by, cmd)
+			return err
+		}
+		req, err := s.create(ctx, st, by, cmd)
+		if err != nil {
+			return err
+		}
+		if err := st.CompleteIdempotencyKey(ctx, by.UserID, cmd.IdempotencyKey, req.ID); err != nil {
+			return fmt.Errorf("complete idempotency key: %w", err)
+		}
+		res = CreateResult{Request: req}
+		return nil
+	})
+	if err != nil {
+		return CreateResult{}, err
+	}
+	return res, nil
+}
+
+func (s *Service) replay(ctx context.Context, st Store, by identity.Principal, cmd CreateCommand) (CreateResult, error) {
+	rec, err := st.GetIdempotencyKey(ctx, by.UserID, cmd.IdempotencyKey)
+	if err != nil {
+		return CreateResult{}, fmt.Errorf("read idempotency key: %w", err)
+	}
+	if rec.RequestHash != cmd.RequestHash {
+		return CreateResult{}, apperr.Invalid("idempotency_key_reuse",
+			"Idempotency-Key was already used with a different request body")
+	}
+	if rec.RequestID == nil {
+		return CreateResult{}, apperr.Conflict("idempotency_key_in_progress", "a request with this Idempotency-Key is in progress")
+	}
+	req, err := st.GetRequest(ctx, *rec.RequestID)
+	if err != nil {
+		return CreateResult{}, fmt.Errorf("load replayed request: %w", err)
+	}
+	return CreateResult{Request: req, Replayed: true}, nil
+}
+
+func (s *Service) create(ctx context.Context, st Store, by identity.Principal, cmd CreateCommand) (*Request, error) {
+	in := cmd.Input
+	if errs := ValidateShape(in); len(errs) > 0 {
+		return nil, apperr.Invalid("validation_failed", "request is invalid", errs...)
+	}
+
+	team, err := st.TeamBySlug(ctx, in.Team)
+	if err != nil {
+		return nil, fieldLookupError(err, "/team", fmt.Sprintf("unknown team %q", in.Team))
+	}
+	env, err := st.EnvironmentByName(ctx, in.Environment)
+	if err != nil {
+		return nil, fieldLookupError(err, "/environment", fmt.Sprintf("unknown environment %q", in.Environment))
+	}
+	region := in.Region
+	if region == "" {
+		region = env.DefaultRegion
+	}
+	now := s.clock.Now()
+	if errs := ValidateEnvironment(in, env, region); len(errs) > 0 {
+		return nil, apperr.Invalid("policy_preflight_denied", "request violates environment rules", errs...)
+	}
+
+	resolved, err := s.resolve(ctx, in.Resources)
+	if err != nil {
+		return nil, err
+	}
+	if errs := ValidateResources(resolved); len(errs) > 0 {
+		return nil, apperr.Invalid("validation_failed", fmt.Sprintf("%d resource inputs are invalid", len(errs)), errs...)
+	}
+
+	exists, err := st.StackExists(ctx, env.ID, team.ID, in.Stack)
+	if err != nil {
+		return nil, fmt.Errorf("check stack: %w", err)
+	}
+	if exists {
+		return nil, apperr.Conflict("stack_exists",
+			fmt.Sprintf("stack %s/%s/%s already exists; use an update request", in.Environment, in.Team, in.Stack))
+	}
+
+	path, stateKey := StackPaths(in.Environment, in.Team, in.Stack)
+	stack := NewStack{ID: s.ids.NewID(), TeamID: team.ID, EnvironmentID: env.ID, Name: in.Stack, Path: path,
+		StateKey: stateKey, Region: region, CreatedBy: by.UserID, CreatedAt: now}
+	if in.Ephemeral != nil {
+		exp := now.Add(time.Duration(in.Ephemeral.TTLHours) * time.Hour)
+		stack.IsEphemeral, stack.ExpiresAt = true, &exp
+	}
+	if err := st.InsertStack(ctx, stack); err != nil {
+		return nil, fmt.Errorf("insert stack: %w", err)
+	}
+
+	spec, err := json.Marshal(Normalize(in, region))
+	if err != nil {
+		return nil, fmt.Errorf("encode spec: %w", err)
+	}
+	req := NewDraft(s.ids.NewID(), s.ids.NewShortID("req"), StackRef{ID: stack.ID, Path: path, Status: "provisioning"},
+		in.Kind, spec, in.Justification, by.UserID, now)
+	if err := st.InsertRequest(ctx, req); err != nil {
+		return nil, fmt.Errorf("insert request: %w", err)
+	}
+
+	payload, err := json.Marshal(map[string]any{"short_id": req.ShortID, "kind": req.Kind, "stack_path": path})
+	if err != nil {
+		return nil, fmt.Errorf("encode audit payload: %w", err)
+	}
+	if err := st.AppendAudit(ctx, audit.Event{
+		OccurredAt: now, ActorType: string(by.Type), ActorID: by.AuditActorID(), Action: "request.created",
+		SubjectType: "request", SubjectID: req.ID.String(), TeamID: &team.ID, CorrelationID: cmd.CorrelationID,
+		Payload: payload,
+	}); err != nil {
+		return nil, fmt.Errorf("audit: %w", err)
+	}
+	return req, nil
+}
+
+func (s *Service) resolve(ctx context.Context, resources []ResourceInput) ([]ResolvedResource, error) {
+	out := make([]ResolvedResource, 0, len(resources))
+	var errs []apperr.FieldError
+	for i, r := range resources {
+		v, err := s.versions.GetVersion(ctx, r.Module, r.Version)
+		if err != nil {
+			if apperr.IsKind(err, apperr.KindNotFound) {
+				errs = append(errs, apperr.FieldError{Pointer: fmt.Sprintf("/resources/%d/version", i),
+					Code: "module_version_unavailable", Message: fmt.Sprintf("%s@%s is not in the catalog", r.Module, r.Version)})
+				continue
+			}
+			return nil, fmt.Errorf("resolve %s@%s: %w", r.Module, r.Version, err)
+		}
+		schema, err := inputschema.Compile(v.InputsSchema)
+		if err != nil {
+			return nil, fmt.Errorf("compile inputs schema of %s@%s: %w", r.Module, r.Version, err)
+		}
+		out = append(out, ResolvedResource{Input: r, Version: v, Schema: schema})
+	}
+	if len(errs) > 0 {
+		return nil, apperr.Invalid("module_version_unavailable", "requested module versions are unavailable", errs...)
+	}
+	return out, nil
+}
+
+// ValidateEnvironment applies environment rules (region allow-list, ephemeral TTL). Pure.
+func ValidateEnvironment(in CreateInput, env Environment, region string) []apperr.FieldError {
+	var errs []apperr.FieldError
+	if !slices.Contains(env.AllowedRegions, region) {
+		errs = append(errs, apperr.FieldError{Pointer: "/region", Code: "region_not_allowed",
+			Message: fmt.Sprintf("region %q is not allowed in %s (allowed: %v)", region, env.Name, env.AllowedRegions)})
+	}
+	if in.Ephemeral != nil {
+		switch {
+		case !env.AllowEphemeral:
+			errs = append(errs, apperr.FieldError{Pointer: "/ephemeral", Code: "ephemeral_not_allowed",
+				Message: fmt.Sprintf("ephemeral stacks are not allowed in %s", env.Name)})
+		case env.MaxTTLHours != nil && in.Ephemeral.TTLHours > *env.MaxTTLHours:
+			errs = append(errs, apperr.FieldError{Pointer: "/ephemeral/ttl_hours", Code: "maximum",
+				Message: fmt.Sprintf("must be <= %d in %s", *env.MaxTTLHours, env.Name)})
+		}
+	}
+	return errs
+}
+
+func fieldLookupError(err error, ptr, msg string) error {
+	if apperr.IsKind(err, apperr.KindNotFound) {
+		return apperr.Invalid("validation_failed", msg, apperr.FieldError{Pointer: ptr, Code: "unknown", Message: msg})
+	}
+	return fmt.Errorf("lookup %s: %w", ptr, err)
+}
+
+// Get returns one request.
+func (s *Service) Get(ctx context.Context, id uuid.UUID) (*Request, error) {
+	r, err := s.repo.Get(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("get request %s: %w", id, err)
+	}
+	return r, nil
+}
+
+// MaxPageSize bounds List.
+const MaxPageSize = 200
+
+// List returns requests newest first, plus the cursor of the next page (nil at the end).
+func (s *Service) List(ctx context.Context, f ListFilter) ([]*Request, *Cursor, error) {
+	if f.Status != "" && !f.Status.Valid() {
+		return nil, nil, &apperr.Error{Kind: apperr.KindInvalid, Code: "bad_request", Message: fmt.Sprintf("unknown status %q", f.Status)}
+	}
+	if f.Kind != "" && !f.Kind.Valid() {
+		return nil, nil, &apperr.Error{Kind: apperr.KindInvalid, Code: "bad_request", Message: fmt.Sprintf("unknown kind %q", f.Kind)}
+	}
+	switch {
+	case f.Limit <= 0:
+		f.Limit = 50
+	case f.Limit > MaxPageSize:
+		f.Limit = MaxPageSize
+	}
+	want := f.Limit
+	f.Limit++ // fetch one extra row to learn whether another page exists
+	rows, err := s.repo.List(ctx, f)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list requests: %w", err)
+	}
+	if len(rows) <= want {
+		return rows, nil, nil
+	}
+	rows = rows[:want]
+	last := rows[len(rows)-1]
+	return rows, &Cursor{CreatedAt: last.CreatedAt, ID: last.ID}, nil
+}
