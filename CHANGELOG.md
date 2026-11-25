@@ -12,6 +12,10 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 - `docker-compose.yml` with LocalStack 4.4 and PostgreSQL 17, both with health checks, plus `.env.example`.
 - `Makefile` targets for the local stack, Terraform checks, OPA tests, module tests and Go/Python tests; `.editorconfig`; `.terraform-version` (1.13.5).
 
+### Security
+- The local stack binds LocalStack and Postgres to loopback only. Images are pinned by digest.
+- `make` forces LocalStack dummy credentials and unexports `AWS_PROFILE` and session tokens.
+
 ### Changed
 - `AGENTS.md`: local-first rules, the 70/30 object-oriented and functional coding style, and the small-commit, reviewed-PR workflow.
 
