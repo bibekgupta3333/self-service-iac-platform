@@ -47,12 +47,12 @@ Durations assume one engineer; adjust linearly.
 
 | Tasks |
 |---|
-| Monorepo skeleton per layout in [01-system-architecture.md](01-system-architecture.md); `docker compose` with Postgres, LocalStack, backend, portal |
-| Platform bootstrap Terraform (applied once by an admin; see [02-aws-infrastructure.md](02-aws-infrastructure.md)): state bucket + CMK, GitHub OIDC provider, `iacp-plan`/`iacp-apply` roles + `iacp-boundary` in dev/staging accounts |
+| Monorepo skeleton per layout in [01-system-architecture.md](01-system-architecture.md); `docker compose` with Postgres and LocalStack (backend and portal services added in M2/M4) |
+| *(Deferred by [ADR-0009](adr/0009-local-first-localstack-and-local-backend.md))* Platform bootstrap Terraform for real AWS: state bucket + CMK, GitHub OIDC provider, `iacp-plan`/`iacp-apply` roles + `iacp-boundary` |
 | GitHub org setup: repo rulesets, GitHub App registration (permissions: contents rw, pull requests rw, checks r, actions rw, metadata r), Environments |
-| ADRs 0001–0008 accepted ([adr/README.md](adr/README.md)) |
+| ADRs 0001–0009 accepted ([adr/README.md](adr/README.md)) |
 
-**Acceptance:** `docker compose up` brings all services healthy; a hand-written stack in `environments/development/platform/smoke/` plans in GitHub Actions via OIDC with no static credentials in the repo or org secrets (except the Infracost key and App key).
+**Acceptance:** `docker compose up` brings LocalStack and Postgres to healthy. A hand-written stack in `environments/development/platform/smoke/` plans and applies against LocalStack, both locally and in a hermetic GitHub Actions job, with no real AWS credentials anywhere. OIDC to real accounts is verified when ADR-0009 is lifted.
 
 ### M1 — Module registry (weeks 2–3)
 

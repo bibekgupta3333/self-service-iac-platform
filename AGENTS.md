@@ -46,7 +46,7 @@ If code and docs disagree, fix one of them in the same change. A significant des
 ## Commands
 ```bash
 # Local stack
-docker compose up -d                     # Postgres, LocalStack, backend, portal
+make up                                  # LocalStack + Postgres (docker compose)
 
 # Terraform modules
 terraform fmt -recursive -check
