@@ -88,8 +88,21 @@ func run() error {
 		},
 	})
 
-	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
-	return serve(ctx, srv, cfg.ShutdownTimeout)
+	return serve(ctx, newServer(cfg.HTTPAddr, handler), cfg.ShutdownTimeout)
+}
+
+// newServer bounds every phase of a connection so slow or idle clients cannot pin
+// goroutines and file descriptors.
+func newServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second, // bodies are capped at 1 MiB
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    64 << 10,
+	}
 }
 
 // migrate applies migrations as the schema owner, then enables login for the runtime
