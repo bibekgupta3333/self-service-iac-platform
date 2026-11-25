@@ -504,7 +504,7 @@ The current local stack is [`docker-compose.yml`](../docker-compose.yml) at the 
 | Service | Image | Port | Purpose |
 |---|---|---|---|
 | `localstack` | `localstack/localstack:4.4` (pinned by digest) | `127.0.0.1:4566` | AWS emulator: s3, sqs, sns, lambda, iam, sts, kms, logs, cloudwatch, secretsmanager, events |
-| `postgres` | `postgres:17-alpine` (pinned by digest) | `127.0.0.1:5432` | Control-plane database (`iacp` / `iacp`) |
+| `postgres` | `postgres:17-alpine` (pinned by digest) | `127.0.0.1:5432` | Control-plane database (user `iacp`, local-only password `iacp-local-only`) |
 
 Start it with `make up`. The `Makefile` forces dummy credentials (`test`/`test`) and `AWS_ENDPOINT_URL=http://localhost:4566`, so real credentials in your shell are never used.
 
