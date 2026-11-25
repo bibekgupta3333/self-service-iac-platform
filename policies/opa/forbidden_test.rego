@@ -55,12 +55,27 @@ test_context_repo_allow_list_used if {
 bucket(force, env) := t.rc("aws_s3_bucket", "b", {"force_destroy": force, "tags_all": {"iacp:environment": env}})
 
 test_force_destroy_allowed_in_development if {
-	count(forbidden.deny) == 0 with input as t.plan([bucket(true, "development")])
+	count(forbidden.deny) == 0 with input as t.plan([bucket(true, "development")]) with data.iacp.context as t.dev_ctx
 }
 
 test_force_destroy_denied_in_staging if {
-	some m in forbidden.deny with input as t.plan([bucket(true, "staging")])
+	some m in forbidden.deny with input as t.plan([bucket(true, "staging")]) with data.iacp.context as {"environment": "staging"}
 	startswith(m, `[iacp.forbidden.force_destroy] aws_s3_bucket.b: force_destroy = true is not allowed in environment "staging"`)
+}
+
+# A development tag must not unlock force_destroy when no context says so.
+test_force_destroy_development_tag_without_context_denied if {
+	some m in forbidden.deny with input as t.plan([bucket(true, "development")])
+	contains(m, `environment "unknown"`)
+}
+
+test_force_destroy_exception_ignored if {
+	ctx := {"environment": "staging", "now": "2026-01-01T00:00:00Z", "exceptions": [{
+		"rule_id": "iacp.forbidden.force_destroy",
+		"resource_address": "aws_s3_bucket.b",
+		"expires_at": "2026-06-01T00:00:00Z",
+	}]}
+	count(forbidden.deny) == 1 with input as t.plan([bucket(true, "staging")]) with data.iacp.context as ctx
 }
 
 test_force_destroy_context_wins_over_tag if {

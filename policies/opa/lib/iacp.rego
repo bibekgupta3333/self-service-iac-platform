@@ -202,19 +202,11 @@ non_empty(v) if {
 
 # --- Environment -------------------------------------------------------------
 
-# environment_of(rc): the context environment, else the resource's
-# iacp:environment tag, else "unknown" (treated as non-development: fail closed).
-environment_of(_) := ctx.environment
-
-environment_of(rc) := env if {
-	not ctx.environment
-	env := tags_of(rc)["iacp:environment"]
-}
-
-environment_of(rc) := "unknown" if {
-	not ctx.environment
-	not tags_of(rc)["iacp:environment"]
-}
+# environment_of(rc): the stack environment from the context. A resource's own
+# iacp:environment tag is not trusted for relaxations (a "development" tag must not
+# unlock force_destroy); without a context the result is "unknown", which every
+# rule treats as non-development (fail closed).
+environment_of(_) := object.get(ctx, "environment", "unknown")
 
 # --- Tags ----------------------------------------------------------------------
 
@@ -246,12 +238,23 @@ object_or_empty(x) := {} if not is_object(x)
 
 # exempt(rule_id, address) is true when an unexpired exception covers the
 # rule for this resource (or for every resource when resource_address is null).
+# Non-waivable rules are never exempted, whatever the exception list says.
 exempt(rule_id, address) if {
+	waivable(rule_id)
 	some e in ctx_value("exceptions", [])
 	e.rule_id == rule_id
 	e.resource_address in {address, null}
 	time.parse_rfc3339_ns(e.expires_at) > now_ns
 }
+
+# waivable(rule_id): forbidden constructs are never waivable, and public bucket
+# policies are not waivable in production (docs/07, policy exception workflow).
+waivable(rule_id) if {
+	not startswith(rule_id, "iacp.forbidden.")
+	not production_only_rule(rule_id)
+}
+
+production_only_rule("iacp.s3.no_public_policy") if ctx.environment == "production"
 
 now_ns := time.parse_rfc3339_ns(ctx.now)
 

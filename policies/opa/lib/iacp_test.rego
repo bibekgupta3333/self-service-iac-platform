@@ -32,8 +32,19 @@ test_environment_from_context if {
 	f.environment_of(t.rc("aws_s3_bucket", "a", {})) == "staging" with data.iacp.context as {"environment": "staging"}
 }
 
-test_environment_from_tag if {
-	f.environment_of(t.rc("aws_s3_bucket", "a", {"tags_all": t.good_tags})) == "development"
+test_environment_tag_not_trusted_without_context if {
+	f.environment_of(t.rc("aws_s3_bucket", "a", {"tags_all": t.good_tags})) == "unknown"
+}
+
+test_forbidden_rules_not_waivable if {
+	ctx := {"exceptions": [{"rule_id": "iacp.forbidden.force_destroy", "resource_address": null, "expires_at": "2200-01-01T00:00:00Z"}]}
+	not f.exempt("iacp.forbidden.force_destroy", "aws_s3_bucket.a") with data.iacp.context as ctx
+}
+
+test_public_policy_not_waivable_in_production if {
+	exc := [{"rule_id": "iacp.s3.no_public_policy", "resource_address": null, "expires_at": "2200-01-01T00:00:00Z"}]
+	not f.exempt("iacp.s3.no_public_policy", "x") with data.iacp.context as {"environment": "production", "exceptions": exc}
+	f.exempt("iacp.s3.no_public_policy", "x") with data.iacp.context as {"environment": "staging", "exceptions": exc}
 }
 
 test_environment_unknown_fails_closed if {
