@@ -54,7 +54,7 @@ class LambdaTracingAndReservedConcurrency(BaseResourceCheck):
         try:
             value = int(concurrency)
         except (TypeError, ValueError):
-            return CheckResult.PASSED  # set from an expression; the module validates its range
+            return CheckResult.UNKNOWN  # expression Checkov cannot evaluate; the module validates it
         if value < 0:  # -1 means "unreserved"
             self.details.append("reserved_concurrent_executions is -1 (unreserved)")
             return CheckResult.FAILED

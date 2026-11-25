@@ -186,7 +186,8 @@ variable "concurrency" {
         + fn("no_concurrency", 'tracing_config { mode = "Active" }')
         + fn("unreserved", 'tracing_config { mode = "Active" }\nreserved_concurrent_executions = -1'),
     )
-    assert results["passed"] == {"aws_lambda_function.good", "aws_lambda_function.from_var"}
+    # from_var is UNKNOWN (an expression Checkov cannot evaluate): neither passed nor failed.
+    assert results["passed"] == {"aws_lambda_function.good"}
     assert results["failed"] == {
         "aws_lambda_function.passthrough",
         "aws_lambda_function.no_tracing",

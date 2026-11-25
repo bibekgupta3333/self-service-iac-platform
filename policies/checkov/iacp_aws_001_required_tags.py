@@ -33,6 +33,8 @@ def _is_unresolved(value: Any) -> bool:
 
 REQUIRED_TAGS = ("iacp:team", "iacp:environment", "iacp:managed-by")
 
+# A starting list, not exhaustive. The authoritative check is OPA (policies/opa/tags.rego),
+# which treats every resource with tags_all in the plan as taggable.
 TAGGABLE_RESOURCES = (
     "aws_s3_bucket",
     "aws_sqs_queue",
