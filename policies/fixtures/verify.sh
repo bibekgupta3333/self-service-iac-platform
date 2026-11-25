@@ -3,11 +3,11 @@
 #   - compliant.plan.json must produce no denies;
 #   - noncompliant.plan.json must be denied by every rule id listed below.
 #
-# Usage: policies/opa/fixtures/verify.sh   (needs conftest and jq)
+# Usage: policies/fixtures/verify.sh   (needs conftest and jq)
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-policy="$here/.."
+policy="$here/../opa"
 
 expected_rule_ids=(
   iacp.encryption.kms_rotation

@@ -5,7 +5,7 @@
 # makes no AWS calls) and are never applied. The module source is rewritten in
 # the JSON afterwards because the pinned release tags may not exist yet.
 #
-# Usage: policies/opa/fixtures/regenerate.sh   (needs terraform and jq)
+# Usage: policies/fixtures/regenerate.sh   (needs terraform and jq)
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
