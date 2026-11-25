@@ -90,21 +90,27 @@ Review cadence: IAM Access Analyzer unused-access findings reviewed monthly; `ia
 ```
 policies/
 ├── opa/
-│   ├── lib/iacp.rego               # helpers: resources by type, exemptions, tags
-│   ├── tags.rego                      # iacp.tags
-│   ├── encryption.rego                # iacp.encryption
-│   ├── s3_public.rego                 # iacp.s3
-│   ├── regions_and_sizes.rego         # iacp.placement
-│   ├── budget.rego                    # iacp.budget   (input = infracost JSON)
-│   ├── prod_approval.rego             # iacp.approval (pre-apply gate)
-│   ├── forbidden.rego                 # iacp.forbidden (external/provisioners/sources)
-│   └── *_test.rego                    # opa test fixtures, 100 % rule coverage required
+│   ├── lib/iacp.rego                  # lib.iacp: pure helpers (selection, tags, environment, exceptions, messages)
+│   ├── main.rego                      # main: aggregates every iacp.* package for `conftest test -p policies/opa`
+│   ├── tags.rego                      # iacp.tags        (required iacp:* tags, ownership tags match context)
+│   ├── encryption.rego                # iacp.encryption  (S3 SSE-KMS, SQS SSE / CMK outside dev, KMS rotation)
+│   ├── s3_public.rego                 # iacp.s3          (public access block, public ACLs, public bucket policies)
+│   ├── iam.rego                       # iacp.iam         (Action "*", NotAction, write actions on Resource "*")
+│   ├── placement.rego                 # iacp.placement   (allowed regions; instance sizes are planned)
+│   ├── forbidden.rego                 # iacp.forbidden   (pinned module source, force_destroy outside development)
+│   ├── budget.rego                    # iacp.budget      (planned; input = infracost JSON)
+│   ├── prod_approval.rego             # iacp.approval    (planned; pre-apply gate)
+│   └── *_test.rego                    # opa test cases; CI gate: coverage >= 90 %
+├── fixtures/                          # sample plan JSONs + verify.sh (outside opa/: opa test loads JSON as data)
 └── checkov/
-    ├── checks/
-    │   ├── sqs_redrive.py             # CKV_FDY_001
-    │   └── lambda_tracing.yaml        # CKV2_FDY_002
-    └── .checkov.yaml
+    ├── __init__.py                    # makes the dir loadable by --external-checks-dir policies/checkov
+    ├── iacp_aws_001_required_tags.py  # IACP_AWS_001
+    ├── iacp_aws_002_s3_sse_kms.py     # IACP_AWS_002
+    ├── iacp_aws_003_lambda_tracing_concurrency.py  # IACP_AWS_003
+    └── tests/                         # pytest suite (no __init__.py, so Checkov never loads it)
 ```
+
+Without a context file the policies fall back to safe defaults: allowed regions `us-east-1`/`us-west-2`, module sources from `github.com/bibekgupta3333/self-service-iac-platform` (override with `allowed_module_repos`), and the environment taken from the resource's `iacp:environment` tag (missing means non-development, so the check fails closed). Every message has the form `[rule.id] <address>: <problem>. Fix: <remedy>`.
 
 `pr-validate.yml` evaluation:
 
@@ -185,7 +191,7 @@ package iacp.tags
 import rego.v1
 import data.lib.iacp as f
 
-required := {"iacp:team", "iacp:env", "iacp:stack", "iacp:managed-by", "cost-center"}
+required := {"iacp:team", "iacp:environment", "iacp:stack", "iacp:managed-by"}
 
 # Resource types that do not support tags are skipped.
 untaggable := {"aws_iam_role_policy", "aws_iam_role_policy_attachment", "aws_lambda_event_source_mapping",
@@ -520,11 +526,21 @@ deny contains msg if {
 }
 ```
 
-Policy tests (`opa test policies/opa -v --coverage`) run in `pr-validate.yml` whenever `policies/**` changes; coverage gate 100 % of rules.
+Policy tests (`opa test policies/opa -v --coverage`) run in `ci.yml` on every PR and push to `main`; the coverage gate is 90 % (currently 100 %). `policies/fixtures/verify.sh` runs conftest against a compliant and a non-compliant plan.
 
 ### 6.10 Custom Checkov checks
 
-Checkov runs on the generated root module **and** on each module's `examples/` during release (`checkov -d . --external-checks-dir policies/checkov/checks --download-external-modules true --framework terraform`).
+Checkov runs on the generated root module **and** on each module's `examples/` during release (`checkov -d . --external-checks-dir policies/checkov --download-external-modules true --framework terraform`).
+
+Implemented custom checks (class-based `BaseResourceCheck`, unit tested in `policies/checkov/tests/`):
+
+| ID | Resource | Rule |
+|----|----------|------|
+| `IACP_AWS_001` | taggable AWS resources | `tags` sets `iacp:team`, `iacp:environment`, `iacp:managed-by` (`iacp:stack` comes from provider `default_tags` and is checked by OPA) |
+| `IACP_AWS_002` | `aws_s3_bucket_server_side_encryption_configuration` | `sse_algorithm` is `aws:kms` or `aws:kms:dsse` with `kms_master_key_id` set |
+| `IACP_AWS_003` | `aws_lambda_function` | `tracing_config.mode = "Active"` and `reserved_concurrent_executions >= 0` |
+
+The `CKV_FDY_*` examples below are design sketches for further checks.
 
 Python check — SQS queues must have a dead-letter queue:
 
