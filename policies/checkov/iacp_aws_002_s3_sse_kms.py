@@ -10,9 +10,27 @@ from __future__ import annotations
 
 from typing import Any
 
-from _conf import blocks, first
 from checkov.common.models.enums import CheckCategories, CheckResult
 from checkov.terraform.checks.resource.base_resource_check import BaseResourceCheck
+
+
+# Helpers are inlined (not imported from a shared module): Checkov loads external
+# checks for several frameworks in parallel threads, and a shared module import
+# races with that and fails intermittently.
+def _blocks(conf: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    """Nested blocks stored under ``key``, always as a list of dicts."""
+    value = conf.get(key) or []
+    if isinstance(value, dict):
+        value = [value]
+    return [b for b in value if isinstance(b, dict)]
+
+
+def _first(conf: dict[str, Any], key: str, default: Any = None) -> Any:
+    """Unwrap Checkov's single-element list for ``key`` (``default`` when absent)."""
+    value = conf.get(key)
+    if isinstance(value, list):
+        return value[0] if value else default
+    return default if value is None else value
 
 KMS_ALGORITHMS = {"aws:kms", "aws:kms:dsse"}
 
@@ -30,18 +48,18 @@ class S3SseUsesCustomerManagedKms(BaseResourceCheck):
     def scan_resource_conf(self, conf: dict[str, Any]) -> CheckResult:
         defaults = [
             d
-            for rule in blocks(conf, "rule")
-            for d in blocks(rule, "apply_server_side_encryption_by_default")
+            for rule in _blocks(conf, "rule")
+            for d in _blocks(rule, "apply_server_side_encryption_by_default")
         ]
         if not defaults:
             self.details.append("no apply_server_side_encryption_by_default block")
             return CheckResult.FAILED
         for d in defaults:
-            algorithm = first(d, "sse_algorithm")
+            algorithm = _first(d, "sse_algorithm")
             if algorithm not in KMS_ALGORITHMS:
                 self.details.append(f'sse_algorithm is "{algorithm}", expected aws:kms')
                 return CheckResult.FAILED
-            if not first(d, "kms_master_key_id"):
+            if not _first(d, "kms_master_key_id"):
                 self.details.append("kms_master_key_id is not set (AWS-managed key)")
                 return CheckResult.FAILED
         return CheckResult.PASSED

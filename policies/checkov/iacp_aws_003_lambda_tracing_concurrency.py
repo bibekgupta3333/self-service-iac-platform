@@ -8,9 +8,27 @@ from __future__ import annotations
 
 from typing import Any
 
-from _conf import blocks, first
 from checkov.common.models.enums import CheckCategories, CheckResult
 from checkov.terraform.checks.resource.base_resource_check import BaseResourceCheck
+
+
+# Helpers are inlined (not imported from a shared module): Checkov loads external
+# checks for several frameworks in parallel threads, and a shared module import
+# races with that and fails intermittently.
+def _blocks(conf: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    """Nested blocks stored under ``key``, always as a list of dicts."""
+    value = conf.get(key) or []
+    if isinstance(value, dict):
+        value = [value]
+    return [b for b in value if isinstance(b, dict)]
+
+
+def _first(conf: dict[str, Any], key: str, default: Any = None) -> Any:
+    """Unwrap Checkov's single-element list for ``key`` (``default`` when absent)."""
+    value = conf.get(key)
+    if isinstance(value, list):
+        return value[0] if value else default
+    return default if value is None else value
 
 
 class LambdaTracingAndReservedConcurrency(BaseResourceCheck):
@@ -24,12 +42,12 @@ class LambdaTracingAndReservedConcurrency(BaseResourceCheck):
         )
 
     def scan_resource_conf(self, conf: dict[str, Any]) -> CheckResult:
-        modes = [first(t, "mode") for t in blocks(conf, "tracing_config")]
+        modes = [_first(t, "mode") for t in _blocks(conf, "tracing_config")]
         if "Active" not in modes:
             self.details.append('tracing_config.mode must be "Active"')
             return CheckResult.FAILED
 
-        concurrency = first(conf, "reserved_concurrent_executions")
+        concurrency = _first(conf, "reserved_concurrent_executions")
         if concurrency is None:
             self.details.append("reserved_concurrent_executions is not set")
             return CheckResult.FAILED

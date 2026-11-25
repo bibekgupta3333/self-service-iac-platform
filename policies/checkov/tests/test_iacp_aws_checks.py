@@ -2,6 +2,27 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
+
+CHECKS_DIR = Path(__file__).resolve().parents[1]
+
+
+def test_cli_loads_checks_for_all_frameworks_without_errors(tmp_path):
+    """Plain `checkov -d ... --external-checks-dir` (no --framework) loads the external
+    checks for several frameworks in parallel; it must not raise import errors."""
+    (tmp_path / "main.tf").write_text('resource "aws_sqs_queue" "q" {\n  name = "q"\n}\n')
+    proc = subprocess.run(
+        [sys.executable, "-m", "checkov.main", "-d", str(tmp_path),
+         "--external-checks-dir", str(CHECKS_DIR), "--check", "IACP_AWS_001", "--compact"],
+        capture_output=True, text=True, timeout=300, check=False,
+    )
+    output = proc.stdout + proc.stderr
+    assert "Cannot load external check" not in output
+    assert "ImportError" not in output
+    assert "IACP_AWS_001" in output
+
 TAGS = """
 locals {
   tags = merge(var.extra, {

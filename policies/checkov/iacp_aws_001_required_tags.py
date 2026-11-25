@@ -9,9 +9,27 @@ from __future__ import annotations
 
 from typing import Any
 
-from _conf import first, is_unresolved
 from checkov.common.models.enums import CheckCategories, CheckResult
 from checkov.terraform.checks.resource.base_resource_check import BaseResourceCheck
+
+
+# Helpers are inlined (not imported from a shared module): Checkov loads external
+# checks for several frameworks in parallel threads, and a shared module import
+# races with that and fails intermittently.
+def _first(conf: dict[str, Any], key: str, default: Any = None) -> Any:
+    """Unwrap Checkov's single-element list for ``key`` (``default`` when absent)."""
+    value = conf.get(key)
+    if isinstance(value, list):
+        return value[0] if value else default
+    return default if value is None else value
+
+
+_UNRESOLVED_PREFIXES = ("var.", "local.", "module.", "data.", "each.", "count.")
+
+
+def _is_unresolved(value: Any) -> bool:
+    """True when Checkov kept an expression's source text instead of a value."""
+    return isinstance(value, str) and ("${" in value or value.startswith(_UNRESOLVED_PREFIXES))
 
 REQUIRED_TAGS = ("iacp:team", "iacp:environment", "iacp:managed-by")
 
@@ -41,11 +59,11 @@ class RequiredIacpTags(BaseResourceCheck):
         )
 
     def scan_resource_conf(self, conf: dict[str, Any]) -> CheckResult:
-        tags = first(conf, "tags")
+        tags = _first(conf, "tags")
         if tags is None:
             self.details.append("no tags argument; set tags = local.tags")
             return CheckResult.FAILED
-        if is_unresolved(tags):
+        if _is_unresolved(tags):
             # Expression Checkov cannot evaluate statically; OPA checks tags_all on the plan.
             return CheckResult.UNKNOWN
         if not isinstance(tags, dict):
