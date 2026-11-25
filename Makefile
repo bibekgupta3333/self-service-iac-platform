@@ -3,11 +3,16 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
 PYTHON  ?= .venv/bin/python
-MODULES := $(wildcard modules/*/)
-export AWS_ACCESS_KEY_ID     ?= test
-export AWS_SECRET_ACCESS_KEY ?= test
-export AWS_DEFAULT_REGION    ?= us-east-1
-export AWS_ENDPOINT_URL      ?= http://localhost:4566
+MODULES := $(dir $(wildcard modules/*/main.tf))
+
+# Local-first (ADR-0009): always talk to LocalStack with dummy credentials.
+# Hard-set so real credentials or profiles in the caller's shell can never leak in.
+override AWS_ACCESS_KEY_ID     := test
+override AWS_SECRET_ACCESS_KEY := test
+override AWS_DEFAULT_REGION    := us-east-1
+override AWS_ENDPOINT_URL      := http://localhost:4566
+export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION AWS_ENDPOINT_URL
+unexport AWS_PROFILE AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
 
 .PHONY: help up down ps fmt fmt-check validate tflint checkov policy-test lint \
         module-test go-test py-test test diagrams
@@ -58,11 +63,16 @@ module-test: ## terraform test every module against LocalStack (needs `make up`)
 	  terraform -chdir=$$m init -backend=false -input=false >/dev/null && terraform -chdir=$$m test || exit 1; \
 	done
 
-go-test: ## Go unit tests (backend + integration test module)
-	@[ -f backend/go.mod ] && (cd backend && go vet ./... && go test ./...) || echo "backend not initialised yet"
+go-test: ## Go unit tests (backend)
+	@if [ -f backend/go.mod ]; then \
+	  cd backend && go vet ./... && go test ./...; \
+	else \
+	  echo "backend not initialised yet"; \
+	fi
 
-py-test: ## Python tooling tests
-	@[ -d tools ] && $(PYTHON) -m pytest -q tools || true
+py-test: ## Python tooling tests (exit code 5 = no tests collected is OK)
+	@$(PYTHON) -m pytest -q tools policies; rc=$$?; \
+	if [ $$rc -eq 5 ]; then echo "no python tests yet"; exit 0; fi; exit $$rc
 
 test: go-test py-test policy-test module-test ## Run all tests
 
