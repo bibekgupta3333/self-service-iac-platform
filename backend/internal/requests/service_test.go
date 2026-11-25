@@ -182,8 +182,56 @@ var t0 = time.Date(2026, 11, 25, 9, 0, 0, 0, time.UTC)
 
 var dev = identity.Principal{UserID: uuid.MustParse("33333333-3333-3333-3333-333333333333"), Login: "dev", Type: identity.ActorUser}
 
+// fakeMembers maps user id to role in teamID; unknown users have no role.
+type fakeMembers map[uuid.UUID]Role
+
+func (f fakeMembers) RoleIn(_ context.Context, team, user uuid.UUID) (Role, error) {
+	if team != teamID {
+		return RoleNone, nil
+	}
+	return f[user], nil
+}
+
 func newSvc(repo Repository, v VersionLookup) *Service {
-	return NewService(repo, v, platform.FixedClock{T: t0}, &seqIDs{})
+	return newSvcWithMembers(repo, v, fakeMembers{dev.UserID: RoleDeveloper, otherUser: RoleMaintainer})
+}
+
+var otherUser = uuid.MustParse("44444444-4444-4444-4444-444444444444")
+
+func newSvcWithMembers(repo Repository, v VersionLookup, m Memberships) *Service {
+	return NewService(repo, v, m, platform.FixedClock{T: t0}, &seqIDs{})
+}
+
+func TestCreateRequiresTeamRole(t *testing.T) {
+	tests := []struct {
+		role Role
+		ok   bool
+	}{
+		{RoleNone, false}, {RoleViewer, false}, {RoleDeveloper, true}, {RoleMaintainer, true}, {RoleAdmin, true}, {"owner", false},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.role), func(t *testing.T) {
+			repo := newMemRepo()
+			svc := newSvcWithMembers(repo, fakeVersions{}, fakeMembers{dev.UserID: tt.role})
+			_, err := svc.Create(context.Background(), dev, createCmd(validInput(), "key-00000009"))
+			if tt.ok != (err == nil) {
+				t.Fatalf("role %q: err = %v", tt.role, err)
+			}
+			if !tt.ok && (!apperr.IsKind(err, apperr.KindForbidden) || len(repo.state.stacks) != 0 || len(repo.state.keys) != 0) {
+				t.Fatalf("role %q: want forbidden with nothing persisted, got %v", tt.role, err)
+			}
+		})
+	}
+}
+
+func TestRequiredRole(t *testing.T) {
+	if RequiredRole(KindCreate, "production") != RoleDeveloper || RequiredRole(KindDestroy, "production") != RoleMaintainer ||
+		RequiredRole(KindDestroy, "development") != RoleDeveloper {
+		t.Fatal("RequiredRole does not match the docs/03 RBAC column")
+	}
+	if Role("bogus").AtLeast(RoleViewer) || !RoleAdmin.AtLeast(RoleDeveloper) || RoleViewer.AtLeast(RoleDeveloper) {
+		t.Fatal("AtLeast ordering is wrong")
+	}
 }
 
 func createCmd(in CreateInput, key string) CreateCommand {
@@ -248,7 +296,7 @@ func TestCreateIdempotency(t *testing.T) {
 
 	// Same key from another user is independent (and hits stack_exists here).
 	other := dev
-	other.UserID = uuid.New()
+	other.UserID = otherUser
 	if _, err := svc.Create(ctx, other, createCmd(validInput(), "key-00000001")); !hasCode(err, "stack_exists") {
 		t.Fatalf("want stack_exists for a second create, got %v", err)
 	}

@@ -62,7 +62,8 @@ func run() error {
 	clock, ids := platform.SystemClock{}, platform.RandomIDs{}
 	auditWriter := audit.NewWriter(clock, ids)
 	catalogSvc := catalog.NewService(catalog.NewPostgresRepository(pool, auditWriter), clock, cfg.ModuleRepoURL)
-	requestSvc := requests.NewService(requests.NewPostgresRepository(pool, auditWriter), catalogSvc, clock, ids)
+	requestRepo := requests.NewPostgresRepository(pool, auditWriter)
+	requestSvc := requests.NewService(requestRepo, catalogSvc, requestRepo, clock, ids)
 
 	if cfg.InternalToken == "" {
 		slog.Warn("IACP_INTERNAL_TOKEN is not set: /v1/internal endpoints reject every request")

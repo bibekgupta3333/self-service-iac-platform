@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/audit"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/catalog"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/db/dbtest"
@@ -49,10 +50,25 @@ func TestPostgresRequestFlow(t *testing.T) {
 	}
 
 	repo := NewPostgresRepository(pool, writer)
-	svc := NewService(repo, cat, platform.SystemClock{}, platform.RandomIDs{})
+	svc := NewService(repo, cat, repo, platform.SystemClock{}, platform.RandomIDs{})
 	user := identity.Principal{UserID: userID, Login: "priya-s", Type: identity.ActorUser}
 	in := validInput()
 	in.Ephemeral = &Ephemeral{TTLHours: 72}
+
+	// Not a member yet: forbidden. A viewer is still forbidden; a developer may create.
+	if _, err := svc.Create(ctx, user, createCmd(in, "member-check-01")); !apperr.IsKind(err, apperr.KindForbidden) {
+		t.Fatalf("non-member: want forbidden, got %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO memberships (team_id, user_id, role)
+		SELECT id, $1, 'viewer' FROM teams WHERE slug = 'payments'`, userID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Create(ctx, user, createCmd(in, "member-check-02")); !apperr.IsKind(err, apperr.KindForbidden) {
+		t.Fatalf("viewer: want forbidden, got %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE memberships SET role = 'developer' WHERE user_id = $1`, userID); err != nil {
+		t.Fatal(err)
+	}
 
 	// Concurrent calls with the same key create exactly one request.
 	const n = 5

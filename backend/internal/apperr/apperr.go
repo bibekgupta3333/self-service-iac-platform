@@ -21,7 +21,14 @@ const (
 	KindConflict
 	// KindUnauthenticated means no valid identity was presented.
 	KindUnauthenticated
+	// KindForbidden means the caller is known but not allowed to do this.
+	KindForbidden
 )
+
+// Forbidden builds a KindForbidden error.
+func Forbidden(message string) *Error {
+	return &Error{Kind: KindForbidden, Code: "forbidden", Message: message}
+}
 
 // FieldError points at one invalid part of the input.
 type FieldError struct {

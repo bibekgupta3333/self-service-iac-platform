@@ -112,13 +112,20 @@ type CreateResult struct {
 type Service struct {
 	repo     Repository
 	versions VersionLookup
+	members  Memberships
 	clock    platform.Clock
 	ids      platform.IDGenerator
 }
 
+// Memberships resolves a user's role in a team (users.is_platform_admin counts as admin).
+type Memberships interface {
+	// RoleIn returns RoleNone when the user is not a member.
+	RoleIn(ctx context.Context, teamID, userID uuid.UUID) (Role, error)
+}
+
 // NewService returns a request Service.
-func NewService(repo Repository, versions VersionLookup, clock platform.Clock, ids platform.IDGenerator) *Service {
-	return &Service{repo: repo, versions: versions, clock: clock, ids: ids}
+func NewService(repo Repository, versions VersionLookup, members Memberships, clock platform.Clock, ids platform.IDGenerator) *Service {
+	return &Service{repo: repo, versions: versions, members: members, clock: clock, ids: ids}
 }
 
 // Create validates and records a change request. With the same Idempotency-Key and
@@ -186,6 +193,13 @@ func (s *Service) create(ctx context.Context, st Store, by identity.Principal, c
 	team, err := st.TeamBySlug(ctx, in.Team)
 	if err != nil {
 		return nil, fieldLookupError(err, "/team", fmt.Sprintf("unknown team %q", in.Team))
+	}
+	role, err := s.members.RoleIn(ctx, team.ID, by.UserID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve team role: %w", err)
+	}
+	if need := RequiredRole(in.Kind, in.Environment); !role.AtLeast(need) {
+		return nil, apperr.Forbidden(fmt.Sprintf("creating a %s request for team %s needs the %s role or higher", in.Kind, in.Team, need))
 	}
 	env, err := st.EnvironmentByName(ctx, in.Environment)
 	if err != nil {
