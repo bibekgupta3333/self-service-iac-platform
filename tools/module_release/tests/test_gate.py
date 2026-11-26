@@ -271,8 +271,31 @@ class TestCli:
         assert f"{missing} must be set" in capsys.readouterr().err
 
 
-def test_repository_modules_pass_the_gate():
-    """The modules in this repository must pass against their own tags (first release before any tag)."""
-    gate = ReleaseGate(ModuleWorkspace(REPO_ROOT), GitRepository(REPO_ROOT))
-    results = [gate.check(m) for m in ModuleWorkspace(REPO_ROOT).module_names()]
-    assert results and all(r.ok for r in results), [r.errors for r in results]
+@pytest.mark.parametrize("module", ["s3", "sqs", "lambda"])
+def test_repository_modules_against_a_fixture_release(repo, module):
+    """Each real module, copied into a fixture repo and tagged at its declared version, passes
+    unchanged and fails when an existing output is marked sensitive under a patch bump.
+
+    This does not depend on the tags or uncommitted edits of the checkout running the tests.
+    """
+    source = REPO_ROOT / "modules" / module
+    for path in source.glob("*"):
+        if path.is_file():
+            repo.write(f"modules/{module}/{path.name}", path.read_text())
+    repo.commit("import")
+    version = ModuleWorkspace(repo.root).manifest(module)["metadata"]["version"]
+    repo.tag(f"modules/{module}/v{version}")
+    gate = ReleaseGate(ModuleWorkspace(repo.root), GitRepository(repo.root))
+    result = gate.check(module)
+    assert result.ok and result.changes == () and not result.releasable, result.errors
+
+    outputs = (repo.root / "modules" / module / "outputs.tf").read_text()
+    repo.write(f"modules/{module}/outputs.tf",
+               outputs.replace('output "arn" {', 'output "arn" {\n  sensitive = true', 1))
+    major, minor, patch = (int(x) for x in version.split("."))
+    manifest = (repo.root / "modules" / module / "module.yaml").read_text()
+    repo.write(f"modules/{module}/module.yaml",
+               manifest.replace(f"version: {version}", f"version: {major}.{minor}.{patch + 1}", 1))
+    result = gate.check(module)
+    assert not result.ok and result.required is Bump.MAJOR
+    assert [(c.subject.value, c.name) for c in result.changes] == [("output", "arn")]
