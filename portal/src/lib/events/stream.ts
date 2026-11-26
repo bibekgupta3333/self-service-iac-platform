@@ -1,14 +1,21 @@
 // StatusStream reads a request's Server-Sent Events with fetch and survives what real
 // networks do: it resumes with Last-Event-ID, backs off with jitter, stops on `end` and on
-// answers that retrying cannot fix (401, 403, 404, 429), and reports "unavailable" when SSE
-// does not work at all so the caller can fall back to polling.
+// answers that retrying cannot fix (401, 403, 404, 429), cuts a connection that goes silent
+// (the backend heartbeats every 15 seconds), and reports "unavailable" when SSE does not work
+// at all so the caller can fall back to polling.
 //
-// All I/O is injected (`open`, `sleep`, `random`), so tests drive it without a network.
+// The backend ends every stream after its lifetime cap (5 minutes) and the client resumes, so
+// a healthy idle stream closes regularly. Only a connection that closed quickly, or went
+// silent, without delivering anything (not even a heartbeat) counts as a failure.
+//
+// All I/O is injected (`open`, `sleep`, `random`, `now`, `schedule`), so tests drive it
+// without a network or real timers.
 
 import { isApiError } from "@/lib/api/errors";
 
 import { SseParser } from "./sse";
 import { decodeFrame, type StreamEvent } from "./status";
+import { IdleWatchdog, type Schedule, timerSchedule } from "./watchdog";
 
 export type StreamState =
   | "connecting"
@@ -41,10 +48,23 @@ export interface StatusStreamOptions {
   maxDelayMs?: number;
   /** Consecutive failed attempts before giving up on SSE. */
   maxFailures?: number;
+  /** A connection open at least this long is not a failure even if it delivered nothing. */
+  minHealthyMs?: number;
+  /** Cut and reconnect when nothing (frame or heartbeat) arrives for this long; 0 disables. */
+  idleTimeoutMs?: number;
+  /** Successive connection attempts start at least this far apart. */
+  minReconnectIntervalMs?: number;
   /** Injected for tests; resolves early when the signal aborts. */
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   random?: () => number;
+  now?: () => number;
+  schedule?: Schedule;
 }
+
+/** The backend heartbeats every 15 s; three missed heartbeats mean the connection is dead. */
+export const IDLE_TIMEOUT_MS = 45_000;
+export const MIN_HEALTHY_MS = 10_000;
+export const MIN_RECONNECT_INTERVAL_MS = 3_000;
 
 /**
  * backoffDelay is exponential backoff with "equal jitter": half the capped delay plus a random
@@ -54,6 +74,31 @@ export interface StatusStreamOptions {
 export function backoffDelay(failures: number, baseMs: number, maxMs: number, random: number): number {
   const capped = Math.min(maxMs, baseMs * 2 ** Math.max(0, failures - 1));
   return Math.round(capped / 2 + (capped / 2) * Math.min(1, Math.max(0, random)));
+}
+
+/** What one connection did, from the moment it was opened until it closed. */
+export interface ConnectionOutcome {
+  /** A frame or a comment (heartbeat) arrived. */
+  received: boolean;
+  /** The idle watchdog cut it. */
+  idle: boolean;
+  durationMs: number;
+}
+
+/**
+ * connectionFailed decides whether a connection that closed without `end` counts towards
+ * giving up. Anything received (a heartbeat is enough) proves the stream works; so does a
+ * connection that stayed open for minHealthyMs. A silent connection cut by the watchdog is a
+ * failure however long it lasted (a buffering proxy, a dead socket). Pure.
+ */
+export function connectionFailed(o: ConnectionOutcome, minHealthyMs: number): boolean {
+  if (o.received) return false;
+  return o.idle || o.durationMs < minHealthyMs;
+}
+
+/** reconnectDelay is how long to wait so the next attempt starts minIntervalMs after the last one did. Pure. */
+export function reconnectDelay(startedAt: number, now: number, minIntervalMs: number): number {
+  return Math.max(0, minIntervalMs - Math.max(0, now - startedAt));
 }
 
 const STOPS: Record<number, StreamNotice> = {
@@ -83,8 +128,44 @@ const defaultSleep = (ms: number, signal: AbortSignal): Promise<void> =>
     signal.addEventListener("abort", done, { once: true });
   });
 
+type Settings = Required<Omit<StatusStreamOptions, "initialLastEventId">>;
+
+/** One connection attempt: its own abort signal (tied to the stream's) and its idle watchdog. */
+class Attempt {
+  readonly controller = new AbortController();
+  readonly watchdog: IdleWatchdog;
+  readonly startedAt: number;
+  idle = false;
+  private readonly unlink: () => void;
+
+  constructor(parent: AbortSignal, s: Settings) {
+    this.startedAt = s.now();
+    this.watchdog = new IdleWatchdog(
+      s.idleTimeoutMs,
+      () => {
+        this.idle = true;
+        this.controller.abort();
+      },
+      s.schedule,
+    );
+    const abort = () => this.controller.abort();
+    parent.addEventListener("abort", abort, { once: true });
+    this.unlink = () => parent.removeEventListener("abort", abort);
+    this.watchdog.start();
+  }
+
+  get signal(): AbortSignal {
+    return this.controller.signal;
+  }
+
+  dispose(): void {
+    this.watchdog.stop();
+    this.unlink();
+  }
+}
+
 export class StatusStream {
-  private readonly o: Required<Omit<StatusStreamOptions, "initialLastEventId">> & { initialLastEventId?: string };
+  private readonly o: Settings;
   private readonly controller = new AbortController();
   private lastEventId: string | undefined;
   private started = false;
@@ -95,8 +176,13 @@ export class StatusStream {
       baseDelayMs: 1000,
       maxDelayMs: 30_000,
       maxFailures: 5,
+      minHealthyMs: MIN_HEALTHY_MS,
+      idleTimeoutMs: IDLE_TIMEOUT_MS,
+      minReconnectIntervalMs: MIN_RECONNECT_INTERVAL_MS,
       sleep: defaultSleep,
       random: Math.random,
+      now: Date.now,
+      schedule: timerSchedule,
       ...opts,
     };
     this.lastEventId = opts.initialLastEventId;
@@ -129,10 +215,12 @@ export class StatusStream {
       this.o.onState(first ? "connecting" : "reconnecting");
       first = false;
 
+      const attempt = new Attempt(this.controller.signal, this.o);
       let response: Response;
       try {
-        response = await this.o.open(this.lastEventId, this.controller.signal);
+        response = await this.o.open(this.lastEventId, attempt.signal);
       } catch (err) {
+        attempt.dispose();
         if (this.closed) return;
         const stop = stopNotice(err);
         if (stop) return this.finish("stopped", stop);
@@ -143,53 +231,68 @@ export class StatusStream {
       }
 
       if (!response.body || !(response.headers.get("content-type") ?? "").includes("text/event-stream")) {
-        // A 200 that is not an event stream (a proxy page, a buffering gateway): SSE is not usable.
+        // A 200 that is not an event stream (a proxy page, a buffering gateway): SSE is not
+        // usable. Cancel the body so the connection is released rather than left to drain.
+        attempt.dispose();
+        void response.body?.cancel().catch(() => undefined);
         return this.finish("unavailable", { message: "The server did not answer with an event stream." });
       }
 
       this.o.onState("open");
-      const outcome = await this.read(response.body);
+      const { ended, received } = await this.read(response.body, attempt);
+      attempt.dispose();
       if (this.closed) return;
-      if (outcome === "ended") return this.finish("ended");
-      // The stream closed without `end` (the server's lifetime cap, a dropped connection).
-      // Resume at once if it delivered something; a stream that closes empty counts as a failure.
-      failures = outcome === "delivered" ? 0 : failures + 1;
-      if (failures >= this.o.maxFailures) return this.finish("unavailable", { message: "The live connection keeps closing." });
-      await this.pause(Math.max(1, failures));
+      if (ended) return this.finish("ended");
+      // The stream closed without `end`: the server's lifetime cap, a dropped connection, or
+      // the watchdog. Resume; give up only after repeated connections that showed no sign of life.
+      const outcome: ConnectionOutcome = { received, idle: attempt.idle, durationMs: this.o.now() - attempt.startedAt };
+      if (connectionFailed(outcome, this.o.minHealthyMs)) {
+        failures += 1;
+        if (failures >= this.o.maxFailures) return this.finish("unavailable", { message: "The live connection keeps closing." });
+        await this.pause(failures);
+      } else {
+        failures = 0;
+        // A stream that delivers one event per connection must not reconnect in a tight loop.
+        const wait = reconnectDelay(attempt.startedAt, this.o.now(), this.o.minReconnectIntervalMs);
+        if (wait > 0) await this.o.sleep(wait, this.controller.signal);
+      }
     }
   }
 
-  /** read consumes the body until it ends or errors. */
-  private async read(body: ReadableStream<Uint8Array>): Promise<"ended" | "delivered" | "empty"> {
+  /** read consumes the body until it ends, errors, or the attempt is aborted (close or watchdog). */
+  private async read(body: ReadableStream<Uint8Array>, attempt: Attempt): Promise<{ ended: boolean; received: boolean }> {
     const reader = body.getReader();
     const decoder = new TextDecoder();
     const parser = new SseParser();
-    let delivered = false;
-    // close() must release a read that is waiting for data, whether or not the transport
+    let received = false;
+    // An abort must release a read that is waiting for data, whether or not the transport
     // reacts to the abort signal itself.
     const release = () => void reader.cancel().catch(() => undefined);
-    this.controller.signal.addEventListener("abort", release, { once: true });
+    attempt.signal.addEventListener("abort", release, { once: true });
     try {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
         const parsed = parser.push(decoder.decode(value, { stream: true }));
+        if (parsed.frames.length > 0 || parsed.comments > 0 || parsed.dropped > 0) {
+          received = true;
+          attempt.watchdog.kick();
+        }
         for (const frame of parsed.frames) {
           if (frame.id !== undefined) this.lastEventId = frame.id;
           const event = decodeFrame(frame);
           if (!event) continue;
-          delivered = true;
           this.o.onEvent(event);
-          if (event.type === "end") return "ended";
+          if (event.type === "end") return { ended: true, received };
         }
       }
     } catch {
-      // A read error is a dropped connection (or close()); the loop decides whether to retry.
+      // A read error is a dropped connection (or an abort); the loop decides whether to retry.
     } finally {
-      this.controller.signal.removeEventListener("abort", release);
+      attempt.signal.removeEventListener("abort", release);
       reader.cancel().catch(() => undefined);
     }
-    return delivered ? "delivered" : "empty";
+    return { ended: false, received };
   }
 
   private pause(failures: number): Promise<void> {
