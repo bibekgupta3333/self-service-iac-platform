@@ -136,15 +136,19 @@ class TestBuildOutcome:
             out = build_outcome(PATH, 1, None, text)
             payload = json.dumps(out.to_payload(GH))
             assert "hunter2" not in payload and "value =" not in payload
-        assert build_outcome(PATH, 1, None, BOXED_LOG).error.startswith("Error: reading SSM Parameter")
+        assert build_outcome(PATH, 1, None, BOXED_LOG).error == "Error: reading SSM Parameter (/db/password)"
         # A 5-line tail has no Error line: the fixed message, never source text or detail.
         assert build_outcome(PATH, 1, None, "\n".join(BOXED_LOG.splitlines()[-5:])).error == GENERIC_FAILURE
 
     @pytest.mark.parametrize("text,want", [
         ("", GENERIC_FAILURE), ("no error line here", GENERIC_FAILURE), ("\u2577\n\u2502\n\u2575", GENERIC_FAILURE),
         ("\u2502 Error: boom\n\u2502 more", "Error: boom"),
+        ("Error: putting SSM Parameter (/app/db): ValidationException: Value hunter2-secret contains invalid characters",
+         "Error: putting SSM Parameter (/app/db)"),
+        ("Error: creating S3 Bucket: AccessDenied", "Error: creating S3 Bucket"),
+        ("Error: Missing required argument", "Error: Missing required argument"),
         ("an Error: in the middle", GENERIC_FAILURE),
-        ("Error: bad password=hunter2 for token: abc", "Error: bad password= <redacted> for token: <redacted>"),
+        ("Error: bad password=hunter2 for token: abc", "Error: bad password= <redacted> for token"),
         ("Error: key AKIAABCDEFGHIJKLMNOP rejected", "Error: key <redacted> rejected"),
         ("Error: Authorization failed with Bearer abc.def", "Error: Authorization failed with <redacted>"),
         ("Error: x" + "y" * 400, None),
@@ -154,6 +158,27 @@ class TestBuildOutcome:
         assert "\n" not in got and len(got) <= 200
         if want is not None:
             assert got == want
+
+    @pytest.mark.parametrize("message", [
+        "module pins failed before the refresh-only plan could run",
+        "terraform init failed before the refresh-only plan could run",
+        "installed module verification failed before the refresh-only plan could run",
+        "the plan step failed before the refresh-only plan could run",
+        "terraform exited 2 but wrote no readable plan JSON",
+        "terraform exited with the unexpected code 137",
+        "plan resource_drift[3] has no address or actions",
+    ])
+    def test_the_platforms_own_messages_pass_through(self, message):
+        assert summarize_error(message) == message
+        assert build_outcome(PATH, 1, None, message).error == message
+
+    @pytest.mark.parametrize("message", [
+        "module pins failed before the refresh-only plan could run: value hunter2",
+        "terraform exited 2 but wrote no readable plan JSON\nsecret=x",
+        "something else entirely",
+    ])
+    def test_look_alikes_do_not_pass_the_allow_list(self, message):
+        assert summarize_error(message) == GENERIC_FAILURE
 
     def test_a_failed_check_without_a_message_still_says_something(self):
         assert build_outcome(PATH, 1).error == GENERIC_FAILURE
@@ -352,8 +377,15 @@ class TestScan:
         rc, out = self.run_scan(tmp_path, stacks["orders"], 1, extra=["--error-file", str(log)])
         printed = capsys.readouterr().out
         written = out.read_text()
-        assert rc == 0 and json.loads(written)["error"].startswith("Error: reading SSM Parameter")
+        assert rc == 0 and json.loads(written)["error"] == "Error: reading SSM Parameter (/db/password)"
         assert "hunter2" not in written and "hunter2" not in printed and "value =" not in printed
+
+    def test_the_error_file_is_read_by_bytes_not_whole(self, stacks, tmp_path):
+        log = tmp_path / "big.txt"
+        # The Error line sits beyond the bound: it is never read, so the fixed message results.
+        log.write_text("x" * 1_100_000 + "\nError: hidden")
+        rc, out = self.run_scan(tmp_path, stacks["orders"], 1, extra=["--error-file", str(log)])
+        assert rc == 0 and json.loads(out.read_text())["error"] == GENERIC_FAILURE
 
     def test_a_missing_plan_with_exit_two_is_an_error_result(self, stacks, tmp_path):
         rc, out = self.run_scan(tmp_path, stacks["orders"], 2)

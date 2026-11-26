@@ -80,7 +80,8 @@ func lastLines(text string, n int) string {
 }
 
 func TestSummarizeErrorKeepsOnlyTheErrorLine(t *testing.T) {
-	want := "Error: reading SSM Parameter (/db/password): operation error SSM: GetParameter, api error ValidationException: bad request"
+	// Cut after the resource identifier: the provider's own message is dropped.
+	want := "Error: reading SSM Parameter (/db/password)"
 	// The full log: the first non-empty line is a "Refreshing state" line, and the box
 	// characters are lines of their own; neither may be picked.
 	if got := SummarizeError(boxedLog); got != want {
@@ -104,10 +105,12 @@ func TestSummarizeError(t *testing.T) {
 		{"empty", "", GenericFailure},
 		{"no Error line", "just some text\nmore text", GenericFailure},
 		{"box characters only", "\u2577\n\u2502\n\u2575", GenericFailure},
-		{"error line first", "Error: creating S3 Bucket: AccessDenied\n  with module.b.aws_s3_bucket.this,\n  on main.tf line 4", "Error: creating S3 Bucket: AccessDenied"},
+		{"error line first", "Error: creating S3 Bucket: AccessDenied\n  with module.b.aws_s3_bucket.this,\n  on main.tf line 4", "Error: creating S3 Bucket"},
+		{"provider text echoing a value", "Error: putting SSM Parameter (/app/db): ValidationException: Value hunter2-secret contains invalid characters", "Error: putting SSM Parameter (/app/db)"},
+		{"no colon keeps the line", "Error: Missing required argument", "Error: Missing required argument"},
 		{"box prefix", "\u2502 Error: boom\n\u2502 detail", "Error: boom"},
 		{"error is not a prefix", "an Error: in the middle", GenericFailure},
-		{"secret assignments", "Error: bad password=hunter2 for token: abc123", "Error: bad password= <redacted> for token: <redacted>"},
+		{"secret assignments", "Error: bad password=hunter2 for token: abc123", "Error: bad password= <redacted> for token"},
 		{"access key id", "Error: key AKIAABCDEFGHIJKLMNOP rejected", "Error: key <redacted> rejected"},
 		{"bearer", "Error: Authorization failed with Bearer abc.def.ghi", "Error: Authorization failed with <redacted>"},
 		{"control characters", "Error: a\x1b[31mb", "Error: a [31mb"},
@@ -115,6 +118,26 @@ func TestSummarizeError(t *testing.T) {
 	for _, tt := range tests {
 		if got := SummarizeError(tt.in); got != tt.want {
 			t.Errorf("%s: SummarizeError = %q, want %q", tt.name, got, tt.want)
+		}
+	}
+	// The platform's own messages pass through the generic fallback unchanged; look-alikes do not.
+	for _, m := range []string{
+		"module pins failed before the refresh-only plan could run",
+		"terraform init failed before the refresh-only plan could run",
+		"installed module verification failed before the refresh-only plan could run",
+		"the plan step failed before the refresh-only plan could run",
+		"terraform exited 2 but wrote no readable plan JSON",
+		"terraform exited with the unexpected code 137",
+		"plan resource_drift[3] has no address or actions",
+		GenericFailure,
+	} {
+		if got := SummarizeError(m); got != m {
+			t.Errorf("platform message %q became %q", m, got)
+		}
+	}
+	for _, m := range []string{"module pins failed before the refresh-only plan could run: value hunter2", "terraform exited 2 but wrote no readable plan JSON\nsecret=x", "something else"} {
+		if got := SummarizeError(m); got == m {
+			t.Errorf("%q must not pass the allow-list", m)
 		}
 	}
 	if got := SummarizeError("Error: " + strings.Repeat("x", 500)); len([]rune(got)) != MaxSummaryLen || !strings.HasSuffix(got, "...") {

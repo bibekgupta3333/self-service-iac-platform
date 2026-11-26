@@ -255,7 +255,7 @@ func (s *pgStore) NewerRunExists(ctx context.Context, stackID uuid.UUID, runID i
 }
 
 func (s *pgStore) NewestReport(ctx context.Context, stackID uuid.UUID) (Entry, bool, error) {
-	e, err := scanEntry(s.tx.QueryRow(ctx, entrySelect+` WHERE d.stack_id = $1
+	e, err := scanEntry(s.tx.QueryRow(ctx, entrySelect+` WHERE d.stack_id = $1 AND d.result <> 'error'
 		ORDER BY d.detected_at DESC, d.id DESC LIMIT 1`, stackID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Entry{}, false, nil

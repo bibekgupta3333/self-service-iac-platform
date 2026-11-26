@@ -137,10 +137,12 @@ func (m *memRepo) NewerRunExists(_ context.Context, _ uuid.UUID, runID int64) (b
 }
 
 func (m *memRepo) NewestReport(_ context.Context, _ uuid.UUID) (Entry, bool, error) {
-	if len(m.reports) == 0 {
-		return Entry{}, false, nil
+	for i := len(m.reports) - 1; i >= 0; i-- {
+		if m.reports[i].Result != ResultError {
+			return *m.reports[i], true, nil
+		}
 	}
-	return *m.reports[len(m.reports)-1], true, nil
+	return Entry{}, false, nil
 }
 
 func (m *memRepo) SetStackCheck(_ context.Context, _ uuid.UUID, h requests.StackHealth, at *time.Time) error {

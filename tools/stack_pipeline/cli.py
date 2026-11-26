@@ -227,6 +227,14 @@ def _read_json(path: Path | None) -> Any | None:
         return None
 
 
+def _read_bounded(path: Path, limit: int) -> str | None:
+    """At most ``limit`` bytes of a text file (never the whole file), or None when it is absent."""
+    if not path.is_file():
+        return None
+    with path.open("rb") as fh:
+        return fh.read(limit).decode("utf-8", errors="replace")
+
+
 def _read_text(path: Path | None) -> str | None:
     return path.read_text(encoding="utf-8", errors="replace") if path is not None and path.is_file() else None
 
@@ -447,8 +455,8 @@ def _drift_scan(args: argparse.Namespace) -> int:
     plan = _read_json(args.plan)
     # The whole log is read (bounded) rather than a pre-cut window: the summary is the first
     # `Error:` line wherever it is, and nothing else of the log is kept.
-    log = _read_text(args.error_file) if args.error_file is not None else None
-    message = (log or "")[:MAX_LOG_BYTES] if log is not None else args.error_message
+    log = _read_bounded(args.error_file, MAX_LOG_BYTES) if args.error_file is not None else None
+    message = log if log is not None else args.error_message
     outcome = build_outcome(meta.ref.path, args.exit_code, plan if isinstance(plan, dict) else None, message)
     errs = outcome.problems()
     if errs:
