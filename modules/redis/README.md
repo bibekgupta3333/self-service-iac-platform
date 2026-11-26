@@ -48,7 +48,7 @@ network.
 | Network | A subnet group over the given private subnets and a security group whose only rules admit the cache port from `allowed_security_group_ids`. No CIDR ingress and no egress. |
 | Availability | 2 nodes by default in production (fewer is rejected), with automatic failover and Multi-AZ whenever there are 2 or more nodes. |
 | Recovery | Daily snapshots kept 7 days (production must keep at least 1). Outside development a final snapshot `<name>-final-<suffix>` is taken; the suffix comes from a `random_id` kept in state (stable for the life of the cache, new for a re-created one), so a second destroy never collides with an earlier snapshot. |
-| Observability | Slow and engine logs delivered as JSON to log groups with the module key and a retention (default 30 days). |
+| Observability | Slow and engine logs delivered as JSON to log groups with the module key and a retention (default 30 days). The module key grants CloudWatch Logs (`logs.<region>`, scoped to these log groups) and the log delivery service (`delivery.logs.amazonaws.com`, scoped to this account with `aws:SourceAccount` and `aws:SourceArn`). |
 | Maintenance | Module parameter group (`redis7`, configurable `maxmemory-policy`), automatic minor version upgrades in the maintenance window, no immediate applies. |
 | Tagging | `iacp:team`, `iacp:environment`, `iacp:stack`, `iacp:module`, `iacp:managed-by` are merged last, on every taggable resource. |
 

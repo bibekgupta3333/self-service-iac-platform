@@ -21,9 +21,9 @@ resource "aws_kms_alias" "this" {
 data "aws_iam_policy_document" "kms" {
   count = local.create_kms_key ? 1 : 0
 
-  #checkov:skip=CKV_AWS_109:A key policy's resource "*" means this key only; principals are the owning account and the scoped Logs service.
-  #checkov:skip=CKV_AWS_111:A key policy's resource "*" means this key only; principals are the owning account and the scoped Logs service.
-  #checkov:skip=CKV_AWS_356:A key policy's resource "*" means this key only; principals are the owning account and the scoped Logs service.
+  #checkov:skip=CKV_AWS_109:A key policy's resource "*" means this key only; principals are the owning account and the account-scoped Logs and log delivery services.
+  #checkov:skip=CKV_AWS_111:A key policy's resource "*" means this key only; principals are the owning account and the account-scoped Logs and log delivery services.
+  #checkov:skip=CKV_AWS_356:A key policy's resource "*" means this key only; principals are the owning account and the account-scoped Logs and log delivery services.
   statement {
     sid       = "AccountAdministration"
     effect    = "Allow"
@@ -51,6 +51,36 @@ data "aws_iam_policy_document" "kms" {
       test     = "ArnLike"
       variable = "kms:EncryptionContext:aws:logs:arn"
       values   = ["arn:${data.aws_partition.current.partition}:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:log-group:${local.log_group_base}/*"]
+    }
+  }
+
+  # ElastiCache slow and engine logs are vended logs: the log delivery service
+  # (delivery.logs.amazonaws.com) writes them into the log groups, which
+  # CloudWatch Logs encrypts with this key (statement above). The delivery
+  # service is granted the key too, for this account's deliveries only
+  # (aws:SourceAccount, aws:SourceArn), following the vended-logs key policy
+  # pattern in the CloudWatch Logs documentation.
+  statement {
+    sid       = "LogDeliveryForThisAccount"
+    effect    = "Allow"
+    actions   = ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:DescribeKey"]
+    resources = ["*"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["delivery.logs.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+
+    condition {
+      test     = "ArnLike"
+      variable = "aws:SourceArn"
+      values   = ["arn:${data.aws_partition.current.partition}:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:*"]
     }
   }
 }

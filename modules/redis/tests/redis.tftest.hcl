@@ -225,6 +225,30 @@ run "key_policy_scopes_logs" {
   }
 
   assert {
+    condition = anytrue([
+      for s in jsondecode(data.aws_iam_policy_document.kms[0].json).Statement :
+      s.Sid == "LogDeliveryForThisAccount"
+      && s.Principal.Service == "delivery.logs.amazonaws.com"
+      && s.Condition.StringEquals["aws:SourceAccount"] == "123456789012"
+      && s.Condition.ArnLike["aws:SourceArn"] == "arn:aws:logs:us-east-1:123456789012:*"
+    ])
+    error_message = "Log delivery may use the key only for this account's deliveries."
+  }
+
+  assert {
+    condition = alltrue([
+      for s in jsondecode(data.aws_iam_policy_document.kms[0].json).Statement :
+      s.Sid == "AccountAdministration" || !contains(flatten([s.Action]), "kms:*")
+    ])
+    error_message = "Only account administration may use kms:*; service grants list their actions."
+  }
+
+  assert {
+    condition     = length(jsondecode(data.aws_iam_policy_document.kms[0].json).Statement) == 3
+    error_message = "The key policy must hold exactly administration, the scoped Logs grant and the scoped delivery grant."
+  }
+
+  assert {
     condition     = aws_elasticache_replication_group.this.tags_all["iacp:stack"] == "tftest" && aws_elasticache_replication_group.this.tags_all["iacp:module"] == "redis"
     error_message = "Planned tags_all must carry the platform tags."
   }

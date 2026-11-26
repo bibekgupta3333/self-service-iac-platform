@@ -23,6 +23,8 @@ as git tags `modules/redis/vX.Y.Z`.
   `<name>-final-<suffix>` outside development; the `random_id` suffix kept in
   state stops re-created caches colliding with an earlier snapshot.
 - Slow and engine logs delivered to KMS-encrypted log groups with retention.
+  The module key grants `logs.<region>` (these log groups only) and
+  `delivery.logs.amazonaws.com` (this account only).
 - Outputs `primary_endpoint`, `reader_endpoint`, `port`, `secret_arn`,
   `connection`, `security_group_id`.
 - Mandatory `iacp:*` tags on every taggable resource.
