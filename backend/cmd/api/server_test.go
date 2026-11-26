@@ -31,6 +31,11 @@ func TestMachineAuthenticatorFailsClosed(t *testing.T) {
 			o.Issuer = "http://issuer.example"
 			return o
 		}()}, wantErr: true},
+		{name: "plain http JWKS URL refuses to start", cfg: config.Config{OIDC: func() config.OIDCConfig {
+			o := oidc
+			o.JWKSURL = "http://keys.example/jwks"
+			return o
+		}()}, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
