@@ -13,6 +13,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/audit"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/db"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/outbox"
 )
 
 // PostgresRepository implements Repository with pgx.
@@ -52,6 +53,10 @@ func NewTxStore(tx pgx.Tx, auditWriter *audit.Writer) Store {
 type pgStore struct {
 	tx    pgx.Tx
 	audit *audit.Writer
+}
+
+func (s *pgStore) Enqueue(ctx context.Context, m outbox.Message) (bool, error) {
+	return outbox.Enqueue(ctx, s.tx, m)
 }
 
 const lockCols = `stack_id, request_id, holder, fencing_token, acquired_at, expires_at`

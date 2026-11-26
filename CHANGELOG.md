@@ -7,6 +7,17 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 ## [Unreleased]
 
 ### Added
+- PR publishing and GitHub webhooks (WBS 4.8, 4.9):
+  - `publish.Publisher` port with pure branch naming (`iacp/<short id>`), path checks and a deterministic PR title, body (plan placeholder, request link), labels and commit message.
+  - `githubapp` adapter: App JWT → cached, repository-scoped installation token; atomic commits with the git data API; idempotent PR, labels, `workflow_dispatch`; timeouts, same-host redirects only, retries on 5xx/429 honouring `Retry-After`.
+  - `localgit` adapter (ADR-0009): commits to a local clone with git plumbing via `os/exec` argument arrays and records fake PRs, so the flow runs without a registered App.
+  - `IACP_PUBLISHER=none|local|github` (default `none`), App settings, `IACP_GITHUB_WEBHOOK_SECRET`, `IACP_PORTAL_URL`, `IACP_LOCALSTACK_ENDPOINT`, `IACP_WORKER_POLL_INTERVAL`; half configuration fails at startup.
+  - Migration 0008: `webhook_deliveries` and `outbox` with least-privilege `iacp_app` grants.
+  - `internal/outbox`: Postgres job queue and in-process worker (SKIP LOCKED, lease, backoff, dead jobs).
+  - Request creation enqueues `request.publish`; `internal/prflow` renders, commits, opens and labels the PR, then records `pr_opened` in a second transaction (fencing-token checked). Failures are audited per attempt and the last one fails the request.
+  - State machine: `pr_merged` (approved → applying) and `publish_failed` (draft → failed). Terminal transitions release the stack lock in the same transaction and publish the promoted request.
+  - `POST /v1/webhooks/github`: HMAC-SHA256 verification (fails closed), 2 MiB cap, `X-GitHub-Delivery` dedupe, pure event mapping, idempotent worker-side transitions with audit; request responses carry `github {branch, pr_number, pr_url}`.
+  - Review fixes: publishing and recording check the current lock row, not the request's stored token; every promotion (release, `DELETE …/lock`, expired-lease handoff) schedules the promoted request's publish job through one lock-service hook; outbox outcome writes are guarded by the claim's attempt number and handlers run with a deadline inside the lease; commits replace the stack directory as a whole; a final failure withdraws the unrecorded branch and PR; webhook commands carry the PR head SHA (`requests.github_head_sha`): only pushes are head-checked, and a stale push resyncs the head from GitHub (`PullRequestHead`) instead of being dropped, so closes and merges after a lost push still release the lock; events racing the PR record are retried for about 13.5 minutes; root replacement keeps `.terraform.lock.hcl` and lists only the stack subtree on GitHub; withdrawal re-reads the request and skips a recorded PR; the repository filter ignores case; the GitHub token is narrowed to contents/pull_requests/actions write, dispatch is never retried and only an existing ref is force-moved; `localgit` requires a work tree root.
 - ADR-0009: local-first development with LocalStack and the Terraform local backend until MVP exit.
 - Monorepo layout: `modules/`, `policies/`, `environments/`, `tests/`, `backend/`, `portal/`, `tools/`, `.github/`.
 - `docker-compose.yml` with LocalStack 4.4 and PostgreSQL 17, both with health checks, plus `.env.example`.
@@ -162,6 +173,11 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
   - The non-compliant conftest fixture trips every new rule; `verify.sh` now asserts 30 deny and 4 warn rule IDs, and `verify-example-gate.sh` proves the example gate rejects `?ref=main` and third-party sources.
 - `policies/example-plan.sh` and `make example-plans`: plan a module's `examples/complete` and run conftest with its `policy-context.json`, allowing only the deny for relative `../` module sources.
 - CI: a `module-tests-offline` job runs suites that mock the AWS provider without LocalStack, and the `module-tests` job, which skips those suites, now plans and checks every module example with conftest. LocalStack suites run as before.
+- Pipeline extras (WBS 5.4, 5.5, 5.7, 6.1):
+  - Code scanning: TFLint and Checkov also write SARIF in `ci.yml` (modules) and `pr-validate.yml` (per stack); the gating runs are unchanged. `tools.stack_pipeline sarif` rewrites stack SARIF to repository paths, and a separate `code-scanning` job uploads it with `github/codeql-action/upload-sarif` under one category per tool and stack (`ci/tflint`, `ci/checkov`, `pr-validate/<tool>/<stack-id>`).
+  - Informational Infracost estimate per stack in `pr-validate.yml` (pinned `0.10.49`, sha256 verified), in its own `cost` job on a redacted plan (`cost-input`), folded into `summary.json` and the sticky comment by a `cost-summary` job (`fold-cost`). It never changes the result. Skipped with a notice while `INFRACOST_API_KEY` is not configured.
+  - Post-apply smoke test in `apply.yml`: `tools.stack_pipeline smoke` checks the declared outputs and the required `iacp:*` tags in state and on the live LocalStack resources (read-only AWS CLI calls), writes the job summary and is reported as stage `smoke`. It refuses any endpoint that is not loopback or `*.localstack.cloud`.
+  - `apply.yml` documents its provider cache parity with `pr-validate.yml`.
 
 ### Security
 - The backend fails closed: it binds to loopback by default, refuses to start without `IACP_AUTH_MODE`, keeps internal endpoints behind a constant-time token check, and enforces team membership on request creation.
@@ -178,16 +194,20 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 - Pull-request tokens can now also read the budget context, which is read-only, for any team's stack path (an accepted exposure, documented in docs/07). They still cannot take locks or index the catalog.
 - `tools/stack_pipeline` mints a new GitHub OIDC token for every API request, retries included, because the API now rejects a reused `jti`; the shared internal token is still reused.
 - `tools/codeowners` only counts git-tracked stack roots and rejects `platform_paths` under `/environments/<env>/`, which team rules would shadow.
+- `security-events: write` is granted only to the `code-scanning` upload jobs, which run no PR code; fork and Dependabot PRs skip the upload. Stack SARIF paths always stay inside the repository, and a run's own `automationDetails` is dropped so a PR cannot pick its category. `INFRACOST_API_KEY` is passed only to the `cost` job, which runs no PR code.
 
 ### Changed
 - `AGENTS.md`: local-first rules, the 70/30 object-oriented and functional coding style, and the small-commit, reviewed-PR workflow.
+
+### Removed
+- The compiled `backend/api` binary (8.7 MB) is no longer tracked; Go build outputs under `backend/` and `tests/` are ignored.
 
 ### Planned
 - M0 Foundations (remaining): smoke stack against LocalStack. The real-AWS state bucket and OIDC roles are deferred by ADR-0009.
 - M1 Module registry (remaining): upgrade-plan test and CHANGELOG/upgrade-notes check in `module-release.yml`, a live catalog index once a hosted API exists, Lambda Terratest.
 - M2 Orchestration engine (remaining): GitHub App PRs, webhooks, OAuth/RBAC, `pr-validate.yml`, `apply.yml`.
-- M3 Security gates (remaining): SARIF upload, wiring the budget context into the workflows, approval and budget policies, applying the ruleset and Environment protection.
-- M4 Portal and destroy: Next.js dashboard, destroy flow, Infracost comments.
+- M3 Security gates (remaining): wiring the budget context into the workflows, approval and budget policies, applying the ruleset and Environment protection.
+- M4 Portal and destroy: Next.js dashboard, destroy flow, Infracost budget gating (WBS 8.5).
 
 ## [0.1.0] - 2026-11-24
 

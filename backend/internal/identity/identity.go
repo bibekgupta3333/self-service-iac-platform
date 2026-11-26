@@ -18,6 +18,7 @@ const (
 	ActorUser          ActorType = "user"
 	ActorSystem        ActorType = "system"
 	ActorGitHubActions ActorType = "github_actions"
+	ActorGitHubWebhook ActorType = "github_webhook"
 )
 
 // Principal is an authenticated caller.
