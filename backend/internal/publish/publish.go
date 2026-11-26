@@ -124,5 +124,14 @@ type Publisher interface {
 	PullRequestHead(ctx context.Context, number int) (string, error)
 }
 
+// Commenter is an optional capability of a Publisher: writing a comment on a pull request
+// (the issues API). Adapters without pull requests of their own (localgit) do not offer it,
+// and callers fall back to the audit trail alone.
+type Commenter interface {
+	// CommentOnPullRequest adds a comment to the PR. It is not idempotent, so adapters send
+	// it once, without retries.
+	CommentOnPullRequest(ctx context.Context, number int, body string) error
+}
+
 // ErrInvalidPath is returned for a file path that could escape the repository.
 var ErrInvalidPath = errors.New("invalid repository path")
