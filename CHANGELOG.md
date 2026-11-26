@@ -150,7 +150,7 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
   - `postgres`: private RDS PostgreSQL with CMK storage, `rds.force_ssl=1`, an RDS-managed master password in Secrets Manager, backups, deletion protection and a final snapshot outside development, Multi-AZ in production and encrypted Performance Insights
   - `redis`: private ElastiCache replication group with CMK at-rest encryption, required TLS, an AUTH token in Secrets Manager or an RBAC user group, and automatic failover in production
   - Offline `terraform test` suites, because LocalStack community 4.4 has no ECS, ECR, ELBv2, RDS or ElastiCache: `plan` runs use the real provider with every endpoint on a closed local port, and `apply` runs use `mock_provider "aws"`
-- OPA rules for the new resource types, each with positive and negative tests (213 tests, 99.9 % coverage):
+- OPA rules for the new resource types, each with positive and negative tests (218 tests, 99.9 % coverage); `ecr_kms` requires a customer-managed `kms_key` (KMS without one is the AWS-managed `aws/ecr` key):
   - `iacp.encryption.rds_storage`, `iacp.encryption.rds_cmk`, `iacp.encryption.elasticache_at_rest`, `iacp.encryption.elasticache_cmk`, `iacp.encryption.elasticache_transit`, `iacp.encryption.ecr_kms`
   - `iacp.network.rds_public`, `iacp.network.ecs_public_ip`
   - `iacp.ecr.scan_on_push`, `iacp.ecr.immutable_tags`

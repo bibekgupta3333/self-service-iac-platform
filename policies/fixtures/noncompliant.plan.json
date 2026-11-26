@@ -137,6 +137,45 @@
           }
         },
         {
+          "address": "aws_ecr_repository.aws_managed_key",
+          "mode": "managed",
+          "type": "aws_ecr_repository",
+          "name": "aws_managed_key",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "schema_version": 0,
+          "values": {
+            "encryption_configuration": [
+              {
+                "encryption_type": "KMS"
+              }
+            ],
+            "force_delete": null,
+            "image_scanning_configuration": [
+              {
+                "scan_on_push": true
+              }
+            ],
+            "image_tag_mutability": "IMMUTABLE",
+            "name": "orders-aws-managed-key",
+            "region": "eu-central-1",
+            "tags": null,
+            "tags_all": {
+              "iacp:environment": "staging",
+              "iacp:team": "search"
+            },
+            "timeouts": null
+          },
+          "sensitive_values": {
+            "encryption_configuration": [
+              {}
+            ],
+            "image_scanning_configuration": [
+              {}
+            ],
+            "tags_all": {}
+          }
+        },
+        {
           "address": "aws_ecr_repository.loose",
           "mode": "managed",
           "type": "aws_ecr_repository",
@@ -958,6 +997,66 @@
           "s3_import": [],
           "tags_all": {},
           "vpc_security_group_ids": []
+        }
+      }
+    },
+    {
+      "address": "aws_ecr_repository.aws_managed_key",
+      "mode": "managed",
+      "type": "aws_ecr_repository",
+      "name": "aws_managed_key",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "encryption_configuration": [
+            {
+              "encryption_type": "KMS"
+            }
+          ],
+          "force_delete": null,
+          "image_scanning_configuration": [
+            {
+              "scan_on_push": true
+            }
+          ],
+          "image_tag_mutability": "IMMUTABLE",
+          "name": "orders-aws-managed-key",
+          "region": "eu-central-1",
+          "tags": null,
+          "tags_all": {
+            "iacp:environment": "staging",
+            "iacp:team": "search"
+          },
+          "timeouts": null
+        },
+        "after_unknown": {
+          "arn": true,
+          "encryption_configuration": [
+            {
+              "kms_key": true
+            }
+          ],
+          "id": true,
+          "image_scanning_configuration": [
+            {}
+          ],
+          "registry_id": true,
+          "repository_url": true,
+          "tags_all": {}
+        },
+        "before_sensitive": false,
+        "after_sensitive": {
+          "encryption_configuration": [
+            {}
+          ],
+          "image_scanning_configuration": [
+            {}
+          ],
+          "tags_all": {}
         }
       }
     },
@@ -2074,6 +2173,36 @@
           "schema_version": 2
         },
         {
+          "address": "aws_ecr_repository.aws_managed_key",
+          "mode": "managed",
+          "type": "aws_ecr_repository",
+          "name": "aws_managed_key",
+          "provider_config_key": "aws",
+          "expressions": {
+            "encryption_configuration": [
+              {
+                "encryption_type": {
+                  "constant_value": "KMS"
+                }
+              }
+            ],
+            "image_scanning_configuration": [
+              {
+                "scan_on_push": {
+                  "constant_value": true
+                }
+              }
+            ],
+            "image_tag_mutability": {
+              "constant_value": "IMMUTABLE"
+            },
+            "name": {
+              "constant_value": "orders-aws-managed-key"
+            }
+          },
+          "schema_version": 0
+        },
+        {
           "address": "aws_ecr_repository.loose",
           "mode": "managed",
           "type": "aws_ecr_repository",
@@ -2627,6 +2756,12 @@
     {
       "resource": "aws_s3_bucket.logs",
       "attribute": [
+        "arn"
+      ]
+    },
+    {
+      "resource": "aws_s3_bucket.logs",
+      "attribute": [
         "id"
       ]
     },
@@ -2640,12 +2775,6 @@
       "resource": "module.store.aws_s3_bucket.this",
       "attribute": [
         "bucket"
-      ]
-    },
-    {
-      "resource": "aws_s3_bucket.logs",
-      "attribute": [
-        "arn"
       ]
     },
     {

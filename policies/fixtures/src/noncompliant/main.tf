@@ -231,6 +231,20 @@ resource "aws_ecr_repository" "loose" {
   }
 }
 
+# iacp.encryption.ecr_kms: KMS without kms_key is the AWS-managed aws/ecr key.
+resource "aws_ecr_repository" "aws_managed_key" {
+  name                 = "orders-aws-managed-key"
+  image_tag_mutability = "IMMUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  encryption_configuration {
+    encryption_type = "KMS"
+  }
+}
+
 # iacp.network.ecs_public_ip.
 resource "aws_ecs_service" "public" {
   name            = "orders-public"

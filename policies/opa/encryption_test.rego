@@ -303,11 +303,44 @@ test_ecr_kms_allowed_in_production if {
 test_ecr_aes256_denied_in_production if {
 	r := repo([{"encryption_type": "AES256", "kms_key": ""}])
 	some m in enc.deny with input as t.plan([r]) with data.iacp.context as t.prod_ctx
-	startswith(m, `[iacp.encryption.ecr_kms] aws_ecr_repository.repo: repository in environment "production" is not encrypted with KMS. Fix:`)
+	startswith(m, `[iacp.encryption.ecr_kms] aws_ecr_repository.repo: repository in environment "production" is not encrypted with a customer-managed KMS key. Fix:`)
 }
 
 test_ecr_without_encryption_block_denied_in_production if {
 	t.rule_ids(enc.deny) == {"[iacp.encryption.ecr_kms]"} with input as t.plan([repo([])]) with data.iacp.context as t.prod_ctx
+}
+
+# KMS without kms_key is the AWS-managed aws/ecr key.
+test_ecr_kms_with_empty_key_denied_in_production if {
+	r := repo([{"encryption_type": "KMS", "kms_key": ""}])
+	t.rule_ids(enc.deny) == {"[iacp.encryption.ecr_kms]"} with input as t.plan([r]) with data.iacp.context as t.prod_ctx
+}
+
+test_ecr_kms_with_aws_managed_alias_denied_in_staging if {
+	r := repo([{"encryption_type": "KMS", "kms_key": "arn:aws:kms:us-east-1:111111111111:alias/aws/ecr"}])
+	ctx := object.union(t.prod_ctx, {"environment": "staging"})
+	t.rule_ids(enc.deny) == {"[iacp.encryption.ecr_kms]"} with input as t.plan([r]) with data.iacp.context as ctx
+}
+
+# The provider reports an omitted kms_key as computed; without a configured
+# expression that is the AWS-managed key.
+test_ecr_kms_with_unknown_unconfigured_key_denied_in_production if {
+	r := t.with_unknown(repo([{"encryption_type": "KMS"}]), {"encryption_configuration": [{"kms_key": true}]})
+	t.rule_ids(enc.deny) == {"[iacp.encryption.ecr_kms]"} with input as t.plan([r]) with data.iacp.context as t.prod_ctx
+}
+
+test_ecr_kms_key_created_in_same_plan_allowed_in_production if {
+	r := t.with_unknown(repo([{"encryption_type": "KMS"}]), {"encryption_configuration": [{"kms_key": true}]})
+	config := t.cfg("aws_ecr_repository", "repo", {"encryption_configuration": [{
+		"encryption_type": {"constant_value": "KMS"},
+		"kms_key": {"references": ["local.kms_key_arn", "local"]},
+	}]})
+	count(enc.deny) == 0 with input as t.plan_with_config([r], [config]) with data.iacp.context as t.prod_ctx
+}
+
+test_ecr_kms_with_empty_key_allowed_in_development if {
+	r := repo([{"encryption_type": "KMS", "kms_key": ""}])
+	count(enc.deny) == 0 with input as t.plan([r]) with data.iacp.context as t.dev_ctx
 }
 
 test_ecr_aes256_allowed_in_development if {

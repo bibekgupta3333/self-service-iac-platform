@@ -5,8 +5,8 @@
 #   development both need a customer-managed key (not alias/aws/*). RDS
 #   storage and ElastiCache data must be encrypted at rest (with a
 #   customer-managed key outside development), ElastiCache must require TLS
-#   in transit, and ECR repositories outside development must use KMS. KMS
-#   keys must rotate.
+#   in transit, and ECR repositories outside development must use KMS with a
+#   customer-managed key. KMS keys must rotate.
 package iacp.encryption
 
 import data.lib.iacp as f
@@ -216,19 +216,31 @@ deny contains m if {
 
 # --- ECR -----------------------------------------------------------------------
 
-ecr_kms(repo) if {
+# ecr_cmk(repo): KMS encryption with a customer-managed kms_key. KMS without a
+# kms_key means the AWS-managed aws/ecr key, which the provider reports as
+# computed, so an unknown kms_key only counts when the configuration sets it.
+ecr_cmk(repo) if {
 	some c in f.after(repo).encryption_configuration
 	c.encryption_type == "KMS"
+	customer_managed_key(object.get(c, "kms_key", null))
+}
+
+ecr_cmk(repo) if {
+	some i, c in f.after(repo).encryption_configuration
+	c.encryption_type == "KMS"
+	unknown_at(repo, ["encryption_configuration", i, "kms_key"])
+	some block in f.config_expr(repo, "encryption_configuration")
+	object.get(block, "kms_key", {}) != {}
 }
 
 deny contains m if {
 	some repo in f.changed_of_type("aws_ecr_repository")
 	f.environment_of(repo) != "development"
-	not ecr_kms(repo)
+	not ecr_cmk(repo)
 	not f.exempt("iacp.encryption.ecr_kms", repo.address)
 	m := f.msg(
 		"iacp.encryption.ecr_kms", repo.address,
-		sprintf("repository in environment %q is not encrypted with KMS", [f.environment_of(repo)]),
+		sprintf("repository in environment %q is not encrypted with a customer-managed KMS key", [f.environment_of(repo)]),
 		`add encryption_configuration { encryption_type = "KMS", kms_key = <customer-managed key> } (the ecs-service module does this)`,
 	)
 }
