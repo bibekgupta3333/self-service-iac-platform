@@ -43,7 +43,14 @@ def local_endpoint(url: str) -> str:
     While ADR-0009 is in force the probes must never reach real AWS: no endpoint
     (the AWS default) and any other host are refused, not silently allowed.
     """
-    parts = urlsplit(url.strip())
+    url = url.strip()
+    if "\\" in url:
+        # urlsplit keeps a backslash in the netloc, while many HTTP clients read it as
+        # a path separator: ``http://evil.com\\@localhost`` would pass as localhost.
+        raise SmokeConfigError(f"the smoke endpoint {url!r} must not contain a backslash")
+    parts = urlsplit(url)
+    if parts.username is not None or parts.password is not None or "@" in parts.netloc:
+        raise SmokeConfigError(f"the smoke endpoint {url!r} must not carry credentials (userinfo)")
     host = (parts.hostname or "").lower()
     if parts.scheme not in ("http", "https") or not host:
         raise SmokeConfigError(
@@ -53,7 +60,7 @@ def local_endpoint(url: str) -> str:
         raise SmokeConfigError(
             f"endpoint host {host!r} is not loopback or *{LOCALSTACK_DOMAIN}; the smoke test never calls real AWS (ADR-0009)"
         )
-    return url.strip()
+    return url
 
 
 class TagReader(Protocol):
