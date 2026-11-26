@@ -35,6 +35,8 @@ type Store interface {
 	MarkWarned(ctx context.Context, id uuid.UUID, at time.Time) error
 	// HasOpenDestroy reports a destroy request that is not terminal yet.
 	HasOpenDestroy(ctx context.Context, id uuid.UUID) (bool, error)
+	// Attempts lists the stack's unsuccessful TTL destroys, oldest first (see AttemptsSQL).
+	Attempts(ctx context.Context, id uuid.UUID) ([]Attempt, error)
 	// BlockedSince reports whether ttl.blocked was already recorded for the stack at or after since.
 	BlockedSince(ctx context.Context, id uuid.UUID, since time.Time) (bool, error)
 	AppendAudit(ctx context.Context, e audit.Event) error
@@ -228,7 +230,7 @@ const (
 // reported and never retried. It also records ttl.blocked, once per expiry, for every
 // blocked stack, so the audit trail names the stacks that need a person. Warn and Teardown
 // re-check everything under lock.
-func (s *Service) Due(ctx context.Context) ([]DueItem, error) {
+func (s *Service) Due(ctx context.Context, correlationID string) ([]DueItem, error) {
 	now := s.clock.Now()
 	var actionable, blocked []Due
 	var after *Cursor
@@ -265,8 +267,10 @@ func (s *Service) Due(ctx context.Context) ([]DueItem, error) {
 		out = append(out, DueItem{Stack: d.Stack, Phase: d.Phase})
 	}
 	for _, d := range blocked {
-		if err := s.recordBlocked(ctx, d.Stack); err != nil {
-			return nil, err
+		// A failing audit append for one stack must not stop the warnings and teardowns of the
+		// others: it is logged and retried by the next run.
+		if err := s.recordBlocked(ctx, d.Stack.ID, correlationID); err != nil {
+			observability.Logger(ctx).ErrorContext(ctx, "record ttl.blocked failed", "stack_id", d.Stack.ID, "error", err)
 		}
 	}
 	return out, nil
@@ -285,15 +289,32 @@ func teardownsFirst(d []Due) []Due {
 	return append(down, other...)
 }
 
-// recordBlocked appends ttl.blocked for a blocked stack unless this expiry already has one.
-func (s *Service) recordBlocked(ctx context.Context, st Stack) error {
+// recordBlocked appends ttl.blocked for a stack unless this expiry already has one. It locks
+// the stack row and decides on the reloaded stack, so two concurrent callers cannot both
+// append, and a stack that was extended or whose destroy changed since the candidate read is
+// not recorded for an expiry that no longer applies.
+func (s *Service) recordBlocked(ctx context.Context, id uuid.UUID, correlationID string) error {
 	return s.repo.InTx(ctx, func(tx Store) error {
-		done, err := tx.BlockedSince(ctx, st.ID, *st.ExpiresAt)
+		cur, err := tx.LockStack(ctx, id)
+		if err != nil {
+			return err
+		}
+		now := s.clock.Now()
+		if PhaseAt(cur, now) != PhaseTeardown {
+			return nil
+		}
+		if cur.Attempts, err = tx.Attempts(ctx, id); err != nil {
+			return err
+		}
+		if state, _ := s.policy.Backoff(cur, now); state != BackoffBlocked {
+			return nil
+		}
+		done, err := tx.BlockedSince(ctx, id, *cur.ExpiresAt)
 		if err != nil || done {
 			return err
 		}
-		e, err := event(s.clock.Now(), audit.ActorSystem, Actor, "ttl.blocked", st, "ttl-due", map[string]any{
-			"stack_path": st.Path, "expires_at": st.ExpiresAt.UTC(), "attempts": len(st.Attempts)})
+		e, err := event(now, audit.ActorSystem, Actor, "ttl.blocked", cur, correlationID, map[string]any{
+			"stack_path": cur.Path, "expires_at": cur.ExpiresAt.UTC(), "attempts": len(cur.Attempts)})
 		if err != nil {
 			return err
 		}

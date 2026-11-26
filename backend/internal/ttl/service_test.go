@@ -28,6 +28,10 @@ type memRepo struct {
 	jobs        []outbox.Message
 	botID       uuid.UUID
 	prs         map[uuid.UUID]int
+	auditErr    error
+	// candidateView, when set for a stack, is what Candidates reports instead of the stored
+	// stack: a stale read taken before a concurrent change.
+	candidateView map[uuid.UUID]Stack
 }
 
 func newMemRepo(stacks ...Stack) *memRepo {
@@ -66,6 +70,9 @@ func (r *memRepo) Candidates(_ context.Context, horizon time.Time, after *Cursor
 	var all []Stack
 	for _, s := range r.stacks {
 		if s.IsEphemeral && s.Environment != ProductionEnvironment && !s.ExpiresAt.After(horizon) && !r.openDestroy[s.ID] {
+			if v, ok := r.candidateView[s.ID]; ok {
+				s = v
+			}
 			all = append(all, s)
 		}
 	}
@@ -84,6 +91,10 @@ func (r *memRepo) Candidates(_ context.Context, horizon time.Time, after *Cursor
 		}
 	}
 	return out, nil
+}
+
+func (r *memRepo) Attempts(_ context.Context, id uuid.UUID) ([]Attempt, error) {
+	return r.stacks[id].Attempts, nil
 }
 
 func (r *memRepo) BlockedSince(_ context.Context, id uuid.UUID, since time.Time) (bool, error) {
@@ -115,6 +126,9 @@ func (r *memRepo) HasOpenDestroy(_ context.Context, id uuid.UUID) (bool, error) 
 	return r.openDestroy[id], nil
 }
 func (r *memRepo) AppendAudit(_ context.Context, e audit.Event) error {
+	if r.auditErr != nil && e.Action == "ttl.blocked" {
+		return r.auditErr
+	}
 	r.events = append(r.events, e)
 	return nil
 }
@@ -245,7 +259,7 @@ func TestDueListsWarningsAndTeardowns(t *testing.T) {
 	d := stack("development", t0.Add(2*time.Hour))
 	d.ID, d.WarnedAt = sid(4), &warned
 	repo := newMemRepo(a, b, c, d)
-	got, err := newService(repo, nil).Due(context.Background())
+	got, err := newService(repo, nil).Due(context.Background(), "corr-due")
 	if err != nil || len(got) != 2 || got[0].Phase != PhaseTeardown || got[0].Stack.ID != a.ID ||
 		got[1].Phase != PhaseWarn || got[1].Stack.ID != b.ID {
 		t.Fatalf("Due = %+v, %v", got, err)

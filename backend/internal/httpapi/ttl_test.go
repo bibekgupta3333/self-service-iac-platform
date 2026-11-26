@@ -49,7 +49,7 @@ func (f *fakeTTL) Extend(_ context.Context, by identity.Principal, id uuid.UUID,
 	return ttl.ExtendResult{ExpiresAt: ttlAt.Add(time.Duration(hours) * time.Hour), ExtendedHours: hours, RemainingExtHours: 100 - hours}, nil
 }
 
-func (f *fakeTTL) Due(context.Context) ([]ttl.DueItem, error) {
+func (f *fakeTTL) Due(context.Context, string) ([]ttl.DueItem, error) {
 	mk := func(n byte, env string, exp time.Time, p ttl.Phase) ttl.DueItem {
 		return ttl.DueItem{Phase: p, Stack: ttl.Stack{ID: uuid.UUID{15: n}, Team: "payments", Environment: env,
 			Path: "environments/" + env + "/payments/s" + string('0'+n), ExpiresAt: &exp}}
@@ -74,9 +74,12 @@ func (r fixedRole) HighestRole(context.Context, uuid.UUID) (rbac.Role, error) {
 	return rbac.Role(r), nil
 }
 
+// ttlUser is the dev user without the platform-admin flag, so that route policies use the team role.
+var ttlUser = func() identity.Principal { p := devPrincipal; p.PlatformAdmin = false; return p }()
+
 func ttlUserRouter(svc *fakeTTL, role rbac.Role) http.Handler {
 	return NewRouter(Deps{
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DevAuthenticator{Principal: devPrincipal}, Ready: okPinger{},
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DevAuthenticator{Principal: ttlUser}, Ready: okPinger{},
 		Public: []RouteRegistrar{NewTTLHandler(svc)}, Policies: DefaultPolicies(), Roles: fixedRole(role),
 	})
 }
@@ -98,7 +101,7 @@ func TestExtendRoute(t *testing.T) {
 			b["remaining_extension_hours"] != float64(76) {
 			t.Fatalf("body = %v", b)
 		}
-		if len(svc.extended) != 1 || svc.extended[0].by != devPrincipal || svc.extended[0].hours != 24 || svc.extended[0].corr != "corr-ttl" {
+		if len(svc.extended) != 1 || svc.extended[0].by != ttlUser || svc.extended[0].hours != 24 || svc.extended[0].corr != "corr-ttl" {
 			t.Fatalf("extend calls = %+v", svc.extended)
 		}
 	})
@@ -136,7 +139,7 @@ func reaperRouter(svc *fakeTTL) http.Handler {
 	return NewRouter(Deps{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DevAuthenticator{Principal: devPrincipal}, Ready: okPinger{},
 		Internal:         AnyAuthenticator{NewOIDCAuthenticator(fakeTokenVerifier{}), NewTokenAuthenticator(testInternalToken, releaseBot)},
-		InternalHandlers: []RouteRegistrar{NewTTLReaperHandler(svc)},
+		InternalHandlers: []RouteRegistrar{NewTTLReaperHandler(svc)}, Policies: DefaultPolicies(), Roles: fixedRole(rbac.RoleAdmin),
 	})
 }
 
@@ -216,7 +219,7 @@ func TestReaperRoutes(t *testing.T) {
 	})
 	t.Run("a user session never opens the machine routes", func(t *testing.T) {
 		h := NewRouter(Deps{Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DevAuthenticator{Principal: devPrincipal}, Ready: okPinger{},
-			InternalHandlers: []RouteRegistrar{NewTTLReaperHandler(&fakeTTL{})}})
+			InternalHandlers: []RouteRegistrar{NewTTLReaperHandler(&fakeTTL{})}, Policies: DefaultPolicies(), Roles: fixedRole(rbac.RoleAdmin)})
 		if rec := do(t, h, "GET", "/v1/internal/ttl/due", ""); rec.Code != 401 {
 			t.Fatalf("dev user on a machine route = %d", rec.Code)
 		}

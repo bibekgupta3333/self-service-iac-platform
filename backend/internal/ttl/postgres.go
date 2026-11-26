@@ -190,6 +190,19 @@ func (s *pgStore) HasOpenDestroy(ctx context.Context, id uuid.UUID) (bool, error
 	return open, err
 }
 
+func (s *pgStore) Attempts(ctx context.Context, id uuid.UUID) ([]Attempt, error) {
+	rows, err := s.tx.Query(ctx, AttemptsSQL("r.stack_id = $1"), id)
+	if err != nil {
+		return nil, fmt.Errorf("query ttl attempts: %w", err)
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (Attempt, error) {
+		var sid uuid.UUID
+		var a Attempt
+		err := row.Scan(&sid, &a.CreatedAt, &a.EndedAt, &a.Outcome)
+		return a, err
+	})
+}
+
 func (s *pgStore) BlockedSince(ctx context.Context, id uuid.UUID, since time.Time) (bool, error) {
 	var found bool
 	err := s.tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM audit_events WHERE action = 'ttl.blocked'

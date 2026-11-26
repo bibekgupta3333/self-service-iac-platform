@@ -136,7 +136,7 @@ func TestTTLLifecycleAgainstPostgres(t *testing.T) {
 	svc := ttl.NewService(ttlRepo, reqRepo, newRequests(platform.SystemClock{}), platform.SystemClock{}, policy).EnableComments("https://portal.example/stacks")
 
 	// Due: the expired stack to tear down, the nearing one to warn about; nothing else.
-	due, err := svc.Due(ctx)
+	due, err := svc.Due(ctx, "c")
 	if err != nil || len(due) != 2 || due[0].Stack.ID != expired || due[0].Phase != ttl.PhaseTeardown ||
 		due[1].Stack.ID != nearing || due[1].Phase != ttl.PhaseWarn {
 		t.Fatalf("Due = %+v, %v", due, err)
@@ -157,7 +157,7 @@ func TestTTLLifecycleAgainstPostgres(t *testing.T) {
 		outbox.TopicTTLWarning, "ttl-warn:"+nearing.String()).Scan(&jobs); err != nil || jobs != 1 {
 		t.Fatalf("warning jobs = %d, %v", jobs, err)
 	}
-	if due, _ = svc.Due(ctx); len(due) != 1 || due[0].Stack.ID != expired {
+	if due, _ = svc.Due(ctx, "c"); len(due) != 1 || due[0].Stack.ID != expired {
 		t.Fatalf("a warned stack is not due again: %+v", due)
 	}
 
@@ -224,7 +224,7 @@ func TestTTLLifecycleAgainstPostgres(t *testing.T) {
 	if again, err := svc.Teardown(ctx, expired, "corr-t"); err != nil || again.Created {
 		t.Fatalf("second Teardown = %+v, %v", again, err)
 	}
-	if due, _ = svc.Due(ctx); len(due) != 0 {
+	if due, _ = svc.Due(ctx, "c"); len(due) != 0 {
 		t.Fatalf("a stack with an open destroy is not due: %+v", due)
 	}
 	if _, err := svc.Extend(ctx, user, expired, 1, "c"); err == nil {
@@ -245,14 +245,14 @@ func TestTTLLifecycleAgainstPostgres(t *testing.T) {
 		exec(`DELETE FROM locks WHERE stack_id = $1`, expired)
 	}
 	endDestroy("failed", time.Hour)
-	if due, _ = svc.Due(ctx); len(due) != 0 {
+	if due, _ = svc.Due(ctx, "c"); len(due) != 0 {
 		t.Fatalf("a stack in backoff is not listed: %+v", due)
 	}
 	if _, err := svc.Teardown(ctx, expired, "c"); !apperr.IsKind(err, apperr.KindConflict) || !strings.Contains(err.Error(), "next attempt") {
 		t.Fatalf("Teardown within the backoff = %v", err)
 	}
 	exec(`UPDATE requests SET completed_at = now() - interval '30 hours' WHERE stack_id = $1 AND kind = 'destroy'`, expired) // the backoff has passed
-	if due, _ = svc.Due(ctx); len(due) != 1 || due[0].Stack.ID != expired {
+	if due, _ = svc.Due(ctx, "c"); len(due) != 1 || due[0].Stack.ID != expired {
 		t.Fatalf("after the backoff the stack is due again: %+v", due)
 	}
 	for _, status := range []string{"cancelled", "rejected"} {
@@ -286,7 +286,7 @@ func TestTTLLifecycleAgainstPostgres(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT id FROM stacks WHERE name = 'rogue'`).Scan(&rogue); err != nil {
 		t.Fatal(err)
 	}
-	if due, _ = svc.Due(ctx); len(due) != 1 || due[0].Stack.ID != expired { // only the blocked stack, which stays listed
+	if due, _ = svc.Due(ctx, "c"); len(due) != 1 || due[0].Stack.ID != expired { // only the blocked stack, which stays listed
 		t.Fatalf("production appears in the due list: %+v", due)
 	}
 	_, err = svc.Teardown(ctx, rogue, "c")

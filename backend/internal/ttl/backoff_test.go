@@ -2,6 +2,7 @@ package ttl
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
 	"time"
@@ -101,7 +102,7 @@ func TestDueFindsFreshTeardownsBehindManyBlockedAndBackoffStacks(t *testing.T) {
 	all = append(all, nearing)
 
 	repo := newMemRepo(all...)
-	items, err := NewService(repo, members, nil, platform.FixedClock{T: t0}, p).Due(context.Background())
+	items, err := NewService(repo, members, nil, platform.FixedClock{T: t0}, p).Due(context.Background(), "corr-due")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,9 +135,75 @@ func TestDueFindsFreshTeardownsBehindManyBlockedAndBackoffStacks(t *testing.T) {
 	if count() != blockedCount {
 		t.Fatalf("ttl.blocked events = %d, want %d", count(), blockedCount)
 	}
-	if _, err := NewService(repo, members, nil, platform.FixedClock{T: t0}, p).Due(context.Background()); err != nil || count() != blockedCount {
+	if _, err := NewService(repo, members, nil, platform.FixedClock{T: t0}, p).Due(context.Background(), "corr-due"); err != nil || count() != blockedCount {
 		t.Fatalf("second Due: %v, events %d", err, count())
 	}
+}
+
+func TestRecordBlockedIsDecidedUnderLockOnTheReloadedStack(t *testing.T) {
+	p := Policy{MinHours: 1, MaxHours: 72, DefaultHours: 24, BackoffHours: 24, MaxAttempts: 2}
+	blockedStack := func(n int) Stack {
+		s := stack("development", t0.Add(-100*time.Hour))
+		s.ID, s.Team = sid(byte(n)), "payments"
+		for i := 0; i < 2; i++ {
+			s.Attempts = append(s.Attempts, Attempt{CreatedAt: s.ExpiresAt.Add(time.Hour), EndedAt: t0.Add(-50 * time.Hour), Outcome: "failed"})
+		}
+		return s
+	}
+	svcFor := func(repo *memRepo) *Service { return NewService(repo, members, nil, platform.FixedClock{T: t0}, p) }
+	blockedEvents := func(repo *memRepo) (out []string) {
+		for _, e := range repo.events {
+			if e.Action == "ttl.blocked" {
+				out = append(out, e.SubjectID+"/"+e.CorrelationID)
+			}
+		}
+		return out
+	}
+
+	t.Run("uses the request's correlation id", func(t *testing.T) {
+		s := blockedStack(1)
+		repo := newMemRepo(s)
+		if _, err := svcFor(repo).Due(context.Background(), "corr-run-7"); err != nil {
+			t.Fatal(err)
+		}
+		if got := blockedEvents(repo); !slices.Equal(got, []string{s.ID.String() + "/corr-run-7"}) {
+			t.Fatalf("events = %v", got)
+		}
+	})
+	t.Run("a stack extended since the candidate read is not recorded", func(t *testing.T) {
+		stale := blockedStack(2) // what the candidate read saw
+		fresh := stale           // what is stored now: extended by a day, so no longer expired
+		later := t0.Add(24 * time.Hour)
+		fresh.ExpiresAt = &later
+		repo := newMemRepo(fresh)
+		repo.candidateView = map[uuid.UUID]Stack{stale.ID: stale}
+		if _, err := svcFor(repo).Due(context.Background(), "c"); err != nil {
+			t.Fatal(err)
+		}
+		if got := blockedEvents(repo); len(got) != 0 {
+			t.Fatalf("ttl.blocked recorded for an expiry that no longer applies: %v", got)
+		}
+	})
+	t.Run("a failing audit append does not fail Due or hide the other stacks", func(t *testing.T) {
+		down := stack("development", t0.Add(-time.Hour))
+		down.ID, down.Team = sid(9), "payments"
+		repo := newMemRepo(blockedStack(3), down)
+		repo.auditErr = errors.New("audit store down")
+		items, err := svcFor(repo).Due(context.Background(), "c")
+		if err != nil {
+			t.Fatalf("Due must survive one bad audit append: %v", err)
+		}
+		phases := map[Phase]int{}
+		for _, it := range items {
+			phases[it.Phase]++
+		}
+		if phases[PhaseBlocked] != 1 || phases[PhaseTeardown] != 1 {
+			t.Fatalf("phases = %v", phases)
+		}
+		if len(blockedEvents(repo)) != 0 {
+			t.Fatal("nothing was appended")
+		}
+	})
 }
 
 func TestExtensionClearsTheWarningOnlyBeyondTheWindow(t *testing.T) {

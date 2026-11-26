@@ -72,7 +72,7 @@ func (h *TTLHandler) extend(w http.ResponseWriter, r *http.Request) {
 
 // TTLReaper is the machine-facing TTL port for the hourly reaper (ttl.Service).
 type TTLReaper interface {
-	Due(ctx context.Context) ([]ttl.DueItem, error)
+	Due(ctx context.Context, correlationID string) ([]ttl.DueItem, error)
 	Warn(ctx context.Context, id uuid.UUID, correlationID string) (ttl.WarnResult, error)
 	Teardown(ctx context.Context, id uuid.UUID, correlationID string) (ttl.DestroyResult, error)
 }
@@ -118,7 +118,7 @@ func toDueStack(d ttl.DueItem) dueStackDTO {
 }
 
 func (h *TTLReaperHandler) due(w http.ResponseWriter, r *http.Request) {
-	items, err := h.svc.Due(r.Context())
+	items, err := h.svc.Due(r.Context(), RequestIDFrom(r.Context()))
 	if err != nil {
 		writeError(w, r, err)
 		return
