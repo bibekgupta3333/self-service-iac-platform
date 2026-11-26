@@ -220,7 +220,7 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
   - SARIF paths with `%`, a backslash or a drive letter go to the stack's `main.tf`; the smoke endpoint check rejects backslashes and userinfo.
   - `cost-input` builds the Infracost plan from an allow-list of the fields Infracost reads (unknown keys, `resource_drift`, variable defaults and literal expressions are dropped) instead of a deny-list.
   - `ci.yml` strips `automationDetails` and `versionControlProvenance` from the TFLint and Checkov SARIF (`sarif --strip-only`) before upload.
-  - `cost-summary` uploads `summary-cost-<id>` instead of overwriting `pr-validate-<id>`; `comment` and `report` prefer it and fall back to the original.
+  - `cost-summary` uploads `summary-cost-<id>-<run attempt>` instead of overwriting `pr-validate-<id>`; `comment` and `report` prefer it and fall back to the original.
   - The Infracost switch is the repository variable `INFRACOST_ENABLED=true`; `detect` no longer reads the secret.
   - New `module-tests-floor` job and `make module-test-floor`: the offline module suites run on each module's minimum provider versions (`tools.provider_floor`).
   - `tools.required_checks` (`make required-checks-check`) fails when a required status check is not a job name; `main-branch.json` now requires the module test, provider floor, Terratest and semver gate jobs.
