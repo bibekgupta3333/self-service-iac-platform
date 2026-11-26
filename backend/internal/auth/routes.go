@@ -34,6 +34,11 @@ const (
 	// Cost Explorer worker, WBS 8.5) may write it, so a token minted by a workflow file a
 	// pull-request author controls can never move the spend a budget gate reads.
 	RouteBudgetActuals RouteClass = "budget_actuals"
+	// RouteTTL: /v1/internal/ttl/*. The hourly reaper lists the stacks that are due for a TTL
+	// warning or teardown and acts on them. Only ttl-reaper.yml on main, from its schedule or
+	// a manual dispatch: teardown opens a destroy request, so it must not be reachable from a
+	// workflow file a pull-request author controls.
+	RouteTTL RouteClass = "ttl"
 )
 
 // RoutePolicy is what an OIDC caller must be to use a route class.
@@ -71,6 +76,11 @@ var RoutePolicies = map[RouteClass]RoutePolicy{
 		Events:    []string{"push", "workflow_dispatch"},
 	},
 	RouteBudgetActuals: {}, // shared internal token only: no workflow is on the list
+	RouteTTL: {
+		Workflows: []string{"ttl-reaper.yml"},
+		MainOnly:  true,
+		Events:    []string{"schedule", "workflow_dispatch"},
+	},
 }
 
 // AuthorizeRoute checks a caller's workflow identity against the route class policy.

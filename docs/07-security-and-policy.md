@@ -437,7 +437,7 @@ deny contains m if {
 
 ### 6.7 Budget limit
 
-`policies/opa/budget.rego` (`iacp.budget`) denies a change whose estimated monthly cost would push the team's month over a hard budget, denies a single stack above a cap, and warns near the limit. It reads `data.iacp.context` only; the plan is input only to recognise a change that adds nothing. Decisions and deferrals: [ADR-0013](adr/0013-budget-gate-inputs-and-deferrals.md).
+`policies/opa/budget.rego` (`iacp.budget`) denies a change whose estimated monthly cost would push the team's month over a hard budget, denies a single stack above a cap, and warns near the limit. It reads `data.iacp.context` only; the plan is input only to recognise a change that adds nothing. Decisions and deferrals: [ADR-0014](adr/0014-budget-gate-inputs-and-deferrals.md).
 
 | Context key | Source | Meaning |
 |---|---|---|
@@ -461,7 +461,7 @@ Already used is the largest of `spent_usd`, `actual_usd` and `current_committed_
 
 A plan that creates or updates nothing (destroy only, or no change) adds no cost and always passes, so a team over budget can free budget; a missing plan is not assumed to be one. **The override** waives a hard limit or the cap in development and staging only, until its `expires_at` (judged against the API's `now`), and only for a stack whose estimate is at most its `max_delta_usd`; without an estimate there is nothing to bound, so it never makes a missing estimate acceptable. It never waives anything in production, and an unknown environment counts as production: the denial message then says so. The API refuses an override on a production-scoped budget. Budget rules are not waivable through policy exceptions (they do not use `exempt()`). Usage-based resources are priced at zero usage by Infracost, so the estimate is a floor. With Infracost disabled (`vars.INFRACOST_ENABLED` not `true`), every staging and production change of a team that has a hard budget is denied (`no_estimate`): enable Infracost before setting such a budget.
 
-**The limit is per stack until the committed cost is recorded.** `current_committed_usd` is read from `stacks.committed_monthly_usd`, written by `POST /v1/internal/budget-committed`. Nothing calls it yet (`apply.yml` does not price a plan; ADR-0013), and `spent_usd` is not filled either, so today `used` is 0 and each stack is compared alone with the team's whole limit: spend split over several stacks, each under the limit, is not caught. This is a known gap with a tracked follow-up (WBS 8.5), not a property of the design.
+**The limit is per stack until the committed cost is recorded.** `current_committed_usd` is read from `stacks.committed_monthly_usd`, written by `POST /v1/internal/budget-committed`. Nothing calls it yet (`apply.yml` does not price a plan; ADR-0014), and `spent_usd` is not filled either, so today `used` is 0 and each stack is compared alone with the team's whole limit: spend split over several stacks, each under the limit, is not caught. This is a known gap with a tracked follow-up (WBS 8.5), not a property of the design.
 
 **Trust boundary.** `pr-validate.yml` runs the PR's own workflow, `tools/`, `policies/` and *stack root*, so a gate that took its inputs from them could be talked out of its answer. What is and is not guaranteed:
 

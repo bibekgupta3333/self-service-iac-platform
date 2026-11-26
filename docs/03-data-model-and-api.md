@@ -166,8 +166,10 @@ CREATE TABLE stacks (
     region           text        NOT NULL,
     status           stack_status NOT NULL DEFAULT 'provisioning',
     is_ephemeral     boolean     NOT NULL DEFAULT false,
+    ttl_hours        int         CHECK (ttl_hours IS NULL OR ttl_hours > 0),   -- lifetime asked for at request time
+    ttl_extended_hours int       NOT NULL DEFAULT 0 CHECK (ttl_extended_hours >= 0),  -- total added by extensions
     expires_at       timestamptz,
-    ttl_warned_at    timestamptz,
+    ttl_warned_at    timestamptz,                                -- 24 h warning sent for the current expires_at
     outputs          jsonb       NOT NULL DEFAULT '{}'::jsonb,   -- non-sensitive outputs only
     last_applied_sha char(40),
     last_applied_request_id uuid,
@@ -181,6 +183,7 @@ CREATE TABLE stacks (
     destroyed_at     timestamptz,
     UNIQUE (environment_id, team_id, name),
     CHECK (NOT is_ephemeral OR expires_at IS NOT NULL),
+    CHECK (is_ephemeral OR (ttl_hours IS NULL AND ttl_extended_hours = 0)),
     CHECK (status <> 'destroyed' OR destroyed_at IS NOT NULL)
 );
 CREATE INDEX stacks_team_status_idx  ON stacks (team_id, status);
@@ -710,12 +713,12 @@ RBAC column uses team roles (see [07-security-and-policy.md](07-security-and-pol
 | Method | Path | Description | RBAC |
 |---|---|---|---|
 | GET | `/stacks?team=&env=&status=&limit=&cursor=` | List stacks, newest first, keyset-paginated (`next_cursor`). A user sees only the stacks of teams they belong to (any role); platform admins see all. Visibility is `identity.Visibility`, the helper the request routes use, so one caller sees the same teams on `/requests`, `/stacks` and `/requests/{id}/events`. `module=` is not implemented yet. | viewer |
-| GET | `/stacks/{id}` | Stack detail: `status`, `health` (`unknown`, `healthy` or `degraded`, from the post-apply smoke test), `lock` (`null`, or `{request_id, request_short_id, holder, acquired_at, expires_at}`; the fencing token is never shown), `outputs` (non-sensitive, as reported by the last apply), `last_applied_sha`, `latest_request {id, short_id, kind, status}` and `links` to it. A stack the caller may not see is `404`. Resources, versions, drift and TTL arrive with their features. | viewer |
+| GET | `/stacks/{id}` | Stack detail: `status`, `health` (`unknown`, `healthy` or `degraded`, from the post-apply smoke test), `lock` (`null`, or `{request_id, request_short_id, holder, acquired_at, expires_at}`; the fencing token is never shown), `outputs` (non-sensitive, as reported by the last apply), `last_applied_sha`, `latest_request {id, short_id, kind, status}` and `links` to it. A stack the caller may not see is `404`. `is_ephemeral`, `ttl_hours`, `ttl_extended_hours` and `expires_at` carry the TTL ([06 section 6](06-lifecycle-management.md#6-ttl-and-ephemeral-environments)). Resources, versions and drift arrive with their features. | viewer |
 | GET | `/stacks/{id}/requests` | Request history. | viewer |
 | GET | `/stacks/{id}/outputs` | Non-sensitive outputs. | viewer |
 | GET | `/stacks/{id}/files` | Current generated files (from `main`). | viewer |
 | GET | `/stacks/{id}/upgrades` | Available module upgrades per resource. | viewer |
-| PATCH | `/stacks/{id}` | Change metadata only (e.g. extend `expires_at` within env max). | developer (non-prod), maintainer (prod) |
+| POST | `/stacks/{id}/ttl/extend` | Extend an ephemeral stack's TTL: body `{"hours": 24}` (one extension is `IACP_TTL_MIN_HOURS`..`IACP_TTL_MAX_HOURS`). `200 {"stack_id", "expires_at", "extended_hours", "remaining_extension_hours"}`. The hours are added to the current `expires_at` (to now when the stack expired but is not being destroyed yet). Refused with `409 ttl_extension_cap` once the stack's extensions would total more than `IACP_TTL_MAX_EXTENSION_HOURS` (default 168), `409 ttl_environment_max` when the lifetime would pass the environment's `max_ttl_hours`, `409 destroy_pending` when a destroy request is open, `409 not_ephemeral` for a permanent stack. Clears `ttl_warned_at` when the new expiry is more than 24 h away, so the next window warns again (a shorter extension keeps the warning already sent); audit `ttl.extended`. A caller without the `stack.extend_ttl` role (developer or higher) in the stack's team gets `403`; a stack of another team is `404`. There is no pull request: the TTL is database state, not a generated file. | developer |
 | GET | `/stacks/{id}/lock` / DELETE `/stacks/{id}/lock` | Inspect / force-release platform lock. | viewer / admin |
 
 Stacks are never created or destroyed directly; mutation is always a request.
@@ -967,10 +970,13 @@ Called only by GitHub Actions jobs with `Authorization: Bearer <GitHub OIDC JWT>
 | GET | `/internal/requests/by-path?stack_path=&head_sha=` | `apply.yml` (before the lock claim) | Resolves the request that holds the stack's lock: stack and request ids, `fencing_token`, `approved_plan_hash` (below). Fails closed. |
 | GET | `/internal/budget-context?stack_path=` | `pr-validate.yml`, `apply.yml` | OPA input (`conftest --data`): environment, team, allowed regions, budget (`limit_usd`, `spent_usd`, active override), approved policy exceptions, yanked module versions. |
 | POST | `/internal/budget-actuals` | shared internal token only | Record a team's actual spend: `{"team", "environment"?, "month": "YYYY-MM", "actual_usd"}` → `200` with the budget (as in [6.7](#67-budgets-and-exceptions)); `404` when the team has no such budget, `422` for a bad amount. Audited as `budget.actual.recorded`. The future Cost Explorer worker calls it; nothing does yet (Cost Explorer is not reachable under LocalStack, ADR-0009). |
-| POST | `/internal/budget-committed` | shared internal token only | Record one stack's committed monthly cost: `{"stack_path", "monthly_usd"}` → `200 {"stack_path", "monthly_usd"}`; `404` for an unknown or destroyed stack, `422` for a bad amount. Audited as `stack.cost.committed`. The budget context sums it over the team's other active stacks (`current_committed_usd`). Nothing calls it yet (`apply.yml` does not price a plan; ADR-0013). |
+| POST | `/internal/budget-committed` | shared internal token only | Record one stack's committed monthly cost: `{"stack_path", "monthly_usd"}` → `200 {"stack_path", "monthly_usd"}`; `404` for an unknown or destroyed stack, `422` for a bad amount. Audited as `stack.cost.committed`. The budget context sums it over the team's other active stacks (`current_committed_usd`). Nothing calls it yet (`apply.yml` does not price a plan; ADR-0014). |
 | POST | `/drift` | `drift.yml` | Drift result per stack (see [6.6](#66-drift)). |
 | POST | `/internal/catalog/index` | `module-release.yml` | Index a released module version (see [6.2](#62-catalog-modules-and-versions)). |
 | GET | `/internal/stacks/{id}/lock` | worker, `apply.yml` | Current platform lock: `stack_id`, `request_id`, `holder`, `fencing_token`, `acquired_at`, `expires_at`; `404` when unlocked. |
+| GET | `/internal/ttl/due` | `ttl-reaper.yml` | The stacks due now: `200 {"warnings": [...], "teardowns": [...], "blocked": [...]}`, each entry `{stack_id, path, team, environment, expires_at}`. A warning is a live ephemeral stack within 24 h of `expires_at` whose `ttl_warned_at` is unset; a teardown is a live ephemeral stack past `expires_at` with no open destroy request. `blocked` lists expired stacks that used up their TTL destroy attempts: they are reported only, never retried, and kept out of `teardowns` so they cannot crowd out stacks that can be torn down; `ttl.blocked` is recorded (once per expiry) when one is listed. A stack in backoff after a failed TTL destroy is left out. Production never appears. Candidates are read in pages and classified page by page, so stacks in backoff or blocked never use up the limit: at most 500 actionable and 500 blocked entries, soonest expiry first, from at most 5000 rows scanned. |
+| POST | `/internal/ttl/{id}/warn` | `ttl-reaper.yml` | Record the 24 h warning: sets `ttl_warned_at`, appends `ttl.warned`, and (when the publisher can comment) enqueues a `ttl.warning` outbox job that comments on the pull request of the stack's newest request. `200 {"warned": true}`, or `200 {"warned": false, "reason": "..."}` when the stack left the window (extended, already warned, expired): idempotent. |
+| POST | `/internal/ttl/{id}/teardown` | `ttl-reaper.yml` | Open a `destroy` request for an expired stack as the platform bot (`iacp-bot`, justification `ttl expired`, audit `ttl.expired` with the request id). `202 {"status": "created", "request_id", "short_id", "queued"}`, or `200 {"status": "already_pending"}` when a destroy request is open. Under the stack row lock it re-checks that the stack is ephemeral, not production and past `expires_at`: `409 ttl_not_due`, `409 not_ephemeral`, `409 production_not_ephemeral`, `409 stack_busy` (an apply is in flight: the next run retries), `409 ttl_backoff` (an earlier TTL destroy failed, was rejected or cancelled less than `IACP_TTL_RETRY_BACKOFF_HOURS` ago) and `409 ttl_blocked` (`IACP_TTL_MAX_ATTEMPTS` unsuccessful TTL destroys: audit `ttl.blocked` once, nothing opened). The request then takes the stack lock or queues like any other. |
 | POST | `/internal/stacks/{id}/lock` | worker, `apply.yml` | Acquire for `{"request_id"}`: `200 {"lock": "granted"\|"held", "queued_behind": null, "current": {…}}` or `202 {"lock": "queued", "queued_behind": "<holder request id>", "current": {…}}`. |
 | POST | `/internal/stacks/{id}/lock/heartbeat` | worker, `apply.yml` | Renew the lease: `{"request_id", "fencing_token"}`; `409 stale_fencing_token` when superseded. |
 | DELETE | `/internal/stacks/{id}/lock?request_id=&fencing_token=` | worker, `apply.yml` | Release (terminal request) and promote the oldest queued request: `200 {"released": {…}, "promoted": {…}\|null}`; `409 stale_fencing_token`. Idempotent once the request ended: apply reports release the lease with the final transition, so a later release by the request's own token answers `200 {"released": null, "promoted": null, "already_released": true}`. |
@@ -987,6 +993,7 @@ Route classes (`backend/internal/auth/routes.go`, pure table enforced by middlew
 | catalog_index | `/internal/catalog/index` | `module-release.yml` | `refs/heads/main` | `push`, `workflow_dispatch` |
 | runs | `/runs` | `pr-validate.yml`, `apply.yml`, `drift.yml`, `ttl-reaper.yml` | per pipeline | `pull_request`, `push`, `workflow_dispatch`, `schedule` |
 | request_lookup | `/internal/requests/by-path` (read-only) | `apply.yml` only | `refs/heads/main` (ref and workflow definition) | `push`, `workflow_dispatch` |
+| ttl | `/internal/ttl/*` | `ttl-reaper.yml` only | `refs/heads/main` (ref and workflow definition) | `schedule`, `workflow_dispatch` |
 | budget_context | `/internal/budget-context` (read-only) | `pr-validate.yml`, `apply.yml` | global allow-list (PR merge ref for `pr-validate.yml`, main otherwise) | `pull_request`, `push`, `workflow_dispatch` |
 | budget_actuals | `/internal/budget-actuals`, `/internal/budget-committed` (write) | none: shared internal token only | n/a | n/a |
 

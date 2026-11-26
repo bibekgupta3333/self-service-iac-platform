@@ -50,6 +50,16 @@ func TestAuthorizeRoute(t *testing.T) {
 		{"shared token may record budget actuals", RouteBudgetActuals, nil, true},
 		{"apply may not record budget actuals", RouteBudgetActuals, wfFor("apply.yml", main, "push"), false},
 		{"pr-validate may not record budget actuals", RouteBudgetActuals, wfFor("pr-validate.yml", pr, "pull_request"), false},
+		{"ttl reaper on schedule may use the ttl routes", RouteTTL, wfFor("ttl-reaper.yml", main, "schedule"), true},
+		{"ttl reaper dispatched on main may use the ttl routes", RouteTTL, wfFor("ttl-reaper.yml", main, "workflow_dispatch"), true},
+		{"shared token may use the ttl routes", RouteTTL, nil, true},
+		{"ttl reaper from a PR ref may not", RouteTTL, wfFor("ttl-reaper.yml", pr, "pull_request"), false},
+		{"ttl reaper definition from a branch may not", RouteTTL, wfFor("ttl-reaper.yml", "refs/heads/feature", "workflow_dispatch"), false},
+		{"ttl reaper on push may not", RouteTTL, wfFor("ttl-reaper.yml", main, "push"), false},
+		{"ttl reaper via workflow_run may not", RouteTTL, wfFor("ttl-reaper.yml", main, "workflow_run"), false},
+		{"apply may not use the ttl routes", RouteTTL, wfFor("apply.yml", main, "push"), false},
+		{"drift may not use the ttl routes", RouteTTL, wfFor("drift.yml", main, "schedule"), false},
+		{"pr-validate may not use the ttl routes", RouteTTL, wfFor("pr-validate.yml", pr, "pull_request"), false},
 		{"unknown class denies", RouteClass("other"), wfFor("apply.yml", main, "push"), false},
 	}
 	for _, tt := range tests {

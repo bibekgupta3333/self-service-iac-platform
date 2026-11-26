@@ -48,6 +48,8 @@ type Stack struct {
 	Health         requests.StackHealth // what the post-apply smoke test said; unknown before one ran
 	Lock           *LockInfo            // nil when no request holds the stack
 	IsEphemeral    bool
+	TTLHours       *int // the lifetime asked for at request time; nil for a permanent stack
+	TTLExtended    int  // hours added by extensions so far
 	ExpiresAt      *time.Time
 	Outputs        json.RawMessage // the non-sensitive outputs of the last apply
 	LastAppliedSHA string

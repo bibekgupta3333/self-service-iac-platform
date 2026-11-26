@@ -88,6 +88,8 @@ type Config struct {
 	QueueRetention time.Duration
 	// WorkerPollInterval is how often the in-process worker polls the outbox when idle.
 	WorkerPollInterval time.Duration
+	// TTL bounds the lifetime of ephemeral stacks and their extensions (WBS 8.4).
+	TTL TTLConfig
 }
 
 // DefaultOIDCIssuer is the GitHub Actions token issuer.
@@ -178,6 +180,8 @@ func Load(lookup LookupFunc) (Config, error) {
 	errs = append(errs, err)
 	cfg.Publisher = pub
 	cfg.WorkerPollInterval, err = loadWorker(get)
+	errs = append(errs, err)
+	cfg.TTL, err = loadTTL(get)
 	errs = append(errs, err)
 	cfg.QueueRetention, err = loadQueueRetention(get)
 	errs = append(errs, err)

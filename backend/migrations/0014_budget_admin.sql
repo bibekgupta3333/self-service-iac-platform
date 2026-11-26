@@ -10,7 +10,7 @@
 -- actual_usd is recorded by POST /v1/internal/budget-actuals and stacks.committed_monthly_usd
 -- by POST /v1/internal/budget-committed (docs/06 section 10). Cost Explorer is not reachable
 -- under LocalStack (ADR-0009) and apply.yml does not price a plan yet, so nothing fills either
--- automatically; docs/adr/0013 records the deferral.
+-- automatically; docs/adr/0014 records the deferral.
 --
 -- Privileges: 0004's default grant already gives iacp_app DML on budgets and stacks.
 
