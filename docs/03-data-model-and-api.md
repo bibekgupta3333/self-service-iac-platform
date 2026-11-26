@@ -244,7 +244,7 @@ CREATE UNIQUE INDEX requests_pr_idx     ON requests (github_pr_number) WHERE git
 CREATE TABLE pipeline_runs (
     id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     request_id         uuid        REFERENCES requests(id) ON DELETE CASCADE,
-    stack_id           uuid        REFERENCES stacks(id) ON DELETE CASCADE,
+    stack_id           uuid        NOT NULL REFERENCES stacks(id) ON DELETE CASCADE,  -- part of the run key
     kind               pipeline_kind NOT NULL,
     status             pipeline_status NOT NULL DEFAULT 'queued',
     github_run_id      bigint      NOT NULL,
@@ -884,7 +884,17 @@ Called only by GitHub Actions jobs with `Authorization: Bearer <GitHub OIDC JWT>
 
 Machine endpoints accept the GitHub OIDC JWT, and, as a fallback while workflows migrate, the shared `IACP_INTERNAL_TOKEN`. Neither configured means every call is rejected.
 
-Verification order: JWKS signature (RS256 only) → `iss == https://token.actions.githubusercontent.com` → `aud` → `exp`/`nbf`/`iat` (30 s leeway) → `repository`, `repository_owner` and `repository_id == 87654321` → `ref` and `job_workflow_ref` in the allowlist (`403 workflow_not_allowed`) → per endpoint, the pipeline's own workflow file and `ref == refs/heads/main` for `requests/by-path`, `/drift`, catalog indexing and apply/TTL reports → the report's `run_id` + `run_attempt` equal the token's (`403 run_mismatch`) → fencing token current. Replays rejected via `jti` cache (1 h) — not implemented yet.
+Verification order: JWKS signature (RS256 only; https JWKS endpoint, redirects never followed) → `iss == https://token.actions.githubusercontent.com` → `aud` → `exp`/`nbf`/`iat` (30 s leeway) → `repository`, `repository_owner` and, when `IACP_OIDC_REPOSITORY_ID` is configured (required in production), `repository_id == 87654321` → `ref` and `job_workflow_ref` in the global allowlist (`403 workflow_not_allowed`) → the **route class** policy below → for `/runs`, the per-pipeline rules: the report's `run_id` + `run_attempt` and `head_sha` equal the token's `run_id`, `run_attempt` and `sha` (`403 run_mismatch`) → fencing token current. Replays rejected via `jti` cache (1 h) — not implemented yet.
+
+Route classes (`backend/internal/auth/routes.go`, pure table enforced by middleware). A pull-request token (`pr-validate.yml` on `refs/pull/*/merge`, whose workflow file the PR author controls) can only reach `/runs`. Callers using the shared internal token are not workflow-scoped.
+
+| Route class | Routes | Workflow files | Ref | `event_name` |
+|---|---|---|---|---|
+| locks | `/internal/stacks/{id}/lock*` | `apply.yml`, `ttl-reaper.yml` | `refs/heads/main` (ref and workflow definition) | `push`, `workflow_dispatch`, `schedule` |
+| catalog_index | `/internal/catalog/index` | `module-release.yml` | `refs/heads/main` | `push`, `workflow_dispatch` |
+| runs | `/runs` | `pr-validate.yml`, `apply.yml`, `drift.yml`, `ttl-reaper.yml` | per pipeline | `pull_request`, `push`, `workflow_dispatch`, `schedule` |
+
+Per pipeline on `/runs`: `validate` ← `pr-validate.yml` on `pull_request`; `apply` ← `apply.yml` on main via `push`/`workflow_dispatch`; `drift` ← `drift.yml` on main via `schedule`/`workflow_dispatch`; `ttl_destroy` ← `ttl-reaper.yml` on main via `schedule`/`workflow_dispatch`. `pull_request_target` and `workflow_run` never qualify.
 
 `GET /v1/internal/requests/by-path?stack_path=environments/production/payments/order-events&head_sha=a1b2c3d4e5f60718293a4b5c6d7e8f9012345678` (apply) → `200`
 
@@ -928,7 +938,7 @@ Apply callback adds `"outputs": {...}` (sensitive outputs replaced with `"<sensi
 
 Response `200 {"accepted": true, "run_id": "…", "run_status": "succeeded", "request_status": "plan_ready"}`; `409 stale_fencing_token` aborts the job.
 
-Current implementation (WBS 4.10): `pipeline` is one of `validate`, `apply`, `drift`, `ttl_destroy`; `status` is `in_progress`, `passed`, `failed` or `cancelled`. `fencing_token` and `request_short_id` are required except for `drift`. Each report is appended to `pipeline_runs.stages` (one row per run id, attempt and stack); a `passed` `summary` stage finishes the run as `succeeded`, a `failed`/`cancelled` stage finishes it as such, and a finished run keeps its status. `request_status` is the request's status as stored; the transitions driven by reports, `plan_summaries` and `cost_estimates` arrive with WBS 5.2/5.3.
+Current implementation (WBS 4.10): `pipeline` is one of `validate`, `apply`, `drift`, `ttl_destroy`; `status` is `in_progress`, `passed`, `failed` or `cancelled`. `fencing_token` and `request_short_id` are required except for `drift`; `github.head_sha` must be the job's `github.sha`. Each report is recorded in `pipeline_runs.stages` (one row per run id, attempt and stack): a report for a stage already recorded replaces that entry, so retried calls are idempotent, and a run records at most 32 distinct stages (`422 too_many_stages`). A `passed` `summary` stage finishes the run as `succeeded`, a `failed`/`cancelled` stage finishes it as such, and a finished run keeps its status. The report transaction locks the `stacks` row (`FOR KEY SHARE`) before reading the lock, the same order as the lock operations, so reports never deadlock with release or promotion. `request_status` is the request's status as stored; the transitions driven by reports, `plan_summaries` and `cost_estimates` arrive with WBS 5.2/5.3.
 
 ### 6.10 GitHub webhooks
 
@@ -982,7 +992,8 @@ All errors use RFC 9457 Problem Details (`application/problem+json`) with the pl
 | 401 | `unauthenticated` | Missing/expired session or token; invalid OIDC JWT |
 | 403 | `forbidden` | RBAC denies (e.g. developer approving prod) |
 | 403 | `workflow_not_allowed` | OIDC `job_workflow_ref` not allowlisted for endpoint |
-| 403 | `run_mismatch` | `POST /runs` report names a different `run_id`/`run_attempt` than the caller's OIDC token |
+| 403 | `run_mismatch` | `POST /runs` report names a different `run_id`/`run_attempt` or `head_sha` than the caller's OIDC token |
+| 422 | `too_many_stages` | `POST /runs` would record more than 32 distinct stages for one run |
 | 404 | `not_found` | Resource missing or not visible to caller |
 | 409 | `stack_locked` | Operation needs lock immediately (e.g. `preview` with `exclusive=true`); body includes `holder` and `request_id` |
 | 409 | `invalid_transition` | e.g. cancel an `applying` request |
