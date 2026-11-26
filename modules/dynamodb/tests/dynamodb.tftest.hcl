@@ -92,6 +92,11 @@ run "secure_defaults" {
   }
 
   assert {
+    condition     = !strcontains(output.read_policy_json, "dynamodb:GetRecords") && !strcontains(output.read_policy_json, "dynamodb:ListStreams")
+    error_message = "Without a stream, read_policy_json must not grant stream access."
+  }
+
+  assert {
     condition     = strcontains(output.write_policy_json, "dynamodb:PutItem") && !strcontains(output.write_policy_json, "dynamodb:Scan")
     error_message = "write_policy_json must grant writes but not scans."
   }
@@ -143,6 +148,15 @@ run "composite_key_gsi_ttl_stream" {
   assert {
     condition     = aws_dynamodb_table.this.stream_enabled && aws_dynamodb_table.this.stream_view_type == "NEW_AND_OLD_IMAGES" && output.stream_arn == aws_dynamodb_table.this.stream_arn && output.stream_arn != null
     error_message = "stream_view_type must enable the stream and expose its ARN."
+  }
+
+  assert {
+    condition = anytrue([
+      for st in jsondecode(output.read_policy_json).Statement :
+      st.Sid == "ReadStream" && flatten([st.Resource]) == [aws_dynamodb_table.this.stream_arn] &&
+      toset(flatten([st.Action])) == toset(["dynamodb:DescribeStream", "dynamodb:GetRecords", "dynamodb:GetShardIterator"])
+    ])
+    error_message = "With a stream, read_policy_json must grant stream reads on that stream only."
   }
 }
 
