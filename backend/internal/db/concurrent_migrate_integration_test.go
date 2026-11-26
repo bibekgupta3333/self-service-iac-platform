@@ -39,13 +39,24 @@ func TestConcurrentDatabasesMigrate(t *testing.T) {
 func TestConcurrentMigratorsOnOneDatabase(t *testing.T) {
 	pool := dbtest.NewEmptyDatabase(t)
 	const n = 5
+	// Each replica has its own pool, as in production. (Sharing one small pool would let
+	// the lock waiters hold every connection while the lock holder waits for one.)
+	migrators := make([]*db.Migrator, n)
+	for i := range n {
+		p, err := db.Open(context.Background(), pool.Config().ConnString())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(p.Close)
+		migrators[i] = db.NewMigrator(p, migrations.FS, quietLogger())
+	}
 	errs := make([]error, n)
 	var wg sync.WaitGroup
 	for i := range n {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errs[i] = db.NewMigrator(pool, migrations.FS, quietLogger()).Up(context.Background())
+			errs[i] = migrators[i].Up(context.Background())
 		}()
 	}
 	wg.Wait()
