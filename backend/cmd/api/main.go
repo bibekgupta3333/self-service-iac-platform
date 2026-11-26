@@ -88,6 +88,7 @@ func run() error {
 			httpapi.NewRequestHandler(requestSvc),
 			httpapi.NewAuditHandler(audit.NewVerifier(pool)),
 		},
+		InternalHandlers: []httpapi.RouteRegistrar{httpapi.NewLockHandler(lockSvc)},
 	})
 
 	return serve(ctx, newServer(cfg.HTTPAddr, handler), cfg.ShutdownTimeout)
