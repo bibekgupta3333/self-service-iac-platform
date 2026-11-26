@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/ttl"
 )
 
 // Prefix is the namespace for every environment variable read by the backend.
@@ -80,6 +82,8 @@ type Config struct {
 	LocalStackEndpoint string
 	// WorkerPollInterval is how often the in-process worker polls the outbox when idle.
 	WorkerPollInterval time.Duration
+	// TTL bounds the lifetime of ephemeral stacks and their extensions (WBS 8.4).
+	TTL ttl.Policy
 }
 
 // DefaultOIDCIssuer is the GitHub Actions token issuer.
@@ -164,6 +168,8 @@ func Load(lookup LookupFunc) (Config, error) {
 	errs = append(errs, err)
 	cfg.Publisher = pub
 	cfg.WorkerPollInterval, err = loadWorker(get)
+	errs = append(errs, err)
+	cfg.TTL, err = loadTTL(get)
 	errs = append(errs, err)
 	if cfg.WebhookSecret != "" && len(cfg.WebhookSecret) < MinWebhookSecretLen {
 		errs = append(errs, fmt.Errorf("%sGITHUB_WEBHOOK_SECRET must be at least %d characters", Prefix, MinWebhookSecretLen))
