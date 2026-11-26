@@ -61,6 +61,17 @@ type Config struct {
 	InternalToken string
 	// OIDC configures GitHub Actions OIDC verification; disabled when Audience is empty.
 	OIDC OIDCConfig
+	// Publisher selects how generated stacks reach the repository (WBS 4.8).
+	Publisher PublisherConfig
+	// WebhookSecret verifies X-Hub-Signature-256 on POST /v1/webhooks/github. Empty means
+	// the endpoint rejects every delivery.
+	WebhookSecret string
+	// PortalURL is the developer portal base URL, used for request links in PR bodies.
+	PortalURL string
+	// LocalStackEndpoint is rendered into generated provider blocks (ADR-0009).
+	LocalStackEndpoint string
+	// WorkerPollInterval is how often the in-process worker polls the outbox when idle.
+	WorkerPollInterval time.Duration
 }
 
 // DefaultOIDCIssuer is the GitHub Actions token issuer.
@@ -119,10 +130,21 @@ func Load(lookup LookupFunc) (Config, error) {
 		DevUserLogin:       get("DEV_USER", "local-dev"),
 		ModuleRepoURL:      get("MODULE_REPO_URL", "https://github.com/bibekgupta3333/self-service-iac-platform.git"),
 		InternalToken:      get("INTERNAL_TOKEN", ""),
+		WebhookSecret:      get("GITHUB_WEBHOOK_SECRET", ""),
+		PortalURL:          strings.TrimRight(get("PORTAL_URL", "http://localhost:3000"), "/"),
+		LocalStackEndpoint: get("LOCALSTACK_ENDPOINT", "http://localhost:4566"),
 	}
 	oidc, err := loadOIDC(get)
 	errs = append(errs, err)
 	cfg.OIDC = oidc
+	pub, err := loadPublisher(get)
+	errs = append(errs, err)
+	cfg.Publisher = pub
+	cfg.WorkerPollInterval, err = loadWorker(get)
+	errs = append(errs, err)
+	if cfg.WebhookSecret != "" && len(cfg.WebhookSecret) < MinWebhookSecretLen {
+		errs = append(errs, fmt.Errorf("%sGITHUB_WEBHOOK_SECRET must be at least %d characters", Prefix, MinWebhookSecretLen))
+	}
 	switch cfg.AuthMode {
 	case AuthModeDev:
 		if cfg.AppDBPassword == "" {
