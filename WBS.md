@@ -70,7 +70,7 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 | [x] 4.2 | DB migrations for all core tables (incl. hash-chained `audit_events`, `locks`) | 1.5 | 4.1 |
 | [x] 4.3 | Catalog service: `GET /v1/catalog/modules`, `/versions`, index endpoint | 1 | 4.2 |
 | [x] 4.4 | Auth: GitHub OAuth login, sessions, team sync → memberships, RBAC matrix and route policies (opaque server-side sessions instead of JWT; OAuth app registration needs 2.5; periodic sync waits for 4.8) | 2 | 4.2 |
-| [x] 4.5 | Request service + state machine + `Idempotency-Key` (create, update and destroy kinds; `upgrade`, `reconcile` and `rollback` are rejected until their own tasks; update and destroy only work end to end once 5.3's apply reports set the stack status, because nothing moves a stack out of `provisioning` yet) | 2 | 4.2 |
+| [x] 4.5 | Request service + state machine + `Idempotency-Key` (create, update and destroy kinds; `upgrade`, `reconcile` and `rollback` are rejected until their own tasks; update and destroy work end to end now that 5.3's apply reports move the stack out of `provisioning` to `active`/`failed`/`destroyed`) | 2 | 4.2 |
 | [x] 4.6 | Platform per-stack lock, fencing token, queueing (`queued_behind`) (admin force-release on `/v1/stacks/{id}/lock` lands with RBAC, 4.4) | 1 | 4.5 |
 | [x] 4.7 | Config generator: templates (main/backend/versions/providers/`iacp.stack.json`), golden tests | 2 | 4.3 |
 | [~] 4.8 | GitHub App client: branch, commit, PR, labels, workflow_dispatch (Publisher port, `githubapp` and `localgit` adapters, publish on create via the outbox done; live use waits for the App registration in 2.5) | 1.5 | 2.5 |
@@ -85,11 +85,11 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 |----|------|-----|-----|
 | [x] 5.1 | Changed-stack detection + matrix (`tools/stack_pipeline detect`) | 0.5 | 2.1 |
 | [~] 5.2 | `pr-validate.yml`: fmt, validate, plan (plan role), PR comment, report to API (LocalStack instead of the plan role per ADR-0009; API report wired through the 5.6 action in a separate `report` job, skipped until `IACP_API_URL` is set; SARIF (6.1) and Infracost (5.5) wired) | 2 | 2.4, 4.10 |
-| [~] 5.3 | `apply.yml`: lock claim, re-plan, plan-hash verify, apply (apply role), outputs report (LocalStack and hermetic local state per ADR-0009; `GET /v1/internal/requests/by-path` now supplies the lock target and approved plan hash, so `IACP_API_URL` can be set; request and stack status transitions from the apply reports are still pending; apply role and GitHub Environments pending) | 2 | 5.2, 4.6 |
+| [x] 5.3 | `apply.yml`: lock claim, re-plan, plan-hash verify, apply, outputs report, and the backend half: apply reports move the request (`approved → applying → applied`/`failed`) and the stack (`provisioning`/`updating`/`destroying` → `active`/`destroyed`/`failed`, outputs, `last_applied_sha`, `health`), release the lock and promote the next waiter in the same transaction, with every transition audited (LocalStack and hermetic local state per ADR-0009; `GET /v1/internal/requests/by-path` supplies the lock target and approved plan hash. The `iacp-apply` role and GitHub Environments stay with 6.6; automatic retry of transient failures stays with 8.7) | 2 | 5.2, 4.6 |
 | [x] 5.4 | Concurrency groups per stack, caching (providers, plugins; `apply.yml` shares pr-validate's provider cache key and runs no TFLint) | 0.5 | 5.2 |
 | [x] 5.5 | Infracost step + PR comment (informational in MVP; per-stack `infracost breakdown` in its own `cost` job on a redacted plan, folded into the summary and sticky comment by `stack_pipeline fold-cost`; skipped with a notice until the `INFRACOST_ENABLED` repository variable is `true` and the `INFRACOST_API_KEY` secret is set (only the `cost` job reads the secret), no `diff` against `main` yet) | 1 | 5.2 |
 | [x] 5.6 | Reusable `.github/actions/iacp-report` composite action | 1 | 5.2 |
-| [~] 5.7 | Smoke tests / Terratest post-apply for ephemeral envs (`stack_pipeline smoke` in `apply.yml`: declared outputs, `iacp:*` tags in state and live on LocalStack, reported as stage `smoke`; Terratest stays in `ci.yml` on every PR. Pending: `health=degraded` instead of a failed run needs backend support, and ephemeral stacks arrive with WBS 8.4) | 1 | 3.5, 5.3 |
+| [~] 5.7 | Smoke tests / Terratest post-apply for ephemeral envs (`stack_pipeline smoke` in `apply.yml`: declared outputs, `iacp:*` tags in state and live on LocalStack, reported as stage `smoke`; Terratest stays in `ci.yml` on every PR. The backend now treats a failed smoke test as `health=degraded` on an `active` stack instead of a failed run. Ephemeral stacks exist since WBS 8.4) | 1 | 3.5, 5.3 |
 
 ## 6. Security & policy — M3
 | ID | Task | Est | Dep |
@@ -112,7 +112,7 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 | [~] 7.4 | Request detail: status timeline (SSE), plan summary, cost, PR/run links — live SSE timeline (resume, backoff, polling fallback), history and PR link done; plan summary, cost and run links are open until the API returns them | 1.5 | 4.9 |
 | [x] 7.5 | Stacks list per team, outputs view — requests list and detail, stacks list (filters, keyset paging) and stack detail with status, health, outputs and latest request | 1 | 4.5 |
 | [~] 7.6 | Destroy flow: `plan -destroy` → apply → cleanup PR → `destroyed` (the `destroy` request and its empty marked root are done under 4.5; portal update and destroy flows with typed-name confirmation, error handling and role-aware actions are done; the cleanup PR and the `destroyed` transition are open) | 1.5 | 5.3 |
-| [ ] 7.7 | Observability: CloudWatch dashboard (lead time, failure rate), alarms | 1 | 4.1 |
+| [~] 7.7 | Observability: CloudWatch dashboard (lead time, failure rate), alarms — stack `development/platform/observability` (dashboard, SNS topic, six queue alarms, [runbook](docs/09-observability.md)) done; the request, apply, lock and stack metrics, a CloudWatch exporter, and custom-metric alarms (failure rate, stuck lock, needs a `monitoring` minor release) are open | 1 | 4.1 |
 
 **MVP exit:** the end-to-end demo script in `docs/08-mvp-roadmap.md` §4 passes in development and staging.
 
@@ -122,7 +122,7 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 | [~] 8.1 | Packages: `ecs-service` (+ALB, ECR), `postgres`, `redis`, `vpc`, `monitoring` — all five v1.0.0 done: `ecs-service`, `postgres` and `redis` with offline `terraform test` suites (LocalStack community has no ECS/RDS/ElastiCache), `vpc` and `monitoring` with LocalStack `terraform test` and Terratest; release tags and real-account verification remain | 12 | 3.6 |
 | [ ] 8.2 | Version upgrades: upgrade-path API + UI, major migration flow | 3 | 4.3, 7.2 |
 | [ ] 8.3 | Drift detection: `drift.yml` 02:00 UTC, `drift_reports`, reconcile/codify/ignore | 3 | 5.2 |
-| [ ] 8.4 | TTL: EventBridge Scheduler, 24 h warning, auto destroy (non-prod), extend, hourly reaper | 3 | 7.6 |
+| [~] 8.4 | TTL: EventBridge Scheduler, 24 h warning, auto destroy (non-prod), extend, hourly reaper (done: TTL model and bounds, `POST /v1/stacks/{id}/ttl/extend`, `/v1/internal/ttl/*`, hourly `ttl-reaper.yml` with `tools/ttl_reaper`, destroy request as the platform bot, `ttl.warned`/`ttl.extended`/`ttl.expired` audit and a PR comment with the GitHub App. Pending: bot auto-approval of the destroy PR (`ttl_auto_approve.rego`), EventBridge Scheduler (needs a real account), notifications beyond the PR comment) | 3 | 7.6 |
 | [ ] 8.5 | Budgets: `budget.rego`, Infracost gating, admin override, Cost Explorer actuals | 3 | 5.5, 6.2 |
 | [~] 8.6 | RBAC: viewer/developer/maintainer/admin, production gates, matrix tests (matrix, route policies, denial audit and tests done; production gates wait for 8.8) | 2 | 4.4 |
 | [x] 8.7 | Recovery: failure classifier, retry (max 2, backoff), rollback PR, break-glass `state-surgery` (platform lock for surgery and S3 `restore_version` wait for the S3 backend) | 3 | 5.3 |

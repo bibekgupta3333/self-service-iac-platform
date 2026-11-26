@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -61,6 +60,10 @@ func DefaultPolicies() PolicyTable {
 		// Rollback is the matrix's "retry failed apply / rollback" (maintainer+); the service
 		// checks it again against the caller's role in the stack's team.
 		"POST /v1/stacks/{id}/rollback": {Action: rbac.ActionRetry, Scope: ScopeAnyTeam},
+		// Extending an ephemeral stack's TTL needs the stack.extend_ttl role (developer) in the
+		// stack's team; the service checks it against the stack's team and environment and
+		// answers 404 for a stack of another team.
+		"POST /v1/stacks/{id}/ttl/extend": {Action: rbac.ActionTTLExtend, Scope: ScopeAnyTeam},
 		// The catalog is shared reference data (docs/03: "any").
 		"GET /v1/catalog/modules":                           {Action: rbac.ActionRead, Scope: ScopeAuthenticated},
 		"GET /v1/catalog/modules/{name}":                    {Action: rbac.ActionRead, Scope: ScopeAuthenticated},
@@ -140,7 +143,7 @@ func routePattern(r *http.Request) string {
 // auditDenials records an rbac.denied audit event for every 403 an authenticated user
 // receives from the handlers below it (route policies and service-level role checks alike).
 // An audit failure is logged and never changes the response.
-func auditDenials(rec EventRecorder, lim *ratelimit.Limiter) func(http.Handler) http.Handler {
+func auditDenials(rec EventRecorder, lim *ratelimit.Limiter, proxies TrustedProxies) func(http.Handler) http.Handler {
 	if lim == nil {
 		lim = ratelimit.New(DenialAuditPerMinute, time.Minute, 10_000, platform.SystemClock{})
 	}
@@ -173,7 +176,7 @@ func auditDenials(rec EventRecorder, lim *ratelimit.Limiter) func(http.Handler) 
 			delete(suppressed, actor)
 			mu.Unlock()
 			route := r.Method + " " + routePattern(r)
-			ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+			ip := proxies.Request(r)
 			body := map[string]any{"method": r.Method, "route": routePattern(r), "login": p.Login}
 			if skipped > 0 {
 				body["suppressed_before"] = skipped

@@ -69,14 +69,14 @@ type okPinger struct{ err error }
 
 func (p okPinger) Ping(context.Context) error { return p.err }
 
-var devPrincipal = identity.Principal{UserID: uuid.MustParse("4b1f2a0e-8a71-4b0c-9c1e-2f1d5e6a7b80"), Login: "dev", Type: identity.ActorUser}
+var devPrincipal = identity.Principal{UserID: uuid.MustParse("4b1f2a0e-8a71-4b0c-9c1e-2f1d5e6a7b80"), Login: "dev", Type: identity.ActorUser, PlatformAdmin: true}
 
 var releaseBot = identity.Principal{Login: "internal-token", Type: identity.ActorGitHubActions}
 
 const testInternalToken = "test-internal-token-0123456789abcdef"
 
 func newTestRouter(cat CatalogService, ready Pinger, extra ...RouteRegistrar) http.Handler {
-	return NewRouter(Deps{
+	return NewRouter(Deps{Policies: testPolicies(), Roles: noRoles{},
 		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		Auth:     DevAuthenticator{Principal: devPrincipal},
 		Internal: NewTokenAuthenticator(testInternalToken, releaseBot),
@@ -222,7 +222,7 @@ func (failingAuth) Authenticate(*http.Request) (identity.Principal, error) {
 }
 
 func TestUnauthenticated(t *testing.T) {
-	h := NewRouter(Deps{Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: failingAuth{},
+	h := NewRouter(Deps{Policies: testPolicies(), Roles: noRoles{}, Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: failingAuth{},
 		Ready: okPinger{}, Catalog: NewCatalogHandler(&fakeCatalog{})})
 	rec := do(t, h, "GET", "/v1/catalog/modules", "")
 	if rec.Code != 401 || !strings.Contains(rec.Body.String(), `"code":"unauthenticated"`) {

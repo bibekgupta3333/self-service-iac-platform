@@ -46,6 +46,8 @@ Every lifecycle action is a **request** (`requests.kind` ∈ `create`, `update`,
 | `destroyed` | Destroy applied; directory removed; row retained for audit |
 | `failed` | Last apply failed; stack is locked to remediation requests only |
 
+The `apply.yml` run reports drive these statuses (docs/03 §4.1, WBS 5.3): the first accepted report of an approved request moves the stack to `provisioning`, `updating` or `destroying`; a succeeded run sets `active` (or `destroyed` after a destroy) and records outputs and the applied commit; a failed or cancelled run sets `failed`. Each move is audited as `stack.status_changed`. A failed post-apply smoke test does not fail the apply: the stack is `active` with `health = degraded` (shown by `GET /v1/stacks/{id}`), the team is told, and nothing is destroyed automatically. The platform lock stays visible on the stack (`lock`): the API releases it when the request ends, and if `apply.yml` reports that its own release failed, that is audited with the lock's current state and never changes the request, so an operator sees whether the stack is still held and until when.
+
 Transitions are implemented in `backend/internal/request/fsm.go` as a table-driven state machine; every transition is a single Postgres transaction that updates the row, writes `audit_events`, and enqueues follow-up work (outbox pattern → SQS).
 
 ---
@@ -306,21 +308,22 @@ High-severity drift in production pages the on-call and auto-opens a `reconcile`
 
 **Design.**
 
-- A stack is ephemeral when created with `ttl` (e.g. `72h`, max `30d`); only allowed in `development` and `staging`. `stacks.expires_at` and `iacp.stack.json.expires_at` are set; resources get tag `iacp:expires-at`.
-- On create/extend, the worker upserts two EventBridge Scheduler one-time schedules in group `iacp-ttl`:
-  - `ttl-warn-<stack_id>` at `expires_at - 24h` → worker sends warning (email/Slack/portal banner) with "Extend" link.
-  - `ttl-expire-<stack_id>` at `expires_at` → worker opens a `destroy` request (`requested_by = system:ttl-reaper`).
-- The destroy request follows the normal path: PR sets `desired_state: "absent"`, `pr-validate.yml` runs `plan -destroy`, the platform bot auto-approves it in non-production environments only (policy `ttl_auto_approve.rego` allows auto-approval only when `requested_by = system:ttl-reaper` and env ≠ production), `apply.yml` destroys, then a cleanup PR removes the directory.
-- `ttl-reaper.yml` hourly backstop reconciles any expired stack the scheduler missed ([05-automation-pipeline.md](05-automation-pipeline.md#45-ttl-reaperyml)).
+- A stack is ephemeral when created with `"ephemeral": {"ttl_hours": N}` (omit `ttl_hours` for the default). Only non-production: `production` is never ephemeral, whatever its environment row says (a trigger forces `allow_ephemeral = false`, the request service refuses it, and the reaper and teardown re-check it). `stacks.is_ephemeral`, `ttl_hours` (as requested), `expires_at` and `ttl_extended_hours` are set at create time, so the clock runs from the moment the request is created, not from the first apply: a create PR that waits a day for review has a day less to live. Bounds, in hours, come from `IACP_TTL_MIN_HOURS` (1), `IACP_TTL_MAX_HOURS` (720, i.e. 30 days), `IACP_TTL_DEFAULT_HOURS` (72) and the environment's own `max_ttl_hours`; a request outside them is `422 policy_preflight_denied` with a pointer on `/ephemeral/ttl_hours`. The TTL is not rendered into `iacp.stack.json` or tagged on resources yet; the database is the source of truth.
+- The pure rules live in `backend/internal/ttl`: `Policy.Resolve` (bounds), `ExpiresAt`, `PhaseAt` (none, warn from 24 h before expiry until warned, teardown from expiry), `Eligible` (ephemeral, not production, not already destroying), `Policy.Extend` and `Classify`.
+- **Warning.** `ttl-reaper.yml` ([05 section 4.5](05-automation-pipeline.md#45-ttl-reaperyml)) finds stacks in their 24 h window and calls `POST /v1/internal/ttl/{id}/warn`. In one transaction the API sets `ttl_warned_at`, appends the audit event `ttl.warned`, and (when the publisher can comment, i.e. the GitHub App) enqueues a `ttl.warning` outbox job; the worker then comments on the pull request of the stack's newest request with the expiry and the extend link. The local publisher has no pull request API, so there the warning is audit-only. Email, Slack and a portal banner arrive with notifications. The comment is a convenience: if it fails the job is retried and, when exhausted, dies without affecting the TTL.
+- **Teardown.** For each expired stack `POST /v1/internal/ttl/{id}/teardown` opens a `destroy` request owned by the platform bot (`iacp-bot`, justification `ttl expired`, audit `ttl.expired`). Under the stack row lock it re-checks that the stack is ephemeral, not production and past `expires_at`, and that no destroy is already open, so a stale list, a late extension or a second reaper run cannot destroy a live stack or open two requests. The request takes the stack lock or queues behind the holder, then follows the normal path: PR with the emptied root, `pr-validate.yml` runs `plan -destroy`, `apply.yml` destroys. An update or apply in flight (`stack_busy`) makes the reaper skip the stack until the next hour, with a `::warning::` in the run so a stack that stays busy is not skipped silently.
+- **Backoff and blocking.** A TTL destroy (bot-opened, justification `ttl expired`) that ends `failed`, `rejected` or `cancelled` is not reopened every hour. `ttl.Policy.Backoff`, a pure rule shared by the due list and the teardown route, leaves the stack alone for `IACP_TTL_RETRY_BACKOFF_HOURS` (24) after the newest unsuccessful attempt (`409 ttl_backoff`, skipped by the reaper). After `IACP_TTL_MAX_ATTEMPTS` (3) unsuccessful attempts in the current cycle the stack is blocked: nothing more is opened, the audit event `ttl.blocked` is recorded once, and it is listed in the `blocked` group of the due answer, apart from the teardowns, so that every run reports it with a `::warning::` without spending the per-run teardown cap (`409 ttl_blocked` if teardown is called anyway) until a person extends the stack (a new expiry starts a new cycle) or fixes the failure and destroys it by hand. Attempts created before the current `expires_at` belong to an earlier cycle and do not count.
+- **Auto-approval** of the destroy PR in non-production (`ttl_auto_approve.rego`: `requested_by = system:ttl-reaper` and env is not production) is not part of this change; until it lands a maintainer approves the destroy PR like any other. See [08-mvp-roadmap.md](08-mvp-roadmap.md).
+- The hourly reaper is the only driver for now. EventBridge Scheduler one-time schedules (`ttl-warn-<id>`, `ttl-expire-<id>`) are the eventual primary path, with the reaper as backstop; they need a real AWS account and arrive with multi-account support.
 
-**Extend:** `PATCH /v1/stacks/{id}` (developer+) updates `expires_at` (max total lifetime 30 days unless admin), rewrites `iacp.stack.json` via a small PR (auto-merged; no infra change, plan is empty) and reschedules both schedules.
+**Extend:** `POST /v1/stacks/{id}/ttl/extend` with `{"hours": N}` (developer or higher in the stack's team, the `stack.extend_ttl` matrix action). The hours are added to `expires_at` (or to now if it already passed but no destroy is open). Limits: one extension is within the min/max bounds, a stack's extensions total at most `IACP_TTL_MAX_EXTENSION_HOURS` (168 by default, admins included: the cap is a cost control), and the lifetime stays within the environment's `max_ttl_hours`. It clears `ttl_warned_at`, so the stack is warned again before the new expiry, only when the new expiry lies more than 24 h away; an extension that leaves it inside the window keeps the warning already sent. It appends `ttl.extended`. It changes no generated file: there is no pull request. A stack with an open destroy request cannot be extended (`409 destroy_pending`); cancel the destroy first.
 
-**Data touched.** `stacks.expires_at`, `stacks.ttl_extended_count`, EventBridge schedules, `requests (kind='destroy')`, `audit_events` (`ttl.warned`, `ttl.extended`, `ttl.expired`).
+**Data touched.** `stacks.expires_at`, `ttl_hours`, `ttl_extended_hours`, `ttl_warned_at`, `requests (kind='destroy')`, `outbox (ttl.warning)`, `audit_events` (`ttl.warned`, `ttl.extended`, `ttl.expired`, `ttl.blocked`).
 
 **Edge cases.**
 - *Destroy blocked by non-empty bucket*: ephemeral stacks set `force_destroy = true` on S3 (permitted outside production). Deletion-protected RDS in ephemeral stacks is disallowed by policy.
 - *Other stacks depend on it*: TTL destroy is blocked; owners of dependents are notified and the TTL warning includes the dependent list (see §7).
-- *Destroy fails*: stack `failed`; transient errors follow the normal 2-retry policy (§5), the hourly reaper re-checks once, then pages the owning team; resources keep `iacp:expires-at` so a weekly cost report lists them.
+- *Destroy fails*: stack `failed`; transient errors follow the normal 2-retry policy (§5); a `failed` stack is still eligible for a destroy request, so the next reaper run opens a new one (the failed destroy is terminal, so it no longer counts as open); paging the owning team arrives with notifications; resources keep `iacp:expires-at` so a weekly cost report lists them.
 - *Stack in-flight request at expiry*: destroy request is queued behind it via the platform lock.
 
 **Runbook — orphaned ephemeral resources.**
@@ -419,6 +422,31 @@ A single writer (`audit.Writer`, serialised with `pg_advisory_xact_lock`) comput
 **Edge cases.** Webhook replays are deduplicated by `X-GitHub-Delivery` before auditing; clock skew is irrelevant to ordering (ordered by `id`); PII is limited to GitHub login and email.
 
 **Runbook — "who changed this resource?"** Search portal audit by ARN → resolves `iacp:stack-id` tag → stack timeline (requests, approvers, runs) → CloudTrail query filtered on session name `apply-<run_id>-*`. If CloudTrail shows a principal other than `iacp-apply`, it is out-of-band drift (§4).
+
+### 8.1 Following a request live (status stream and resume)
+
+The request page follows a request's lifecycle through `GET /v1/requests/{id}/events`, a Server-Sent Events feed of its status changes taken from `audit_events`. Every `status` frame's id is the audit seq, so it is also a resume point.
+
+**Server** (`backend/internal/httpapi/events.go`):
+- A first connection starts with a `snapshot` of the current status. With `Last-Event-ID: <seq>` the stream replays every change after that seq instead (`0` replays the whole history).
+- It reads the audit log every 2 s and sends a `: heartbeat` comment every 15 s.
+- It ends with an `end` frame once the request is terminal, also on a resume at the terminal seq. Without `end` it closes after a 5-minute lifetime, on server shutdown, or when the caller's session is revoked, expires or is disabled.
+- Access is checked on every poll. Each user may hold 5 open streams and the server 500 (`429 too_many_streams`).
+
+**Portal** (`StatusStream` and `RequestPoller` in `portal/src/lib/events/`):
+
+| Situation | Behaviour |
+|---|---|
+| First connection | Sends `Last-Event-ID: 0`, builds the history from the replay, then follows live. |
+| Stream closes without `end` (lifetime cap, dropped connection) | Reconnects with the id of the last frame received. A connection that delivered something starts the next attempt at least 3 s after it started, so a stream that sends one event per connection cannot loop tightly. |
+| No bytes at all (not even a heartbeat) for 45 s | The idle watchdog aborts the connection and reconnects the same way. |
+| Counting failures | A connection is a failure if it closed within 10 s without delivering an event (a heartbeat alone does not count, so a proxy that sends one heartbeat and closes ends in the polling fallback), or if the watchdog cut it with nothing received. Failed attempts back off exponentially with equal jitter (1 s base, 30 s cap). A healthy idle stream is followed for as long as the page is open. |
+| 5 failures in a row, or a `200` that is not `text/event-stream` (its body is cancelled) | Falls back to polling `GET /v1/requests/{id}` every 5 s. Polling pauses while the tab is hidden, reads at once when it is shown, and stops at a terminal status. |
+| `401`, `403`, `404` (stream or poll), `429` (stream) | Stops and says why; retrying cannot help. |
+| Oversized frame (over 256 KiB) | Dropped; the parser resynchronises at the next blank line. |
+| Repeated frame after a resume | Ignored: changes at or below the highest seq seen are duplicates. |
+| Request already terminal when the page loads | No stream and no polling; the page shows the outcome. The audit log keeps the full history. |
+| `end` | The stream stops for good. |
 
 ---
 

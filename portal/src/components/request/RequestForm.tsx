@@ -280,8 +280,9 @@ export function RequestForm({ version, update, client, newIdempotencyKey, onCrea
           </dl>
           {update.initialInputs === null && (
             <p role="note" className="rounded-md bg-amber-50 p-3 text-sm text-amber-900">
-              The platform did not return this stack&apos;s current settings, so the form starts from the module defaults,
-              not from what is deployed. Check every value; anything you leave out falls back to its default.
+              No request carrying this stack&apos;s spec was found, so the resources it really contains are unknown. The
+              form starts from the module defaults, not from what is deployed. Check every value; anything you leave out
+              falls back to its default.
             </p>
           )}
           {update.initialInputs !== null && unknownInputs(adapter.fields, update.initialInputs).length > 0 && (

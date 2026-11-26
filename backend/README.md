@@ -29,7 +29,8 @@ internal/
   locks/                 per-stack platform lock: pure Decide/NextInQueue/CheckToken, Service, Postgres repo
   auth/                  GitHub Actions OIDC: claim allow-lists (pure), JWKSCache, Verifier, jti ReplayGuard
   budgets/               policy context for conftest: pure ParseStackPath / BuildContext, Service, Postgres repo
-  runs/                  POST /v1/runs reports: pure Validate/CheckProvenance/RunStatus, Service, Postgres repo
+  runs/                  POST /v1/runs reports: pure Validate/CheckProvenance/RunStatus/Progress, Service (drives apply reports into requests and stacks), Postgres repo
+  retention/             hourly sweeper for processed outbox jobs and webhook delivery ids
   generator/             pure Terraform renderer + BackendStrategy / ProviderStrategy, golden files
   publish/               Publisher port; pure BranchName/ParseBranch, ValidatePath/StackFiles, PR Title/Body/Labels
     githubapp/           GitHub App adapter: App JWT → cached installation token, git data API commit, PRs, labels, dispatch
@@ -82,6 +83,9 @@ together apply each migration once.
 | `0007_budgets.sql` | `budgets` (team monthly budget, optionally per environment; `spent_usd` 0 until cost data lands in WBS 8.5) |
 | `0008_webhooks_outbox.sql` | `webhook_deliveries` (delivery id primary key) and `outbox` (job queue: `available_at`, `locked_until`, `attempts`, `dedupe_key`); `iacp_app` gets SELECT/INSERT/DELETE and SELECT/INSERT/UPDATE respectively |
 | `0016_apply_failures.sql` | `failure_class` enum and `apply_failures` (one classified failure per failed run of a request, the recovery decision, the retry number and its dispatch state `scheduled → dispatching → dispatched / dispatch_failed / skipped`); `iacp_app` gets SELECT/INSERT/UPDATE, never DELETE |
+| `0009_sessions.sql` | `sessions` (hashed opaque session ids, absolute and idle expiry, revocation) |
+| `0010_outbox_purge.sql` | `purge_processed_outbox(cutoff, max_rows)`, a `SECURITY DEFINER` function that deletes only processed outbox rows; `iacp_app` gets `EXECUTE` on it and still no `DELETE` on `outbox` |
+| `0011_stack_health.sql` | `stacks.health` (`unknown`, `healthy`, `degraded`), set from the post-apply smoke test |
 
 ### Database roles
 
@@ -140,6 +144,11 @@ dependencies) arrive with their features.
 | `IACP_PORTAL_URL` | `http://localhost:3000` | portal base URL for the request link in PR bodies |
 | `IACP_LOCALSTACK_ENDPOINT` | `http://localhost:4566` | endpoint rendered into generated provider blocks |
 | `IACP_WORKER_POLL_INTERVAL` | `1s` | idle poll interval of the in-process outbox worker (50ms–1m) |
+| `IACP_TTL_MIN_HOURS`, `IACP_TTL_MAX_HOURS`, `IACP_TTL_DEFAULT_HOURS` | `1`, `720`, `72` | bounds of an ephemeral stack's TTL in hours (a request's `ephemeral.ttl_hours`, and each extension); omitted `ttl_hours` takes the default; the environment's `max_ttl_hours` is a further ceiling |
+| `IACP_TTL_MAX_EXTENSION_HOURS` | `168` | most hours extensions may add to one stack in total |
+| `IACP_TTL_RETRY_BACKOFF_HOURS`, `IACP_TTL_MAX_ATTEMPTS` | `24`, `3` | after a failed, rejected or cancelled TTL destroy, wait this many hours before the next one (0 disables); after this many unsuccessful attempts the stack is blocked (`ttl.blocked` audit, 0 means no limit). `IACP_TTL_MAX_HOURS` is capped at 8760 |
+| `IACP_QUEUE_RETENTION` | `168h` | how long processed outbox jobs and webhook delivery ids are kept before the hourly sweeper deletes them (at least `1h`); pending and dead jobs are never deleted |
+| `IACP_TRUSTED_PROXIES` | unset (trust nobody) | comma-separated CIDRs or addresses of reverse proxies whose `X-Forwarded-For` is believed; see "Client address" below |
 
 The publisher settings fail closed: `github` with any App setting missing, App settings with
 another publisher, `local` without `IACP_LOCAL_GIT_REPO`, or an unknown value stop the API at startup.
@@ -198,6 +207,10 @@ docker run --rm -p 127.0.0.1:8080:8080 -e IACP_AUTH_MODE=dev \
 | GET | `/v1/requests?team=&status=&kind=&mine=true&limit=&cursor=` | keyset pagination, `next_cursor` |
 | GET | `/v1/requests/{id}` | includes the normalised `spec`, `allowed_events`, `github {branch, pr_number, pr_url}` once published and `failure_reason` |
 | GET | `/v1/requests/{id}/events` | Server-Sent Events: `snapshot`, then `status` per change (event id = audit seq, resume with `Last-Event-ID`), `: heartbeat` every 15 s, `end` when terminal (also on a resume at the terminal seq), closed after 5 min or on server shutdown; ended when its session is revoked; at most 5 streams per user and 500 in total (`429`); `404` for a caller with no role in the team |
+| GET | `/v1/internal/ttl/due` | machine auth (`ttl` class: `ttl-reaper.yml` on main, `schedule`/`workflow_dispatch`); `{"warnings":[…], "teardowns":[…]}` of stacks due now (never production) |
+| POST | `/v1/internal/ttl/{id}/warn` | machine auth (`ttl`); records the 24 h warning once (`200 {"warned":true}`, or `false` with a `reason` when not due) |
+| POST | `/v1/internal/ttl/{id}/teardown` | machine auth (`ttl`); opens a destroy request as the platform bot for an expired stack: `202 {"status":"created","request_id","short_id"}`, `200 {"status":"already_pending"}`, `409 ttl_not_due` / `not_ephemeral` / `production_not_ephemeral` / `stack_busy` |
+| POST | `/v1/stacks/{id}/ttl/extend` | `{"hours"}`; developer role in the stack's team (`stack.extend_ttl`); `200 {"stack_id","expires_at","extended_hours","remaining_extension_hours"}`; `409 ttl_extension_cap` / `ttl_environment_max` / `destroy_pending` / `not_ephemeral`; `404` for a stack in another team |
 | GET | `/v1/stacks?team=&env=&status=&limit=&cursor=` | stacks of the caller's teams (platform admins: all), newest first, keyset pagination |
 | GET | `/v1/stacks/{id}` | `status`, `outputs`, `latest_request` and links; `404` when the caller may not see it |
 | POST | `/v1/webhooks/github` | GitHub App webhook, authenticated by `X-Hub-Signature-256` only; `202 {"accepted","duplicate","enqueued"}`, `401 invalid_signature` / `webhook_not_configured`, `400` for a bad delivery id, event header or payload |
@@ -230,8 +243,9 @@ Authentication goes through `httpapi.Authenticator`, and it fails closed:
   `apply.yml` / `ttl-reaper.yml` on main via `push`, `workflow_dispatch` or `schedule`; catalog
   indexing only `module-release.yml` on main via `push` or `workflow_dispatch`; `/v1/runs` the four
   pipeline workflows; the budget context `pr-validate.yml` and `apply.yml` via `pull_request`,
-  `push` or `workflow_dispatch`. A pull-request token therefore only reaches `/v1/runs` and the
-  read-only budget context.
+  `push` or `workflow_dispatch`; the TTL routes (`/v1/internal/ttl/*`) only `ttl-reaper.yml` on
+  main via `schedule` or `workflow_dispatch`. A pull-request token therefore only reaches
+  `/v1/runs` and the read-only budget context.
 - `POST /v1/runs` then checks provenance per pipeline: the report's `run_id`/`run_attempt` and
   `head_sha` must be the token's run and `sha` (`403 run_mismatch`); `validate` must come from
   `pr-validate.yml` on `pull_request`, `apply` from `apply.yml` on main via `push` /
@@ -328,6 +342,31 @@ environment-specific row wins over a team-wide one; `null` when no budget is set
 `now`. Everything is derived from the path, so it works for a stack a PR is about to create.
 `422 invalid_stack_path`, `404 environment_not_found`.
 
+## TTL and ephemeral stacks (docs/06 §6, WBS 8.4)
+
+`internal/ttl` holds the rules and the use cases; `requests` opens the destroy request.
+
+- **Model.** A create with `"ephemeral": {"ttl_hours": N}` (0 or omitted: `IACP_TTL_DEFAULT_HOURS`) on a
+  non-production environment stores `stacks.is_ephemeral`, `ttl_hours` and `expires_at`. Production never
+  allows it: `ttl.EnvRule.AllowsEphemeral` is false for it, and migration `0012` has a trigger and a CHECK
+  that keep `environments.allow_ephemeral` false there. The spec stored on the request records the TTL
+  actually applied, so a retried publish renders the same thing.
+- **Pure core** (`ttl.go`, no I/O): `Policy.Resolve`, `ExpiresAt`, `PhaseAt` (none, warn from 24 h before,
+  teardown from expiry), `Eligible`, `Policy.Extend`, `Classify`, `WarningComment`.
+- **Services** (`ttl.Service`, ports `Repository`/`Store`, PostgreSQL adapter): `Extend` (role check in
+  the stack's team, cap, audit `ttl.extended`, clears the warning), `Due`, `Warn` (audit `ttl.warned`,
+  `ttl_warned_at`, `ttl.warning` outbox job when comments are enabled), `Teardown`.
+- **Backoff** (`ttl.Policy.Backoff`, pure): `OpenTTLDestroy` and the due list skip a stack whose last TTL destroy ended unsuccessfully within the backoff window (`409 ttl_backoff`) and block it after the attempt limit (`409 ttl_blocked`, audit `ttl.blocked` once per expiry). Blocked stacks are returned in a separate `blocked` list by `GET /v1/internal/ttl/due`, never among the teardowns, and candidates are paged (200 per page, 5000 scanned at most) before the filter, so neither the tool's per-run cap nor the row limit can be used up by stacks that cannot be torn down.
+- **Teardown** calls `requests.Service.OpenTTLDestroy` as the `iacp-bot` system user. In one transaction,
+  under the stack row lock, it re-checks ephemeral, not production and past `expires_at`, skips a stack with a
+  destroy already open, refuses a busy stack, then records the destroy request (justification `ttl expired`,
+  stack lock or queue, publish job) and the audit event `ttl.expired`.
+- **PR comment.** `publish.Commenter` is an optional publisher capability; the GitHub App implements it
+  (`POST /issues/{n}/comments`, sent once), the local publisher does not, and then warnings are audit-only
+  (logged at startup). `ttl.WarningNotifier` is the outbox handler for `ttl.warning`.
+- The caller is the hourly `.github/workflows/ttl-reaper.yml` through `tools/ttl_reaper`; there is no
+  in-process scheduler, so a stopped API simply catches up on the next run.
+
 ## Stack lock (docs/06 §3)
 
 `locks.Service` keeps one lease per stack in `locks` with a fencing token from `lock_fencing_seq`
@@ -341,15 +380,76 @@ environment-specific row wins over a team-wide one; `null` when no budget is set
   shows two racing acquirers always produce one `granted` and one `queued`.
 - Lease: 7 days (`locks.DefaultLease`), renewed by heartbeat. An expired lease can be taken over,
   but the oldest queued request gets it first, so newcomers never jump the queue.
-- Release checks the holder and token (`409 stale_fencing_token` otherwise), deletes the lease and,
+- Release checks the holder and token (`409 stale_fencing_token` otherwise; `200` with
+  `already_released: true` when the request is already terminal, so apply.yml's own release step
+  stays green after the API released the lease with the final transition), deletes the lease and,
   in the same transaction, grants the oldest waiter a new token and re-points the rest of the queue
   at it. `lock.acquired`, `lock.queued` and `lock.released` are written to the audit log; a waiter
   polling again behind the same holder writes nothing.
 - `POST /v1/runs` checks `fencing_token` against the current lease (`FOR SHARE`) for `validate`,
   `apply` and `ttl_destroy` reports, so a late callback from a superseded run is rejected. It
-  locks the `stacks` row (`FOR KEY SHARE`) first, the same order as lock operations, so reports
-  cannot deadlock with release (`TestRecordAndReleaseDoNotDeadlock`). A report for a stage the run
-  already recorded replaces that entry, so retries are idempotent; a run keeps at most 32 stages.
+  locks the `stacks` row (`FOR UPDATE`) first, the same order as lock operations, so reports
+  cannot deadlock with release (`TestRecordAndReleaseDoNotDeadlock`) and the reports of one stack
+  apply one at a time. A report for a stage the run already recorded replaces that entry, so
+  retries are idempotent; a run keeps at most 32 stages.
+
+## Apply reports drive request and stack status (WBS 5.3)
+
+`apply` reports (`apply.yml`: stages `plan`, `apply` or `destroy`, `smoke`, `summary`, `release`)
+now move the request and its stack in the report's transaction. `runs.Progress` (pure) turns the
+run's stages into an `requests.ApplyProgress`; `requests.DecideApply` (pure) turns that and the
+request and stack status into events and a stack change; `requests.Service.ApplyIn` applies them
+with `Request.Fire`, audits each (`request.transitioned`, `stack.status_changed`,
+`stack.destroyed`) and, for a terminal request, releases the lock and promotes the next waiter
+through the same `commit` path as every other terminal transition (the promotion hook schedules
+its publish job).
+
+| Report | Effect |
+|--------|--------|
+| first accepted apply report of an `approved` request | `approved → applying` (`apply_started`); stack → `provisioning` / `updating` / `destroying` |
+| `summary` passed, or failed only because `smoke` failed (mutating stage passed) | run `succeeded`; request `applied`; stack `active` (`destroyed` + `destroyed_at` after a destroy), outputs, `last_applied_sha`, `health` (`healthy`, `degraded`, `unknown`) |
+| `plan`, `apply`/`destroy` or `summary` failed or cancelled | run `failed`/`cancelled`; request `failed` with `failure_reason` (`plan_failed`, `apply_failed`, `apply_incomplete`, `apply_cancelled`) and `failure_detail`; stack `failed` |
+| `smoke` failed | does not finish the run; the summary decides (above) |
+| `release` failed | stored in the run, audited as `request.lock_release_failed` with the lock's current state; never changes the request |
+| `validate` pipeline | stored only; a passed validation is not an approval |
+
+A request that is not `approved`, `applying` or terminal answers `409 request_not_applying` and
+nothing is recorded. For a terminal request the API has already released the lease, so a report
+carrying the request's own token (a replayed `summary`, a failed `release`) is accepted only for a
+run already recorded for that request, audited and ignored (`request.run_report_ignored`), without
+rewriting the finished run's stages (the advisory `release` stage excepted); any other token, or a
+new run id or attempt, is `409 stale_fencing_token`. All
+existing checks stay: fencing token against the current lease, `head_sha` equal to the token's
+`sha`, per-pipeline workflow file and event allow-lists, and run id and attempt equality.
+
+Known limits: automatic retry of a transient failure (`apply_retry`, at most 2) needs a re-dispatch
+the platform does not have yet, so a transient failure fails the request like any other; the
+`ttl_destroy` and `drift` pipelines are stored but do not move requests or stacks yet (WBS 7.x,
+8.x); a run whose workflow dies before sending `summary` leaves the request `applying` and holding the lock; nothing acts on lease expiry yet, so an operator must intervene (follow-up, WBS 8.7).
+
+## Client address and trusted proxies
+
+Rate limiting of `GET /v1/auth/login` and the `actor_ip` of audit events use the client address.
+By default that is the TCP peer. With `IACP_TRUSTED_PROXIES` set, and only when the immediate peer
+is inside one of the listed CIDRs, the address is the right-most `X-Forwarded-For` entry that is not
+itself a trusted proxy (each hop appends the address it received from, so entries further left are
+whatever the client claimed). A header that is missing, made only of trusted hops or contains a
+non-address entry falls back to the peer. Without the setting the portal proxy's address is the key,
+so the limiter is effectively one global bucket. `GET /metrics` keeps its own, stricter rule
+(`X-Forwarded-For` disables the loopback exemption).
+
+Portal side (not part of this change): `portal/`'s proxy must forward the browser's address as
+`X-Forwarded-For` (append the connecting address to any incoming value rather than replacing it)
+for the login route and the audited routes, and its header allow-list must let that header through.
+Until then the limiter and the audit trail see the proxy.
+
+## Retention
+
+A sweeper (`internal/retention`, started in `main` like the OIDC replay sweeper) runs hourly and
+deletes webhook delivery ids and processed outbox jobs older than `IACP_QUEUE_RETENTION`, in
+batches of 1,000. `iacp_app` still cannot `DELETE` from `outbox`: the purge goes through the
+`purge_processed_outbox` function (migration `0010`, `SECURITY DEFINER`, only rows with
+`processed_at` set, cutoff clamped in SQL to at least one hour old), so a compromised API cannot erase pending or dead jobs.
 
 Request ids look like `req-` followed by 10 Crockford base32 characters, so collisions on the
 unique `short_id` are negligible.

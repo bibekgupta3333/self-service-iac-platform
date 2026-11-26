@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/db"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/ttl"
 )
 
 // stackTarget loads a stack with its team and environment names; lockClause is
@@ -19,12 +21,13 @@ func stackTarget(ctx context.Context, q db.DBTX, id uuid.UUID, lockClause string
 	var t StackTarget
 	var status string
 	err := q.QueryRow(ctx, `
-		SELECT s.id, s.team_id, t.slug, s.environment_id, e.name::text, s.name, s.path, s.region, s.status::text
+		SELECT s.id, s.team_id, t.slug, s.environment_id, e.name::text, s.name, s.path, s.region, s.status::text,
+		       s.is_ephemeral, s.expires_at
 		FROM stacks s
 		JOIN teams t ON t.id = s.team_id
 		JOIN environments e ON e.id = s.environment_id
 		WHERE s.id = $1 `+lockClause, id).
-		Scan(&t.ID, &t.TeamID, &t.TeamSlug, &t.EnvironmentID, &t.Environment, &t.Name, &t.Path, &t.Region, &status)
+		Scan(&t.ID, &t.TeamID, &t.TeamSlug, &t.EnvironmentID, &t.Environment, &t.Name, &t.Path, &t.Region, &status, &t.IsEphemeral, &t.ExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return StackTarget{}, &apperr.Error{Kind: apperr.KindNotFound, Code: "stack_not_found",
 			Message: fmt.Sprintf("stack %s not found", id)}
@@ -77,4 +80,59 @@ func (s *pgStore) OpenRequestKinds(ctx context.Context, stackID uuid.UUID) ([]Ki
 		return nil, fmt.Errorf("scan open requests: %w", err)
 	}
 	return kinds, nil
+}
+
+// TTLDestroyAttempts implements Store.
+func (s *pgStore) TTLDestroyAttempts(ctx context.Context, stackID uuid.UUID) ([]ttl.Attempt, error) {
+	rows, err := s.tx.Query(ctx, ttl.AttemptsSQL("r.stack_id = $1"), stackID)
+	if err != nil {
+		return nil, fmt.Errorf("query ttl destroy attempts: %w", err)
+	}
+	out, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (ttl.Attempt, error) {
+		var id uuid.UUID
+		var a ttl.Attempt
+		err := row.Scan(&id, &a.CreatedAt, &a.EndedAt, &a.Outcome)
+		return a, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("scan ttl destroy attempts: %w", err)
+	}
+	return out, nil
+}
+
+// TTLBlockedSince implements Store.
+func (s *pgStore) TTLBlockedSince(ctx context.Context, stackID uuid.UUID, since time.Time) (bool, error) {
+	var found bool
+	err := s.tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM audit_events WHERE action = 'ttl.blocked'
+		AND subject_type = 'stack' AND subject_id = $1 AND occurred_at >= $2)`, stackID.String(), since).Scan(&found)
+	return found, err
+}
+
+// UpdateStackApplied implements Store. The stacks row is locked by the caller, so the
+// status guard only catches a caller that skipped the lock.
+func (s *pgStore) UpdateStackApplied(ctx context.Context, w StackApplied) error {
+	var outputs, lastReq any
+	if w.Outputs != nil {
+		outputs = []byte(w.Outputs)
+	}
+	if w.Applied {
+		lastReq = w.RequestID
+	}
+	tag, err := s.tx.Exec(ctx, `UPDATE stacks SET
+			status = $3::stack_status,
+			health = coalesce(nullif($4, ''), health),
+			outputs = coalesce($5::jsonb, outputs),
+			last_applied_sha = coalesce(nullif($6, ''), last_applied_sha),
+			last_applied_request_id = coalesce($7::uuid, last_applied_request_id),
+			destroyed_at = CASE WHEN $3::text = 'destroyed' THEN $8 ELSE destroyed_at END,
+			updated_at = $8
+		WHERE id = $1 AND status = $2::stack_status`,
+		w.ID, string(w.From), string(w.To), string(w.Health), outputs, w.CommitSHA, lastReq, w.At)
+	if err != nil {
+		return fmt.Errorf("update stack: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return apperr.Conflict("concurrent_update", fmt.Sprintf("stack %s is no longer %s", w.ID, w.From))
+	}
+	return nil
 }

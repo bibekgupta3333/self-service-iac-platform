@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -118,6 +119,8 @@ type StackTarget struct {
 	Path          string
 	Region        string
 	Status        StackStatus
+	IsEphemeral   bool
+	ExpiresAt     *time.Time // set for an ephemeral stack
 }
 
 // TeamFromStackPath returns the team slug of a stack path (environments/<env>/<team>/<stack>);

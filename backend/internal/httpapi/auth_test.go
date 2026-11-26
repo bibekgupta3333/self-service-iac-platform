@@ -66,6 +66,8 @@ func (fakeTokenVerifier) Verify(_ context.Context, raw string) (auth.Claims, err
 		return workflowClaims("apply.yml", "refs/heads/main", "push"), nil
 	case "release.jwt.token":
 		return workflowClaims("module-release.yml", "refs/heads/main", "push"), nil
+	case "reaper.jwt.token":
+		return workflowClaims("ttl-reaper.yml", "refs/heads/main", "schedule"), nil
 	case "prvalidate.jwt.token":
 		return workflowClaims("pr-validate.yml", "refs/pull/812/merge", "pull_request"), nil
 	case "surgery.jwt.token":
@@ -113,7 +115,7 @@ func TestOIDCAuthenticator(t *testing.T) {
 
 func TestOIDCOrTokenOnInternalRoutes(t *testing.T) {
 	cat := &fakeCatalog{versions: []catalog.ModuleVersion{sqsVersion()}}
-	h := NewRouter(Deps{Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DevAuthenticator{Principal: devPrincipal},
+	h := NewRouter(Deps{Policies: testPolicies(), Roles: noRoles{}, Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DevAuthenticator{Principal: devPrincipal},
 		Internal: AnyAuthenticator{NewOIDCAuthenticator(fakeTokenVerifier{}), NewTokenAuthenticator(testInternalToken, releaseBot)},
 		Ready:    okPinger{}, Catalog: NewCatalogHandler(cat)})
 	body := `{"module":"sqs","version":"1.3.0"}`
@@ -164,7 +166,7 @@ func TestInternalRoutesUseTheInternalAuthenticator(t *testing.T) {
 	}
 
 	// No internal authenticator configured: deny.
-	denied := NewRouter(Deps{Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DevAuthenticator{Principal: devPrincipal},
+	denied := NewRouter(Deps{Policies: testPolicies(), Roles: noRoles{}, Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DevAuthenticator{Principal: devPrincipal},
 		Ready: okPinger{}, Catalog: NewCatalogHandler(cat)})
 	if rec := do(t, denied, "POST", "/v1/internal/catalog/index", body, "Authorization", "Bearer "+testInternalToken); rec.Code != 401 {
 		t.Fatalf("index with no internal authenticator = %d, want 401", rec.Code)
@@ -192,7 +194,7 @@ func TestMethodNotAllowedIsProblemWithAllow(t *testing.T) {
 }
 
 func TestUnauthenticatedBodyIsGeneric(t *testing.T) {
-	h := NewRouter(Deps{Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: failingAuth{},
+	h := NewRouter(Deps{Policies: testPolicies(), Roles: noRoles{}, Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: failingAuth{},
 		Ready: okPinger{}, Catalog: NewCatalogHandler(&fakeCatalog{})})
 	rec := do(t, h, "GET", "/v1/catalog/modules", "")
 	if rec.Code != 401 || strings.Contains(rec.Body.String(), "missing session") ||

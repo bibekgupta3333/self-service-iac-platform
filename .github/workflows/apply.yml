@@ -424,8 +424,9 @@ jobs:
       # Post-apply smoke test (WBS 5.7) against this job's LocalStack: every declared
       # output has a value, and every tagged resource carries the iacp:* tags, both
       # in state and read back with read-only AWS CLI calls. A failure fails the job
-      # and is reported as stage "smoke", which finishes the run as failed. State
-      # stays in the job and is deleted after the check.
+      # and is reported as stage "smoke". The API does not fail the run for it: when
+      # the apply passed, the run ends succeeded and the stack active with health
+      # degraded. State stays in the job and is deleted after the check.
       - id: smoke
         name: Smoke test
         if: steps.outputs.outcome == 'success'
@@ -470,9 +471,11 @@ jobs:
           error-message: ${{ steps.smoke.outcome == 'failure' && 'post-apply smoke test failed; see the job summary' || '' }}
           fencing-token: ${{ steps.lock.outputs.fencing_token }}
 
-      # A passed "summary" finishes the run as succeeded; anything else as failed.
-      # It must be sent while the lock is still held: the API rejects any report
-      # whose fencing token is no longer current, so it cannot follow the release.
+      # A passed "summary" finishes the run as succeeded (so does a failed one that
+      # only the smoke test explains); anything else as failed. The API releases the
+      # lock itself with the final transition, so the release step below normally
+      # finds it already gone. Reports that follow are accepted with the request's
+      # own token, recorded and ignored.
       # A failed release is reported as its own stage below and fails the job.
       - name: Report summary
         if: always() && steps.lock.outcome == 'success'
@@ -505,8 +508,9 @@ jobs:
           if [ -n "$FENCING_TOKEN" ]; then args+=(--fencing-token "$FENCING_TOKEN"); fi
           python -m tools.stack_pipeline lock release "${args[@]}"
 
-      # The lock is still held when the release failed, so this report is accepted.
-      # A finished run keeps its status in the API; the stage records the failure.
+      # Accepted whether or not the lease is still held (the request's own token).
+      # A finished run keeps its status in the API; the failure is audited and shown
+      # on the stack's lock, and never changes the request.
       - name: Report the failed release
         if: always() && steps.release.outcome == 'failure' && steps.lock.outputs.claimed == 'true'
         uses: ./.github/actions/iacp-report

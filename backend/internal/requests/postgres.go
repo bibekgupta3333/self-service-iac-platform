@@ -246,9 +246,9 @@ func (s *pgStore) StackExists(ctx context.Context, envID, teamID uuid.UUID, name
 
 func (s *pgStore) InsertStack(ctx context.Context, st NewStack) error {
 	_, err := s.tx.Exec(ctx, `INSERT INTO stacks (id, team_id, environment_id, name, path, state_key, region,
-			is_ephemeral, expires_at, created_by, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)`,
-		st.ID, st.TeamID, st.EnvironmentID, st.Name, st.Path, st.StateKey, st.Region, st.IsEphemeral, st.ExpiresAt,
+			is_ephemeral, ttl_hours, expires_at, created_by, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12)`,
+		st.ID, st.TeamID, st.EnvironmentID, st.Name, st.Path, st.StateKey, st.Region, st.IsEphemeral, st.TTLHours, st.ExpiresAt,
 		st.CreatedBy, st.CreatedAt)
 	if db.IsUniqueViolation(err, "") {
 		return apperr.Conflict("stack_exists", "stack "+st.Path+" already exists")

@@ -35,12 +35,14 @@ func TestEveryUserRouteHasAPolicy(t *testing.T) {
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DenyAuthenticator{}, Ready: okPinger{},
 		Catalog: NewCatalogHandler(nil),
 		Public: []RouteRegistrar{NewRequestHandler(nil, nil), NewRequestEventsHandler(nil, StreamOptions{}),
-			NewStackHandler(nil), NewRollbackHandler(nil), NewAuditHandler(nil), ah},
-		PublicHandlers:   []RouteRegistrar{ah.Public()},
-		InternalHandlers: []RouteRegistrar{NewLockHandler(nil), NewBudgetContextHandler(nil), NewSurgeryHandler(nil)},
+			NewStackHandler(nil), NewRollbackHandler(nil), NewTTLHandler(nil), NewAuditHandler(nil), ah},
+		PublicHandlers: []RouteRegistrar{ah.Public()},
+		InternalHandlers: []RouteRegistrar{NewLockHandler(nil), NewBudgetContextHandler(nil), NewTTLReaperHandler(nil),
+			NewSurgeryHandler(nil)},
 		PipelineHandlers: []RouteRegistrar{NewRunHandler(nil)},
 		Webhooks:         []RouteRegistrar{NewWebhookHandler(nil, "", nil)},
 		Policies:         DefaultPolicies(),
+		Roles:            noRoles{},
 	})
 	mux, ok := h.(chi.Routes)
 	if !ok {
