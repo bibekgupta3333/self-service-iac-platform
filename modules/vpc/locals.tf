@@ -16,7 +16,11 @@ locals {
   })
 
   # Zones in subnet order: explicit names, or the first az_count available ones.
-  azs = length(var.availability_zones) > 0 ? var.availability_zones : slice(sort(data.aws_availability_zones.available.names), 0, var.az_count)
+  # The data source's postconditions reject an az_count the region cannot meet;
+  # min() only stops slice() from failing first with a bare index error.
+  azs = length(var.availability_zones) > 0 ? var.availability_zones : slice(
+    sort(data.aws_availability_zones.available.names), 0, min(var.az_count, length(data.aws_availability_zones.available.names)),
+  )
 
   # Subnet plan: zone i gets block i (public) and block i + half (private) of
   # the VPC split into 2^subnet_newbits blocks. Pure function of the inputs.

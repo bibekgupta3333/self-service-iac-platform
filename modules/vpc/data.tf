@@ -13,4 +13,16 @@ data "aws_availability_zones" "available" {
     name   = "opt-in-status"
     values = ["opt-in-not-required"]
   }
+
+  lifecycle {
+    postcondition {
+      condition     = length(var.availability_zones) > 0 || length(self.names) >= var.az_count
+      error_message = "az_count is ${var.az_count}, but region ${data.aws_region.current.name} has only ${length(self.names)} available zones (${join(", ", sort(self.names))}). Lower az_count or list availability_zones."
+    }
+
+    postcondition {
+      condition     = alltrue([for az in var.availability_zones : contains(self.names, az)])
+      error_message = "availability_zones lists zones that are not available in region ${data.aws_region.current.name} (available: ${join(", ", sort(self.names))})."
+    }
+  }
 }
