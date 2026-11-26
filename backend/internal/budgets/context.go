@@ -125,9 +125,9 @@ type Context struct {
 
 // BudgetDTO is the budget as the policies see it.
 type BudgetDTO struct {
-	Month     string  `json:"month"` // YYYY-MM
-	LimitUSD  float64 `json:"limit_usd"`
-	SpentUSD  float64 `json:"spent_usd"`
+	Month    string  `json:"month"` // YYYY-MM
+	LimitUSD float64 `json:"limit_usd"`
+	SpentUSD float64 `json:"spent_usd"`
 	// ActualUSD is the recorded actual spend, null until one is recorded. The budget policy
 	// counts the larger of spent_usd and actual_usd as already used.
 	ActualUSD *float64 `json:"actual_usd"`
