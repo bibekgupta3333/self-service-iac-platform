@@ -99,6 +99,8 @@ async function forward(req: Request, ctx: Context): Promise<Response> {
       body: body as BodyInit | undefined,
       cache: "no-store",
       redirect: "manual",
+      // The event stream is open-ended: when the browser closes it, the upstream call must end too.
+      ...(decision.stream ? { signal: req.signal } : {}),
     });
   } catch (err) {
     console.error("api proxy: upstream unreachable", err);
@@ -121,6 +123,8 @@ async function forward(req: Request, ctx: Context): Promise<Response> {
     await upstream.arrayBuffer().catch(() => undefined);
     return new Response(null, { status: upstream.status, headers });
   }
+  // The body is handed through as it arrives (nothing here reads it), which is what keeps an
+  // event stream live. Nothing may add a Content-Length or buffer it.
   return new Response(upstream.body, { status: upstream.status, headers });
 }
 

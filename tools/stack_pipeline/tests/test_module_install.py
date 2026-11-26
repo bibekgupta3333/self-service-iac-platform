@@ -159,6 +159,26 @@ class TestCli:
         assert main(["--repo-root", str(tmp_path), "verify-modules", str(root), "--repo-url", REPO]) == 1
         assert "does not match its pin" in capsys.readouterr().err
 
+    def test_verify_modules_destroy_root_without_a_manifest(self, tmp_path, make_stack, capsys):
+        """terraform init writes no modules.json for a root with no module calls (a destroy root)."""
+        root = make_stack("development", "platform", "smoke", modules={}, lifecycle="destroy")
+        assert main(["--repo-root", str(tmp_path), "verify-modules", str(root)]) == 0
+        assert "nothing to verify" in capsys.readouterr().out
+
+    def test_verify_modules_empty_manifest_for_a_destroy_root(self, tmp_path, make_stack):
+        root = make_stack("development", "platform", "smoke", modules={}, lifecycle="destroy")
+        (root / ".terraform" / "modules").mkdir(parents=True)
+        (root / ".terraform" / "modules" / "modules.json").write_text(json.dumps({"Modules": [{"Key": "", "Source": "", "Dir": "."}]}))
+        assert main(["--repo-root", str(tmp_path), "verify-modules", str(root)]) == 0
+
+    def test_verify_modules_destroy_root_with_a_stray_module_call_still_fails(self, tmp_path, make_stack, capsys):
+        root = make_stack("development", "platform", "smoke", modules={}, lifecycle="destroy")
+        (root / ".terraform" / "modules").mkdir(parents=True)
+        manifest = {"Modules": [{"Key": "", "Source": "", "Dir": "."}, {"Key": "bucket", "Source": SRC, "Dir": "x"}]}
+        (root / ".terraform" / "modules" / "modules.json").write_text(json.dumps(manifest))
+        assert main(["--repo-root", str(tmp_path), "verify-modules", str(root)]) == 1
+        assert "has no pin" in capsys.readouterr().err
+
     def test_verify_modules_without_init(self, tmp_path, make_stack, capsys):
         root = make_stack("development", "platform", "smoke")
         assert main(["--repo-root", str(tmp_path), "verify-modules", str(root)]) == 1

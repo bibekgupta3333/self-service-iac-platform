@@ -14,6 +14,7 @@ token for every request, retries included; the shared internal token is reused.
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -26,6 +27,7 @@ from .report import api_base_url, describe_problem
 
 RUNS_PATH = "/v1/runs"
 LOCK_PATH = "/v1/internal/stacks/{stack_id}/lock"
+REQUEST_BY_PATH = "/v1/internal/requests/by-path"
 USER_AGENT = "iacp-stack-pipeline"
 
 
@@ -182,6 +184,22 @@ class LockClaim:
     expires_at: str
 
 
+STACK_PATH_RE = re.compile(r"^environments/(development|staging|production)/[a-z][a-z0-9-]{1,38}/[a-z][a-z0-9-]{1,40}$")
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+@dataclass(frozen=True)
+class ResolvedRequest:
+    """The request that holds a stack's lock and is ready to apply (GET /v1/internal/requests/by-path)."""
+
+    stack_id: str
+    request_id: str
+    request_short_id: str
+    fencing_token: int
+    approved_plan_hash: str  # empty when the API recorded none
+
+
 class IacpApiClient:
     """Calls the Platform API's machine endpoints. ``credential`` is a fixed Credential
     or a callable returning one per request (FreshCredentials for single-use OIDC tokens)."""
@@ -212,6 +230,45 @@ class IacpApiClient:
     def post_run(self, payload: Mapping[str, Any]) -> ApiResponse:
         """POST /v1/runs. Retried on 429/5xx: a stage report replaces its earlier entry."""
         return self._call("POST", RUNS_PATH, payload, ok=(200,))
+
+    def resolve_request(self, stack_path: str, head_sha: str = "", *, merge_wait_attempts: int = 6,
+                        merge_wait_seconds: float = 5.0) -> ResolvedRequest:
+        """GET /v1/internal/requests/by-path: the stack id, the request holding the stack lock
+        and its approved plan hash. Fails closed: a 404 (no stack, no lock) or 409 (holder not
+        approved, merge commit mismatch) is an ApiError, and so is an answer that does not
+        carry valid ids. ``merge_not_recorded`` (the pr_merged webhook has not recorded the
+        merge yet) is the one retryable answer: it is asked again up to ``merge_wait_attempts``
+        times, ``merge_wait_seconds`` apart, then raised."""
+        for attempt in range(1, max(1, merge_wait_attempts) + 1):
+            try:
+                return self._resolve_request(stack_path, head_sha)
+            except ApiError as exc:
+                if exc.code != "merge_not_recorded" or attempt >= max(1, merge_wait_attempts):
+                    raise
+                self._sleep(merge_wait_seconds)
+        raise AssertionError("unreachable")
+
+    def _resolve_request(self, stack_path: str, head_sha: str) -> ResolvedRequest:
+        if not STACK_PATH_RE.match(stack_path):
+            raise ValueError(f"stack path must look like environments/<env>/<team>/<stack>, got {stack_path!r}")
+        query = {"stack_path": stack_path}
+        if head_sha:
+            if not SHA_RE.match(head_sha):
+                raise ValueError(f"head sha must be 40 lowercase hex characters, got {head_sha!r}")
+            query["head_sha"] = head_sha
+        body = self._call("GET", REQUEST_BY_PATH + "?" + urllib.parse.urlencode(query), None, ok=(200,)).body
+        token = body.get("fencing_token")
+        approved = body.get("approved_plan_hash") or ""
+        try:
+            stack_id, request_id = _uuid(str(body.get("stack_id", "")), "stack id"), _uuid(str(body.get("request_id", "")), "request id")
+        except ValueError as exc:
+            raise ApiError(f"GET {REQUEST_BY_PATH}: response carried no valid id: {exc}") from None
+        if not isinstance(token, int) or isinstance(token, bool) or token <= 0:
+            raise ApiError(f"GET {REQUEST_BY_PATH}: response carried no fencing token")
+        if approved and not HASH_RE.match(str(approved)):
+            raise ApiError(f"GET {REQUEST_BY_PATH}: response carried a malformed plan hash")
+        return ResolvedRequest(stack_id=stack_id, request_id=request_id, request_short_id=str(body.get("request_short_id", "")),
+                               fencing_token=token, approved_plan_hash=str(approved))
 
     def acquire_lock(self, stack_id: str, request_id: str) -> LockClaim:
         """POST /v1/internal/stacks/{id}/lock. ``granted`` or ``held`` is the caller's lock;

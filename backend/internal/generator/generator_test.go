@@ -104,6 +104,65 @@ func TestGolden(t *testing.T) {
 	}
 }
 
+func destroySpec() StackSpec {
+	return StackSpec{
+		Environment: "development", Team: "payments", Stack: "order-events", Region: "us-east-1",
+		CostCenter: "cc-4102", RequestID: "req-9d2k4m", FencingToken: 48300,
+		TerraformVersion: "~> 1.13", AWSProviderVersion: "~> 5.80", Lifecycle: LifecycleDestroy,
+	}
+}
+
+func TestGoldenDestroy(t *testing.T) {
+	files, err := New(repoURL, LocalBackend{}, LocalStackProvider{Endpoint: "http://localhost:4566"}).Render(destroySpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(files[FileMain]), "module ") {
+		t.Fatalf("a destroy must render no module blocks:\n%s", files[FileMain])
+	}
+	if !strings.Contains(string(files[FileStackJSON]), `"lifecycle": "destroy"`) {
+		t.Fatalf("destroy marker missing:\n%s", files[FileStackJSON])
+	}
+	dir := filepath.Join("testdata", "golden", "destroy")
+	for _, name := range files.Names() {
+		path := filepath.Join(dir, name)
+		if *update {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, files[name], 0o644); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		golden, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read golden (run go test ./internal/generator -update): %v", err)
+		}
+		if !bytes.Equal(golden, files[name]) {
+			t.Errorf("%s differs from golden file %s:\n--- got ---\n%s\n--- want ---\n%s", name, path, files[name], golden)
+		}
+	}
+}
+
+func TestLifecycleValidation(t *testing.T) {
+	g := New(repoURL, LocalBackend{}, LocalStackProvider{Endpoint: "http://localhost:4566"})
+	bad := orderEventsSpec()
+	bad.Lifecycle = "gone"
+	if _, err := g.Render(bad); err == nil || !strings.Contains(err.Error(), "unknown lifecycle") {
+		t.Fatalf("unknown lifecycle: %v", err)
+	}
+	withResources := orderEventsSpec()
+	withResources.Lifecycle = LifecycleDestroy
+	if _, err := g.Render(withResources); err == nil || !strings.Contains(err.Error(), "no resources") {
+		t.Fatalf("destroy with resources: %v", err)
+	}
+	files, err := g.Render(orderEventsSpec())
+	if err != nil || !strings.Contains(string(files[FileStackJSON]), `"lifecycle": "active"`) {
+		t.Fatalf("the default lifecycle is active: %v", err)
+	}
+}
+
 func TestRenderIsDeterministic(t *testing.T) {
 	g := New(repoURL, LocalBackend{}, LocalStackProvider{Endpoint: "http://localhost:4566"})
 	a, err := g.Render(orderEventsSpec())

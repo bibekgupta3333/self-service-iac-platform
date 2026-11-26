@@ -70,7 +70,7 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 | [x] 4.2 | DB migrations for all core tables (incl. hash-chained `audit_events`, `locks`) | 1.5 | 4.1 |
 | [x] 4.3 | Catalog service: `GET /v1/catalog/modules`, `/versions`, index endpoint | 1 | 4.2 |
 | [x] 4.4 | Auth: GitHub OAuth login, sessions, team sync → memberships, RBAC matrix and route policies (opaque server-side sessions instead of JWT; OAuth app registration needs 2.5; periodic sync waits for 4.8) | 2 | 4.2 |
-| [~] 4.5 | Request service + state machine + `Idempotency-Key` (create kind done) | 2 | 4.2 |
+| [x] 4.5 | Request service + state machine + `Idempotency-Key` (create, update and destroy kinds; `upgrade`, `reconcile` and `rollback` are rejected until their own tasks; update and destroy only work end to end once 5.3's apply reports set the stack status, because nothing moves a stack out of `provisioning` yet) | 2 | 4.2 |
 | [x] 4.6 | Platform per-stack lock, fencing token, queueing (`queued_behind`) (admin force-release on `/v1/stacks/{id}/lock` lands with RBAC, 4.4) | 1 | 4.5 |
 | [x] 4.7 | Config generator: templates (main/backend/versions/providers/`iacp.stack.json`), golden tests | 2 | 4.3 |
 | [~] 4.8 | GitHub App client: branch, commit, PR, labels, workflow_dispatch (Publisher port, `githubapp` and `localgit` adapters, publish on create via the outbox done; live use waits for the App registration in 2.5) | 1.5 | 2.5 |
@@ -85,7 +85,7 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 |----|------|-----|-----|
 | [x] 5.1 | Changed-stack detection + matrix (`tools/stack_pipeline detect`) | 0.5 | 2.1 |
 | [~] 5.2 | `pr-validate.yml`: fmt, validate, plan (plan role), PR comment, report to API (LocalStack instead of the plan role per ADR-0009; API report wired through the 5.6 action in a separate `report` job, skipped until `IACP_API_URL` is set; SARIF (6.1) and Infracost (5.5) wired) | 2 | 2.4, 4.10 |
-| [~] 5.3 | `apply.yml`: lock claim, re-plan, plan-hash verify, apply (apply role), outputs report (LocalStack and hermetic local state per ADR-0009; `GET /v1/internal/requests/by-path` (lock target and approved plan hash) is a prerequisite for setting `IACP_API_URL`, otherwise every push fails closed; apply role and GitHub Environments pending) | 2 | 5.2, 4.6 |
+| [~] 5.3 | `apply.yml`: lock claim, re-plan, plan-hash verify, apply (apply role), outputs report (LocalStack and hermetic local state per ADR-0009; `GET /v1/internal/requests/by-path` now supplies the lock target and approved plan hash, so `IACP_API_URL` can be set; request and stack status transitions from the apply reports are still pending; apply role and GitHub Environments pending) | 2 | 5.2, 4.6 |
 | [x] 5.4 | Concurrency groups per stack, caching (providers, plugins; `apply.yml` shares pr-validate's provider cache key and runs no TFLint) | 0.5 | 5.2 |
 | [x] 5.5 | Infracost step + PR comment (informational in MVP; per-stack `infracost breakdown` in its own `cost` job on a redacted plan, folded into the summary and sticky comment by `stack_pipeline fold-cost`; skipped with a notice until the `INFRACOST_API_KEY` secret is set, no `diff` against `main` yet) | 1 | 5.2 |
 | [x] 5.6 | Reusable `.github/actions/iacp-report` composite action | 1 | 5.2 |
@@ -109,9 +109,9 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 | [~] 7.1 | Next.js scaffold, GitHub login, API client, layout — scaffold, `ApiClient`, proxy, layout and `AuthProvider` with the dev-mode provider done; GitHub login (`GithubAuthProvider`, proxy login flow) done with 4.4, pending a registered OAuth app | 1.5 | 4.4 |
 | [~] 7.2 | Catalog list + module detail (README, versions, inputs) — list, versions, outputs and generated inputs table done; README rendering needs the README in the catalog API | 1.5 | 4.3 |
 | [~] 7.3 | Dynamic request form from JSON Schema (typed renderer, [ADR-0011](docs/adr/0011-portal-form-renderer.md)), preview diff — form, payload-bound Idempotency-Key, field-mapped errors and request preview done; generated-files diff needs `POST /v1/requests/{id}/preview` | 2 | 4.7 |
-| [ ] 7.4 | Request detail: status timeline (SSE), plan summary, cost, PR/run links | 1.5 | 4.9 |
-| [~] 7.5 | Stacks list per team, outputs view — requests list and detail with status timeline (polling) done; stacks and outputs need `GET /v1/stacks` | 1 | 4.5 |
-| [ ] 7.6 | Destroy flow: `plan -destroy` → apply → cleanup PR → `destroyed` | 1.5 | 5.3 |
+| [ ] 7.4 | Request detail: status timeline (SSE), plan summary, cost, PR/run links (backend `GET /v1/requests/{id}/events` is ready; the portal side is open) | 1.5 | 4.9 |
+| [~] 7.5 | Stacks list per team, outputs view — requests list and detail with status timeline (polling) done; `GET /v1/stacks` and `GET /v1/stacks/{id}` (status, outputs) are available; the portal views are open | 1 | 4.5 |
+| [ ] 7.6 | Destroy flow: `plan -destroy` → apply → cleanup PR → `destroyed` (the `destroy` request and its empty marked root are done under 4.5; the cleanup PR and the `destroyed` transition are open) | 1.5 | 5.3 |
 | [ ] 7.7 | Observability: CloudWatch dashboard (lead time, failure rate), alarms | 1 | 4.1 |
 
 **MVP exit:** the end-to-end demo script in `docs/08-mvp-roadmap.md` §4 passes in development and staging.

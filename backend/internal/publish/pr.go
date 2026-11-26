@@ -81,6 +81,11 @@ func Body(c PRContext) string {
 		fmt.Fprintf(&b, "| `%s` | %s | %s |\n", cell(r.Name), cell(r.Module), cell(r.Version))
 	}
 
+	if c.Kind == "destroy" {
+		b.WriteString("\n> **Destroy.** Merging this change destroys every resource of this stack. " +
+			"The generated root holds no modules and is marked `lifecycle: destroy`; review the plan below.\n")
+	}
+
 	if j := strings.TrimSpace(c.Justification); j != "" {
 		b.WriteString("\n### Justification\n\n")
 		for _, line := range strings.Split(escapeHTML(j), "\n") {

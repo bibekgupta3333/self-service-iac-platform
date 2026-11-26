@@ -31,6 +31,7 @@ type memState struct {
 	requests []*Request
 	events   []audit.Event
 	jobs     []outbox.Message
+	status   map[uuid.UUID]StackStatus // stack status; a stack not listed is provisioning
 }
 
 type memKey struct {
@@ -76,7 +77,7 @@ func TestNewIdempotencyClaim(t *testing.T) {
 }
 
 func newMemRepo() *memRepo {
-	return &memRepo{state: memState{keys: map[string]memKey{}}}
+	return &memRepo{state: memState{keys: map[string]memKey{}, status: map[uuid.UUID]StackStatus{}}}
 }
 
 func (s memState) clone() memState {
@@ -84,8 +85,12 @@ func (s memState) clone() memState {
 	for k, v := range s.keys {
 		keys[k] = v
 	}
+	status := make(map[uuid.UUID]StackStatus, len(s.status))
+	for k, v := range s.status {
+		status[k] = v
+	}
 	return memState{keys: keys, stacks: slices.Clone(s.stacks), requests: slices.Clone(s.requests), events: slices.Clone(s.events),
-		jobs: slices.Clone(s.jobs)}
+		jobs: slices.Clone(s.jobs), status: status}
 }
 
 func (m *memRepo) InTx(_ context.Context, fn func(Store) error) error {
@@ -104,6 +109,33 @@ func (m *memRepo) Get(_ context.Context, id uuid.UUID) (*Request, error) {
 		}
 	}
 	return nil, apperr.NotFound("request %s not found", id)
+}
+
+func (m *memRepo) StackHolder(_ context.Context, path string) (StackHolder, error) {
+	return StackHolder{}, apperr.NotFound("no stack at %s", path)
+}
+
+func (m *memRepo) StackTarget(_ context.Context, id uuid.UUID) (StackTarget, error) {
+	return memStackTarget(m.state, id)
+}
+
+// setStackStatus moves a stack to status, as the apply flow (WBS 5.3) will.
+func (m *memRepo) setStackStatus(id uuid.UUID, status StackStatus) { m.state.status[id] = status }
+
+// memStackTarget reads a stack of team payments in development from the fake state.
+func memStackTarget(s memState, id uuid.UUID) (StackTarget, error) {
+	for _, st := range s.stacks {
+		if st.ID != id {
+			continue
+		}
+		status, ok := s.status[id]
+		if !ok {
+			status = StackProvisioning
+		}
+		return StackTarget{ID: id, TeamID: st.TeamID, TeamSlug: "payments", EnvironmentID: st.EnvironmentID,
+			Environment: "development", Name: st.Name, Path: st.Path, Region: st.Region, Status: status}, nil
+	}
+	return StackTarget{}, apperr.NotFound("stack %s not found", id)
 }
 
 func (m *memRepo) List(_ context.Context, f ListFilter) ([]*Request, error) {
@@ -206,6 +238,39 @@ func (m *memStore) GetRequestByShortID(_ context.Context, shortID string) (*Requ
 		}
 	}
 	return nil, apperr.NotFound("request %s not found", shortID)
+}
+
+func (m *memStore) LockStackTarget(_ context.Context, id uuid.UUID) (StackTarget, error) {
+	return memStackTarget(m.s, id)
+}
+
+func (m *memStore) OpenRequestKinds(_ context.Context, stackID uuid.UUID) ([]Kind, error) {
+	var out []Kind
+	for _, r := range m.s.requests {
+		if r.Stack.ID == stackID && !r.Status.IsTerminal() {
+			out = append(out, r.Kind)
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) LatestSpec(_ context.Context, stackID uuid.UUID) (json.RawMessage, bool, error) {
+	var best *Request
+	for _, r := range m.s.requests {
+		if r.Stack.ID != stackID || (r.Kind != KindCreate && r.Kind != KindUpdate) {
+			continue
+		}
+		if r.Status == StatusFailed || r.Status == StatusRejected || r.Status == StatusCancelled {
+			continue
+		}
+		if best == nil || !r.CreatedAt.Before(best.CreatedAt) {
+			best = r
+		}
+	}
+	if best == nil {
+		return nil, false, nil
+	}
+	return best.Spec, true, nil
 }
 
 func (m *memStore) LockRequest(ctx context.Context, id uuid.UUID) (*Request, error) {

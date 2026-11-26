@@ -90,6 +90,74 @@ LOCK = {"stack_id": STACK, "request_id": REQ, "holder": "gha", "fencing_token": 
         "acquired_at": "2026-11-26T00:00:00Z", "expires_at": "2026-12-03T00:00:00Z"}
 
 
+BY_PATH = "/v1/internal/requests/by-path"
+STACK_PATH = "environments/development/payments/orders"
+HASH = "ab" * 32
+RESOLVED = {"stack_id": STACK, "stack_path": STACK_PATH, "request_id": REQ, "request_short_id": "req-7k3p9x",
+            "kind": "update", "status": "approved", "fencing_token": 48214, "approved_plan_hash": HASH}
+
+
+class TestResolveRequest:
+    def test_resolves(self, api):
+        api.reply("GET", BY_PATH, 200, RESOLVED)
+        got = client(api).resolve_request(STACK_PATH)
+        assert (got.stack_id, got.request_id, got.fencing_token, got.approved_plan_hash) == (STACK, REQ, 48214, HASH)
+        assert api.calls[0]["query"] == {"stack_path": [STACK_PATH]}
+        assert api.calls[0]["headers"]["Authorization"] == f"Bearer {INTERNAL}"
+
+    def test_a_missing_hash_is_empty(self, api):
+        api.reply("GET", BY_PATH, 200, {k: v for k, v in RESOLVED.items() if k != "approved_plan_hash"})
+        assert client(api).resolve_request(STACK_PATH).approved_plan_hash == ""
+
+    @pytest.mark.parametrize("path", ["", "environments/development/payments", "environments/dev/payments/orders",
+                                      STACK_PATH + "/", STACK_PATH + "\n::error::x", "../" + STACK_PATH])
+    def test_rejects_a_bad_path_before_calling(self, api, path):
+        with pytest.raises(ValueError, match="stack path"):
+            client(api).resolve_request(path)
+        assert api.calls == []
+
+    def test_rejects_a_bad_head_sha(self, api):
+        with pytest.raises(ValueError, match="head sha"):
+            client(api).resolve_request(STACK_PATH, "abc")
+        assert api.calls == []
+
+    @pytest.mark.parametrize("patch", [
+        {"stack_id": "nope"}, {"request_id": ""}, {"fencing_token": 0}, {"fencing_token": True}, {"fencing_token": "7"},
+        {"approved_plan_hash": "xyz"},
+    ])
+    def test_rejects_a_malformed_answer(self, api, patch):
+        api.reply("GET", BY_PATH, 200, {**RESOLVED, **patch})
+        with pytest.raises(ApiError):
+            client(api).resolve_request(STACK_PATH)
+
+    def test_merge_not_recorded_is_retried_then_raised(self, api):
+        api.reply("GET", BY_PATH, 409, {"code": "merge_not_recorded"})
+        naps = []
+        c = IacpApiClient(api.url, Credential(INTERNAL, "internal"), sleep=naps.append)
+        with pytest.raises(ApiError, match="merge_not_recorded") as exc:
+            c.resolve_request(STACK_PATH, merge_wait_attempts=3, merge_wait_seconds=1.5)
+        assert exc.value.status == 409 and len(api.calls) == 3 and naps == [1.5, 1.5]
+
+    def test_merge_not_recorded_is_retried_until_recorded(self, api):
+        api.reply("GET", BY_PATH, 409, {"code": "merge_not_recorded"})
+        api.reply("GET", BY_PATH, 200, RESOLVED)
+        assert client(api).resolve_request(STACK_PATH).request_id == REQ
+        assert len(api.calls) == 2
+
+    @pytest.mark.parametrize("code", ["merge_commit_mismatch", "request_not_approved"])
+    def test_other_conflicts_are_not_retried(self, api, code):
+        api.reply("GET", BY_PATH, 409, {"code": code})
+        with pytest.raises(ApiError, match=code):
+            client(api).resolve_request(STACK_PATH)
+        assert len(api.calls) == 1
+
+    def test_errors_are_not_retried(self, api):
+        api.reply("GET", BY_PATH, 404, {"code": "no_active_request"})
+        with pytest.raises(ApiError, match="no_active_request") as exc:
+            client(api).resolve_request(STACK_PATH)
+        assert exc.value.status == 404 and len(api.calls) == 1
+
+
 class TestIacpApiClient:
     def test_post_run(self, api):
         api.reply("POST", "/v1/runs", 200, {"accepted": True, "run_id": "r1", "run_status": "succeeded"})
@@ -379,6 +447,88 @@ class TestLockCommand:
         api.reply("GET", f"/v1/internal/stacks/{STACK}/lock", 200, other)
         assert main(["lock", "release", "--stack-id", STACK, "--request-id", REQ, "--api-url", api.url]) == 0
         assert [c["method"] for c in api.calls] == ["GET"]
+
+    def test_acquire_resolves_the_ids_by_path(self, tmp_path, runner_env, api, capsys):
+        api.reply("GET", BY_PATH, 200, RESOLVED)
+        api.reply("POST", f"/v1/internal/stacks/{STACK}/lock", 200, {"lock": "granted", "current": LOCK})
+        out = tmp_path / "out"
+        rc = main(["lock", "acquire", "--stack-path", STACK_PATH, "--head-sha", SHA, "--api-url", api.url,
+                   "--github-output", str(out)])
+        assert rc == 0
+        assert api.calls[0]["query"] == {"stack_path": [STACK_PATH], "head_sha": [SHA]}
+        assert api.calls[1]["body"] == {"request_id": REQ}
+        assert out.read_text() == (f"stack_id={STACK}\nrequest_id={REQ}\napproved_plan_hash={HASH}\n"
+                                   "attempted=true\nclaimed=true\nfencing_token=48214\n")
+        assert "resolved environments/development/payments/orders: request req-7k3p9x" in capsys.readouterr().out
+
+    def test_acquire_with_both_ids_and_a_path_still_resolves(self, tmp_path, runner_env, api):
+        """The lookup supplies the approved hash and proves the ids name the lock holder."""
+        api.reply("GET", BY_PATH, 200, RESOLVED)
+        api.reply("POST", f"/v1/internal/stacks/{STACK}/lock", 200, {"lock": "granted", "current": LOCK})
+        out = tmp_path / "out"
+        rc = main(["lock", "acquire", "--stack-path", STACK_PATH, "--stack-id", STACK, "--request-id", REQ,
+                   "--api-url", api.url, "--github-output", str(out)])
+        assert rc == 0
+        assert [c["method"] for c in api.calls] == ["GET", "POST"]
+        assert f"approved_plan_hash={HASH}\n" in out.read_text()
+
+    def test_acquire_with_both_ids_that_disagree_fails_before_the_claim(self, runner_env, api, capsys):
+        api.reply("GET", BY_PATH, 200, RESOLVED)
+        other = "33333333-3333-4333-8333-333333333333"
+        rc = main(["lock", "acquire", "--stack-path", STACK_PATH, "--stack-id", STACK, "--request-id", other,
+                   "--api-url", api.url])
+        assert rc == 1
+        assert "not the request the API resolved" in capsys.readouterr().err
+        assert [c["method"] for c in api.calls] == ["GET"]
+
+    def test_acquire_with_ids_and_no_path_uses_them_as_they_are(self, runner_env, api):
+        api.reply("POST", f"/v1/internal/stacks/{STACK}/lock", 200, {"lock": "granted", "current": LOCK})
+        assert main(["lock", "acquire", "--stack-id", STACK, "--request-id", REQ, "--api-url", api.url]) == 0
+        assert [c["method"] for c in api.calls] == ["POST"]
+
+    def test_acquire_waits_for_the_merge_to_be_recorded(self, runner_env, api, monkeypatch):
+        naps = []
+        monkeypatch.setattr("tools.stack_pipeline.api_client.time.sleep", naps.append)
+        api.reply("GET", BY_PATH, 409, {"code": "merge_not_recorded"})
+        api.reply("GET", BY_PATH, 409, {"code": "merge_not_recorded"})
+        api.reply("GET", BY_PATH, 200, RESOLVED)
+        api.reply("POST", f"/v1/internal/stacks/{STACK}/lock", 200, {"lock": "granted", "current": LOCK})
+        assert main(["lock", "acquire", "--stack-path", STACK_PATH, "--api-url", api.url]) == 0
+        assert [c["method"] for c in api.calls] == ["GET", "GET", "GET", "POST"]
+        assert naps == [5.0, 5.0]
+
+    @pytest.mark.parametrize("status,body", [
+        (404, {"code": "no_active_request"}),
+        (409, {"code": "request_not_approved"}),
+        (409, {"code": "merge_commit_mismatch"}),
+        (403, {"code": "workflow_not_allowed"}),
+    ])
+    def test_a_lookup_that_finds_nothing_fails_closed(self, tmp_path, runner_env, api, capsys, status, body):
+        api.reply("GET", BY_PATH, status, body)
+        out = tmp_path / "out"
+        rc = main(["lock", "acquire", "--stack-path", STACK_PATH, "--api-url", api.url, "--github-output", str(out)])
+        assert rc == 1
+        assert body["code"] in capsys.readouterr().err
+        assert [c["method"] for c in api.calls] == ["GET"]  # no lock claim, no attempt recorded
+        assert not out.exists() or "attempted" not in out.read_text()
+
+    def test_acquire_refuses_ids_that_disagree_with_the_lookup(self, runner_env, api, capsys):
+        api.reply("GET", BY_PATH, 200, RESOLVED)
+        rc = main(["lock", "acquire", "--stack-path", STACK_PATH, "--request-id", "33333333-3333-4333-8333-333333333333",
+                   "--api-url", api.url])
+        assert rc == 1
+        assert "not the request the API resolved" in capsys.readouterr().err
+        assert [c["method"] for c in api.calls] == ["GET"]
+
+    def test_acquire_needs_ids_or_a_path(self, runner_env, api, capsys):
+        assert main(["lock", "acquire", "--api-url", api.url]) == 2
+        assert "--stack-path" in capsys.readouterr().err
+        assert api.calls == []
+
+    def test_release_needs_ids(self, runner_env, api, capsys):
+        assert main(["lock", "release", "--stack-path", STACK_PATH, "--api-url", api.url]) == 2
+        assert "--stack-id and --request-id" in capsys.readouterr().err
+        assert api.calls == []
 
     def test_unconfigured_skip(self, tmp_path, runner_env, capsys):
         out = tmp_path / "out"

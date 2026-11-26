@@ -34,6 +34,34 @@ func NewSessionAuthenticator(s SessionResolver, secure bool) *SessionAuthenticat
 var errCSRF = &apperr.Error{Kind: apperr.KindForbidden, Code: "csrf_token_invalid",
 	Message: "a valid X-CSRF-Token header is required for this request (read it from GET /v1/me)"}
 
+// SessionChecker validates a session without sliding its idle window (session.Service).
+type SessionChecker interface {
+	Check(ctx context.Context, id string) (session.Record, error)
+}
+
+// StreamSession tells an open stream whether the session behind its request is still live.
+type StreamSession interface {
+	// Alive returns nil while the request's session is valid and an error once it has been
+	// revoked, has expired, or its user is disabled (or the store cannot say).
+	Alive(ctx context.Context, r *http.Request) error
+}
+
+// Alive implements StreamSession. It reads the session cookie of the original request again
+// and checks it against the store; it does not slide the idle window, so a stream does not
+// keep an idle session alive.
+func (a *SessionAuthenticator) Alive(ctx context.Context, r *http.Request) error {
+	c, err := r.Cookie(a.cookie)
+	if err != nil || c.Value == "" {
+		return ErrUnauthenticated
+	}
+	check := a.sessions.Resolve
+	if sc, ok := a.sessions.(SessionChecker); ok {
+		check = sc.Check
+	}
+	_, err = check(ctx, c.Value)
+	return err
+}
+
 // Authenticate implements Authenticator.
 func (a *SessionAuthenticator) Authenticate(r *http.Request) (identity.Principal, error) {
 	c, err := r.Cookie(a.cookie)

@@ -1,0 +1,12 @@
+{
+  "backend": "local",
+  "depends_on": [],
+  "environment": "development",
+  "fencing_token": 48300,
+  "lifecycle": "destroy",
+  "modules": {},
+  "region": "us-east-1",
+  "request_id": "req-9d2k4m",
+  "stack": "order-events",
+  "team": "payments"
+}

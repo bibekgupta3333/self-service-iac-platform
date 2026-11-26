@@ -169,6 +169,93 @@ describe("proxy route", () => {
     expect(await res.json()).toMatchObject({ status: 502, code: "api_unreachable" });
   });
 
+  describe("the request event stream", () => {
+    const ID = "0d7e3a52-6c11-4f0e-b9b6-5f2f3c8d1a90";
+    const path = ["v1", "requests", ID, "events"];
+    const enc = new TextEncoder();
+    const dec = new TextDecoder();
+
+    it("passes the stream through as it arrives, forwards Last-Event-ID and aborts upstream when the client leaves", async () => {
+      let upstream!: ReadableStreamDefaultController<Uint8Array>;
+      reply = async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(c) {
+              upstream = c;
+              c.enqueue(enc.encode('id: 7\nevent: snapshot\ndata: {"status":"pr_open"}\n\n'));
+            },
+          }),
+          {
+            status: 200,
+            headers: {
+              "Content-Type": "text/event-stream; charset=utf-8",
+              "Cache-Control": "no-cache, no-transform",
+              "X-Accel-Buffering": "no",
+              "Set-Cookie": "x=y",
+            },
+          },
+        );
+      const client = new AbortController();
+      const res = await GET(
+        req(`v1/requests/${ID}/events`, {
+          headers: { Accept: "text/event-stream", "Last-Event-ID": "7", Cookie: "iacp_session=s" },
+          signal: client.signal,
+        }),
+        ctx(path),
+      );
+
+      // The response is returned while the upstream stream is still open, and each chunk is
+      // readable as soon as it is sent: nothing waits for the end of the body.
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe("text/event-stream; charset=utf-8");
+      expect(res.headers.get("cache-control")).toBe("no-cache, no-transform");
+      expect(res.headers.get("x-accel-buffering")).toBe("no");
+      expect(res.headers.get("set-cookie")).toBeNull();
+      expect(res.headers.get("content-length")).toBeNull();
+      const reader = res.body!.getReader();
+      expect(dec.decode((await reader.read()).value)).toContain("event: snapshot");
+      upstream.enqueue(enc.encode(": heartbeat\n\n"));
+      expect(dec.decode((await reader.read()).value)).toBe(": heartbeat\n\n");
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.url).toBe(`http://api.test/v1/requests/${ID}/events`);
+      expect(calls[0]?.init.method).toBe("GET");
+      const sent = new Headers(calls[0]?.init.headers);
+      expect(sent.get("last-event-id")).toBe("7");
+      expect(sent.get("accept")).toBe("text/event-stream");
+      expect(sent.get("cookie")).toBe("iacp_session=s");
+
+      const signal = calls[0]?.init.signal as AbortSignal;
+      expect(signal.aborted).toBe(false);
+      client.abort();
+      expect(signal.aborted).toBe(true);
+      await reader.cancel().catch(() => undefined);
+    });
+
+    it.each(["HEAD", "POST", "PUT", "PATCH", "DELETE"])("refuses %s without calling the API", async (method) => {
+      const handler = method === "HEAD" ? HEAD : POST;
+      const res = await handler(
+        req(`v1/requests/${ID}/events`, { method, ...(method === "HEAD" ? {} : { body: "{}" }) }),
+        ctx(path),
+      );
+      expect(res.status).toBe(405);
+      if (method === "HEAD" || method === "POST") expect(res.headers.get("allow")).toBe("GET");
+      expect(calls).toHaveLength(0);
+    });
+
+    it.each([
+      [["v1", "requests", ID, "Events"], 200], // not the stream path: an ordinary read the API answers itself
+      [["v1", "requests", ID, "events", ".."], 404],
+      [["v1", "requests", "..", "events"], 404],
+      [["v1", "requests", ID, "ev%65nts"], 404],
+    ] as [string[], number][])("%j is not streamed (%i)", async (p, status) => {
+      const res = await GET(req(p.join("/")), ctx(p));
+      expect(res.status).toBe(status);
+      if (status === 200) expect(calls[0]?.init.signal).toBeUndefined();
+      else expect(calls).toHaveLength(0);
+    });
+  });
+
   it("passes upstream errors through unchanged", async () => {
     reply = async () =>
       new Response('{"code":"validation_failed"}', { status: 422, headers: { "Content-Type": "application/problem+json" } });

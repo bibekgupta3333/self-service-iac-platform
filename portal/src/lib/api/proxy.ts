@@ -20,6 +20,20 @@ export const ALLOWED_FIRST_SEGMENTS: ReadonlySet<string> = new Set(["catalog", "
 const AUTH_PATHS: ReadonlySet<string> = new Set(["v1/auth/login", "v1/auth/callback", "v1/auth/logout"]);
 const ME_PATH = "v1/me";
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * isEventsPath matches the status stream of one request, v1/requests/{uuid}/events, and
+ * nothing else: the id must be a UUID and the last segment is compared exactly and
+ * case-sensitively. It is the one path the proxy streams; it is GET only. Pure.
+ */
+export const isEventsPath = (segments: readonly string[]): boolean =>
+  segments.length === 4 &&
+  segments[0] === "v1" &&
+  segments[1] === "requests" &&
+  UUID.test(segments[2] ?? "") &&
+  segments[3] === "events";
+
 /** Paths that run the login flow: their responses may redirect and set the session cookies. */
 export const isAuthFlowPath = (segments: readonly string[]): boolean => AUTH_PATHS.has(segments.join("/"));
 
@@ -37,6 +51,8 @@ export const FORWARD_REQUEST_HEADERS = [
   "authorization",
   "cookie",
   "x-csrf-token",
+  // An EventSource reconnects with the id of the last event it saw; the stream resumes after it.
+  "last-event-id",
 ] as const;
 
 /** Response headers passed back to the browser. */
@@ -48,6 +64,8 @@ export const FORWARD_RESPONSE_HEADERS = [
   "retry-after",
   "allow",
   "cache-control",
+  // Tells a reverse proxy in front of the portal not to buffer an event stream.
+  "x-accel-buffering",
 ] as const;
 
 /** The only cookies the proxy lets the API set in the browser: the session and the login state. */
@@ -182,7 +200,15 @@ export function isSameOriginRequest(
 }
 
 export type ProxyDecision =
-  | { kind: "forward"; url: string; upstreamMethod: "GET" | "POST"; head: boolean; authFlow: boolean }
+  | {
+      kind: "forward";
+      url: string;
+      upstreamMethod: "GET" | "POST";
+      head: boolean;
+      authFlow: boolean;
+      /** Set only for the event stream: the body is passed through unbuffered, and the client leaving aborts the upstream call. */
+      stream?: true;
+    }
   | { kind: "reject"; status: number; code: string; detail: string; allow?: string };
 
 const reject = (status: number, code: string, detail: string, allow?: string): ProxyDecision => ({
@@ -201,6 +227,13 @@ export function decideProxy(apiBase: string, req: ProxyRequestInfo): ProxyDecisi
   }
   const url = proxyTarget(apiBase, req.segments, req.search);
   if (url === null) return reject(404, "not_found", "this path is not available through the portal proxy");
+
+  if (isEventsPath(req.segments)) {
+    // A stream never ends on its own, so HEAD (answered by draining an upstream GET) and every
+    // other method are refused; only GET is served.
+    if (method !== "GET") return reject(405, "method_not_allowed", "the event stream is read with GET", "GET");
+    return { kind: "forward", url, upstreamMethod: "GET", head: false, authFlow: false, stream: true };
+  }
 
   const authFlow = isAuthFlowPath(req.segments);
   if (method !== "POST") return { kind: "forward", url, upstreamMethod: "GET", head: method === "HEAD", authFlow };

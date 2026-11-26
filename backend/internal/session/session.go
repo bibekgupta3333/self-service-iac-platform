@@ -178,6 +178,23 @@ func (s *Service) Resolve(ctx context.Context, id string) (Record, error) {
 	return rec, nil
 }
 
+// Check validates the raw session id like Resolve but leaves the idle window alone. Open
+// event streams use it to notice a logout, an expiry or a disabled user without a stream
+// keeping an otherwise idle session alive.
+func (s *Service) Check(ctx context.Context, id string) (Record, error) {
+	if !ValidID(id) {
+		return Record{}, ErrNotFound
+	}
+	rec, err := s.store.Get(ctx, HashID(id))
+	if err != nil {
+		return Record{}, err
+	}
+	if err := s.policy.Check(rec, s.clock.Now()); err != nil {
+		return Record{}, err
+	}
+	return rec, nil
+}
+
 // Revoke ends the session with the raw id; an unknown id is not an error.
 func (s *Service) Revoke(ctx context.Context, id string) error {
 	if !ValidID(id) {

@@ -24,7 +24,8 @@ internal/
   db/                    pgx pool, Migrator (goose), TxRunner, DBTX; dbtest/ for integration tests
   inputschema/           JSON Schema 2020-12 compile + validate, pointer-addressed violations
   catalog/               modules, versions, SemVer, index validation, CatalogService, Postgres repo
-  requests/              state machine, Request entity, spec validation, RequestService, Postgres repo
+  requests/              state machine, Request entity, spec validation (create, update, destroy), stack-state gating, RequestService, status feed, apply-target lookup, Postgres repo
+  stacks/                read side of stacks: list/show scoped to the caller's teams, Postgres repo
   locks/                 per-stack platform lock: pure Decide/NextInQueue/CheckToken, Service, Postgres repo
   auth/                  GitHub Actions OIDC: claim allow-lists (pure), JWKSCache, Verifier, jti ReplayGuard
   budgets/               policy context for conftest: pure ParseStackPath / BuildContext, Service, Postgres repo
@@ -188,9 +189,13 @@ docker run --rm -p 127.0.0.1:8080:8080 -e IACP_AUTH_MODE=dev \
 | POST | `/v1/internal/stacks/{id}/lock/heartbeat` | machine auth; `{"request_id","fencing_token"}` renews the lease; `409 stale_fencing_token` if superseded |
 | DELETE | `/v1/internal/stacks/{id}/lock?request_id=&fencing_token=` | machine auth; releases and promotes the oldest queued request: `{"released":…, "promoted":…\|null}` |
 | POST | `/v1/runs` | machine auth; run report (docs/03 §6.9) stored in `pipeline_runs`; `200 {"accepted":true,"run_id","run_status","request_status"}`, `409 stale_fencing_token`, `403 run_mismatch` / `workflow_not_allowed` |
-| POST | `/v1/requests` | `kind=create` only so far; developer role in the team (`403` otherwise); requires `Idempotency-Key` (remembered 24 h); `202`; replays set `Idempotent-Replayed: true` |
+| GET | `/v1/internal/requests/by-path?stack_path=&head_sha=` | machine auth (`request_lookup` class: `apply.yml` on main, `push`/`workflow_dispatch`); the request holding the stack lock with `fencing_token` and `approved_plan_hash`; `404 stack_not_found` / `no_active_request`, `409 request_not_approved` / `merge_not_recorded` (retryable) / `merge_commit_mismatch` (docs/03 §6.9) |
+| POST | `/v1/requests` | `kind` create, update or destroy (update and destroy name the stack by `stack_id`; destroy also needs `confirm_stack_name` and a `justification`); upgrade, reconcile and rollback are `422 unsupported_kind`; developer role in the stack's team (maintainer for a production destroy; `403` otherwise); `409 stack_busy` / `stack_destroyed` / `destroy_pending` when the stack does not take the kind; `404` for a stack in another team; an update that drops resources needs `allow_removals` (`422 resources_removed`); requires `Idempotency-Key` (remembered 24 h); `202`; replays set `Idempotent-Replayed: true` |
 | GET | `/v1/requests?team=&status=&kind=&mine=true&limit=&cursor=` | keyset pagination, `next_cursor` |
 | GET | `/v1/requests/{id}` | includes the normalised `spec`, `allowed_events`, `github {branch, pr_number, pr_url}` once published and `failure_reason` |
+| GET | `/v1/requests/{id}/events` | Server-Sent Events: `snapshot`, then `status` per change (event id = audit seq, resume with `Last-Event-ID`), `: heartbeat` every 15 s, `end` when terminal (also on a resume at the terminal seq), closed after 5 min or on server shutdown; ended when its session is revoked; at most 5 streams per user and 500 in total (`429`); `404` for a caller with no role in the team |
+| GET | `/v1/stacks?team=&env=&status=&limit=&cursor=` | stacks of the caller's teams (platform admins: all), newest first, keyset pagination |
+| GET | `/v1/stacks/{id}` | `status`, `outputs`, `latest_request` and links; `404` when the caller may not see it |
 | POST | `/v1/webhooks/github` | GitHub App webhook, authenticated by `X-Hub-Signature-256` only; `202 {"accepted","duplicate","enqueued"}`, `401 invalid_signature` / `webhook_not_configured`, `400` for a bad delivery id, event header or payload |
 | GET | `/v1/audit/verify?from_seq=&to_seq=` | recomputes the hash chain, at most 10,000 events per call (`has_more`) |
 
