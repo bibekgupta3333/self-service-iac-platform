@@ -101,6 +101,9 @@ type Store interface {
 	// LatestSpec returns the spec of the stack's newest create or update request that is not
 	// failed, rejected or cancelled; ok is false when there is none.
 	LatestSpec(ctx context.Context, stackID uuid.UUID) (spec json.RawMessage, ok bool, err error)
+	// LastAppliedSpec returns the spec of the request that last applied successfully to the
+	// stack (stacks.last_applied_request_id); ok is false when none did.
+	LastAppliedSpec(ctx context.Context, stackID uuid.UUID) (spec json.RawMessage, ok bool, err error)
 	// OpenRequestKinds lists the kinds of the stack's requests that are not terminal yet.
 	OpenRequestKinds(ctx context.Context, stackID uuid.UUID) ([]Kind, error)
 	// LockRequest loads the request FOR UPDATE.

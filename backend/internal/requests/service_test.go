@@ -274,6 +274,21 @@ func (m *memStore) LatestSpec(_ context.Context, stackID uuid.UUID) (json.RawMes
 	return best.Spec, true, nil
 }
 
+func (m *memStore) LastAppliedSpec(_ context.Context, stackID uuid.UUID) (json.RawMessage, bool, error) {
+	var id uuid.UUID
+	for _, w := range m.s.applied {
+		if w.ID == stackID && w.RequestID != uuid.Nil {
+			id = w.RequestID
+		}
+	}
+	for _, r := range m.s.requests {
+		if r.ID == id {
+			return r.Spec, true, nil
+		}
+	}
+	return nil, false, nil
+}
+
 func (m *memStore) LockRequest(ctx context.Context, id uuid.UUID) (*Request, error) {
 	return m.GetRequest(ctx, id)
 }
