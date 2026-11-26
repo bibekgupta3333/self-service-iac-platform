@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	"github.com/google/uuid"
 
@@ -114,6 +115,60 @@ func (s *Service) GetVersion(ctx context.Context, name, version string) (ModuleV
 		return ModuleVersion{}, fmt.Errorf("get %s@%s: %w", name, version, err)
 	}
 	return v, nil
+}
+
+// LatestTarget asks UpgradePath for the newest usable version.
+const LatestTarget = "latest"
+
+// UpgradePath returns the versions of module name between the pinned version from and to
+// (a version, or "latest"/"" for the newest usable one), oldest first. from must be a
+// version in the catalog (a yanked one too: that is when an upgrade is most needed).
+func (s *Service) UpgradePath(ctx context.Context, name, from, to string) (UpgradePath, error) {
+	fromV, err := ParseSemVer(from)
+	if err != nil {
+		return UpgradePath{}, apperr.Invalid("validation_failed", "from must be an exact semantic version such as 1.2.0",
+			apperr.FieldError{Pointer: "/from", Code: "pattern", Message: err.Error()})
+	}
+	m, err := s.repo.GetModule(ctx, name)
+	if err != nil {
+		return UpgradePath{}, fmt.Errorf("get module %q: %w", name, err)
+	}
+	versions, err := s.repo.ListVersions(ctx, &m.ID)
+	if err != nil {
+		return UpgradePath{}, fmt.Errorf("list versions of %q: %w", name, err)
+	}
+	find := func(v SemVer) (ModuleVersion, bool) {
+		i := slices.IndexFunc(versions, func(mv ModuleVersion) bool { return mv.Version == v })
+		if i < 0 {
+			return ModuleVersion{}, false
+		}
+		return versions[i], true
+	}
+	if _, ok := find(fromV); !ok {
+		return UpgradePath{}, apperr.NotFound("module %s has no version %s", name, fromV)
+	}
+	toV := fromV
+	switch to {
+	case "", LatestTarget:
+		if latest, ok := LatestByModule(versions)[m.ID]; ok && latest.Version.Compare(fromV) > 0 {
+			toV = latest.Version
+		}
+	default:
+		parsed, err := ParseSemVer(to)
+		if err != nil {
+			return UpgradePath{}, apperr.Invalid("validation_failed", "to must be latest or an exact semantic version",
+				apperr.FieldError{Pointer: "/to", Code: "pattern", Message: err.Error()})
+		}
+		target, ok := find(parsed)
+		if !ok {
+			return UpgradePath{}, apperr.NotFound("module %s has no version %s", name, parsed)
+		}
+		if !target.Usable() {
+			return UpgradePath{}, apperr.Invalid("module_version_unavailable", fmt.Sprintf("%s@%s is yanked", name, parsed))
+		}
+		toV = parsed
+	}
+	return BuildUpgradePath(name, fromV, toV, versions)
 }
 
 // Index registers a released module version and records module_version.indexed.

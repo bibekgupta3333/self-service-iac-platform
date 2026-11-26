@@ -65,9 +65,31 @@ func TestPostgresRepository(t *testing.T) {
 			t.Fatalf("want not found, got %v", err)
 		}
 	})
+	t.Run("upgrade notes round trip and the upgrade path", func(t *testing.T) {
+		cmd := validIndexCommand()
+		cmd.Version, cmd.GitTag = "2.0.0", "modules/sqs/v2.0.0"
+		cmd.Changelog = "### Changed\n- breaking\n\n### Migration\nfrom the changelog"
+		cmd.UpgradeNotes = "Set dlq_name explicitly."
+		if _, created, err := svc.Index(ctx, bot, cmd); err != nil || !created {
+			t.Fatalf("index 2.0.0: created=%v err=%v", created, err)
+		}
+		v, err := svc.GetVersion(ctx, "sqs", "2.0.0")
+		if err != nil || v.UpgradeNotes != "Set dlq_name explicitly." || v.Notes() != v.UpgradeNotes {
+			t.Fatalf("upgrade notes = %q (%v)", v.UpgradeNotes, err)
+		}
+		old, err := svc.GetVersion(ctx, "sqs", "1.3.0")
+		if err != nil || old.UpgradeNotes != "" {
+			t.Fatalf("a version indexed without notes keeps none: %q (%v)", old.UpgradeNotes, err)
+		}
+		p, err := svc.UpgradePath(ctx, "sqs", "1.2.0", "latest")
+		if err != nil || len(p.Steps) != 3 || p.To.String() != "2.0.0" || p.Steps[2].Change != ChangeMajor ||
+			p.Steps[2].Notes() != "Set dlq_name explicitly." {
+			t.Fatalf("path = %+v (%v)", p, err)
+		}
+	})
 	t.Run("audit chain written in the same transaction", func(t *testing.T) {
 		res, err := audit.NewVerifier(pool).Verify(ctx, 1, 0)
-		if err != nil || !res.Valid || res.Checked != 4 {
+		if err != nil || !res.Valid || res.Checked != 5 {
 			t.Fatalf("audit = %+v, %v", res, err)
 		}
 	})
