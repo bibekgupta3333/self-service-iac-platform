@@ -13,6 +13,7 @@ import (
 
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/rbac"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/requests"
 )
 
 // Result is what one drift check found (enum drift_result).
@@ -34,16 +35,6 @@ const (
 	StatusReconciled Status = "reconciled"
 	StatusIgnored    Status = "ignored"
 	StatusCodified   Status = "codified"
-)
-
-// Health is the stack's drift health (enum stack_health). It is independent of the
-// lifecycle status (requests.StackStatus): drift never moves the lifecycle.
-type Health string
-
-// Health values.
-const (
-	HealthHealthy Health = "healthy"
-	HealthDrifted Health = "drifted"
 )
 
 // Action is what a user does with an open report.
@@ -86,14 +77,22 @@ func ClassifyExit(code, drifted int) (Result, bool) {
 	return "", false
 }
 
-// NextHealth is the stack health after a check: drift marks it drifted, a clean check
-// restores it, and a failed check says nothing about the stack, so health is kept. Pure.
-func NextHealth(current Health, r Result) Health {
-	switch r {
-	case ResultDrifted:
-		return HealthDrifted
-	case ResultClean:
-		return HealthHealthy
+// NextHealth is the stack health after a drift check. stacks.health has two writers, this
+// scan and the post-apply smoke test (ADR-0013), so the rules are asymmetric:
+//
+//   - a drift finding sets drifted from any state (the more actionable one);
+//   - a clean scan only clears drifted to healthy. A refresh-only scan runs no smoke test,
+//     so it must never upgrade unknown or degraded to healthy;
+//   - a failed check says nothing about the stack: health is kept.
+//
+// The one lossy path is degraded -> drift finding -> drifted -> clean scan -> healthy: the
+// smoke failure is forgotten until the next apply's smoke test. Pure.
+func NextHealth(current requests.StackHealth, r Result) requests.StackHealth {
+	switch {
+	case r == ResultDrifted:
+		return requests.HealthDrifted
+	case r == ResultClean && current == requests.HealthDrifted:
+		return requests.HealthHealthy
 	}
 	return current
 }
@@ -308,4 +307,40 @@ func ReconcileJustification(reason, stackPath string) string {
 		return "Reconcile drift: " + r
 	}
 	return "Reconcile drift detected on " + stackPath
+}
+
+// MaxSummaryLen bounds the stored failure summary of an error report.
+const MaxSummaryLen = 200
+
+var secretRe = regexp.MustCompile(`(?i)((?:secret|token|password|passwd|authorization|api[_-]?key|access[_-]?key)[A-Za-z_-]*\s*[=:]\s*)\S+|AKIA[0-9A-Z]{16}|(?i:bearer)\s+\S+`)
+
+// SummarizeError reduces terraform's failure output to one short, redacted line for
+// drift_reports.error_message. Provider errors can echo request bodies or attribute values,
+// so only the first non-empty line is kept (terraform prints "Error: <summary>" first),
+// anything shaped like a credential is replaced, control characters become spaces and the
+// result is capped. Pure.
+func SummarizeError(text string) string {
+	line := ""
+	for _, l := range strings.Split(text, "\n") {
+		if t := strings.TrimSpace(strings.Trim(l, "\u2502 \t")); t != "" {
+			line = t
+			break
+		}
+	}
+	line = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, line)
+	line = secretRe.ReplaceAllStringFunc(line, func(m string) string {
+		if i := strings.IndexAny(m, "=:"); i >= 0 {
+			return m[:i+1] + " <redacted>"
+		}
+		return "<redacted>"
+	})
+	if r := []rune(line); len(r) > MaxSummaryLen {
+		line = string(r[:MaxSummaryLen-3]) + "..."
+	}
+	return line
 }

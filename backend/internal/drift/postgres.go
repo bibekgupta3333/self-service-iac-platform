@@ -14,6 +14,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/audit"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/db"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/requests"
 )
 
 // PostgresRepository implements Repository with pgx.
@@ -146,15 +147,17 @@ func (s *pgStore) LockStack(ctx context.Context, path string) (StackRow, error) 
 		row    StackRow
 		health string
 	)
-	err := s.tx.QueryRow(ctx, `SELECT id, team_id, status::text, health::text FROM stacks WHERE path = $1 FOR NO KEY UPDATE`, path).
-		Scan(&row.ID, &row.TeamID, &row.Status, &health)
+	err := s.tx.QueryRow(ctx, `SELECT id, team_id, status::text, health,
+			EXISTS (SELECT 1 FROM locks l WHERE l.stack_id = stacks.id)
+		FROM stacks WHERE path = $1 FOR NO KEY UPDATE`, path).
+		Scan(&row.ID, &row.TeamID, &row.Status, &health, &row.Locked)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return StackRow{}, apperr.NotFound("stack %q not found", path)
 	}
 	if err != nil {
 		return StackRow{}, fmt.Errorf("query stack: %w", err)
 	}
-	row.Health = Health(health)
+	row.Health = requests.StackHealth(health)
 	return row, nil
 }
 
@@ -205,20 +208,11 @@ func (s *pgStore) ReportByRun(ctx context.Context, runID uuid.UUID) (Entry, erro
 	return scanEntry(s.tx.QueryRow(ctx, entrySelect+` WHERE d.pipeline_run_id = $1`, runID))
 }
 
-// LockReport locks the report's stack first (the order Record uses), then the report, so a
-// resolve and a scan of the same stack cannot deadlock on its reports.
+// LockReport locks the report row only. Resolve may open a reconcile request while holding
+// it, and that request locks the stack row; locking the stack here would make the two
+// wait on each other. A scan holds the stack row and waits for report rows only through
+// CloseOpen, which skips locked ones.
 func (s *pgStore) LockReport(ctx context.Context, id uuid.UUID) (Entry, error) {
-	var stackID uuid.UUID
-	err := s.tx.QueryRow(ctx, `SELECT stack_id FROM drift_reports WHERE id = $1`, id).Scan(&stackID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Entry{}, reportNotFound(id)
-	}
-	if err != nil {
-		return Entry{}, fmt.Errorf("query drift report: %w", err)
-	}
-	if _, err := s.tx.Exec(ctx, `SELECT 1 FROM stacks WHERE id = $1 FOR NO KEY UPDATE`, stackID); err != nil {
-		return Entry{}, fmt.Errorf("lock stack: %w", err)
-	}
 	e, err := scanEntry(s.tx.QueryRow(ctx, entrySelect+` WHERE d.id = $1 FOR UPDATE OF d`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Entry{}, reportNotFound(id)
@@ -229,15 +223,34 @@ func (s *pgStore) LockReport(ctx context.Context, id uuid.UUID) (Entry, error) {
 	return e, nil
 }
 
-func (s *pgStore) SetStackCheck(ctx context.Context, stackID uuid.UUID, health Health, checkedAt *time.Time) error {
-	_, err := s.tx.Exec(ctx, `UPDATE stacks SET health = $2::stack_health, last_drift_check_at = coalesce($3, last_drift_check_at)
+func (s *pgStore) NewerRunExists(ctx context.Context, stackID uuid.UUID, runID int64) (bool, error) {
+	var newer bool
+	err := s.tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM drift_reports d JOIN pipeline_runs p ON p.id = d.pipeline_run_id
+		WHERE d.stack_id = $1 AND p.github_run_id > $2)`, stackID, runID).Scan(&newer)
+	return newer, err
+}
+
+func (s *pgStore) NewestDrifted(ctx context.Context, stackID uuid.UUID) (Entry, bool, error) {
+	e, err := scanEntry(s.tx.QueryRow(ctx, entrySelect+` WHERE d.stack_id = $1 AND d.result = 'drifted'
+		ORDER BY d.detected_at DESC, d.id DESC LIMIT 1`, stackID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Entry{}, false, nil
+	}
+	if err != nil {
+		return Entry{}, false, err
+	}
+	return e, true, nil
+}
+
+func (s *pgStore) SetStackCheck(ctx context.Context, stackID uuid.UUID, health requests.StackHealth, checkedAt *time.Time) error {
+	_, err := s.tx.Exec(ctx, `UPDATE stacks SET health = $2, last_drift_check_at = coalesce($3, last_drift_check_at)
 		WHERE id = $1`, stackID, string(health), checkedAt)
 	return err
 }
 
 func (s *pgStore) CloseOpen(ctx context.Context, stackID uuid.UUID, at time.Time) (int, error) {
 	tag, err := s.tx.Exec(ctx, `UPDATE drift_reports SET status = 'reconciled', resolved_at = $2
-		WHERE stack_id = $1 AND status = 'open'`, stackID, at)
+		WHERE id IN (SELECT id FROM drift_reports WHERE stack_id = $1 AND status = 'open' FOR UPDATE SKIP LOCKED)`, stackID, at)
 	if err != nil {
 		return 0, err
 	}

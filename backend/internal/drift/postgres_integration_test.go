@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/audit"
@@ -165,6 +166,9 @@ func TestPostgresDriftLifecycle(t *testing.T) {
 			t.Fatalf("concurrent resolve %d: %v", i, err)
 		}
 	}
+	if rec.calls != 1 {
+		t.Fatalf("the reconcile request was opened %d times; the locked report row lets one resolution win", rec.calls)
+	}
 	var status string
 	var by, reqRef uuid.UUID
 	if err := owner.QueryRow(ctx, `SELECT status::text, resolved_by, resolution_request_id FROM drift_reports WHERE id = $1`, first.Entry.ID).
@@ -239,6 +243,74 @@ func TestPostgresDriftLifecycle(t *testing.T) {
 	if due, err := svc.DueStacks(ctx, 0); err != nil || len(due) != 0 {
 		t.Fatalf("due while locked = %+v, %v", due, err)
 	}
+	// The server refuses the report too: the stack is still lifecycle-active, but a request holds it.
+	if _, err := svc.Record(ctx, driftBot(906), report(906, drift.ResultDrifted)); !hasCode(err, "stack_not_checkable") {
+		t.Fatalf("report for a locked stack: %v", err)
+	}
+	if _, err := owner.Exec(ctx, `DELETE FROM locks WHERE stack_id = $1`, stackID); err != nil {
+		t.Fatal(err)
+	}
+
+	// The same difference after an ignore opens no new report (run 904 was ignored above).
+	before := countReports(t, owner)
+	if res, err := svc.Record(ctx, driftBot(907), report(907, drift.ResultDrifted)); err != nil || !res.Suppressed {
+		t.Fatalf("same difference after ignore = %+v, %v", res, err)
+	}
+	if n := countReports(t, owner); n != before {
+		t.Fatalf("reports %d -> %d: an ignored finding must not reopen", before, n)
+	}
+
+	// A clean scan clears drifted only: it leaves a degraded stack degraded, and an
+	// unknown one unknown (ADR-0013). A stale report (older run) changes nothing.
+	for _, start := range []string{"degraded", "unknown", "healthy"} {
+		if _, err := owner.Exec(ctx, `UPDATE stacks SET health = $2 WHERE id = $1`, stackID, start); err != nil {
+			t.Fatal(err)
+		}
+		runID := int64(1000 + len(start))
+		if _, err := svc.Record(ctx, driftBot(runID), report(runID, drift.ResultClean)); err != nil {
+			t.Fatal(err)
+		}
+		if _, h, _ := health(); h != start {
+			t.Fatalf("a clean scan moved %s to %s", start, h)
+		}
+	}
+	if _, err := owner.Exec(ctx, `UPDATE stacks SET health = 'drifted' WHERE id = $1`, stackID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Record(ctx, driftBot(5), report(5, drift.ResultClean)); err != nil {
+		t.Fatal(err)
+	}
+	if _, h, _ := health(); h != "drifted" {
+		t.Fatalf("a stale clean report restored health to %s", h)
+	}
+	if _, err := svc.Record(ctx, driftBot(2000), report(2000, drift.ResultClean)); err != nil {
+		t.Fatal(err)
+	}
+	if _, h, _ := health(); h != "healthy" {
+		t.Fatalf("a current clean scan left health %s, want healthy", h)
+	}
+
+	// Terraform's text never reaches the audit log; the report keeps one redacted line.
+	failed := report(2001, drift.ResultError)
+	failed.Error = "Error: AccessDenied for token: abc123\n  detail line that must not be stored"
+	if res, err := svc.Record(ctx, driftBot(2001), failed); err != nil || res.Entry.Error != "Error: AccessDenied for token: <redacted>" {
+		t.Fatalf("error report = %+v, %v", res.Entry, err)
+	}
+	var leaked int
+	if err := owner.QueryRow(ctx, `SELECT count(*) FROM audit_events WHERE action = 'drift.check_failed' AND payload::text LIKE '%AccessDenied%'`).Scan(&leaked); err != nil || leaked != 0 {
+		t.Fatalf("audit events carrying terraform text = %d, %v", leaked, err)
+	}
+}
+
+func countReports(t *testing.T, pool interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM drift_reports`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }
 
 func TestDriftReportsAreLeastPrivilege(t *testing.T) {

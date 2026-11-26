@@ -15,6 +15,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/rbac"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/requests"
 )
 
 type fixedClock struct{ t time.Time }
@@ -33,6 +34,8 @@ type memRepo struct {
 	audits   []audit.Event
 	checked  *time.Time
 	failRuns bool
+	maxRun   int64 // highest github run id with a report
+	runIDs   map[uuid.UUID]int64
 }
 
 func (m *memRepo) InTx(_ context.Context, fn func(Store) error) error { return fn(m) }
@@ -75,6 +78,7 @@ func (m *memRepo) UpsertRun(_ context.Context, r RunRow) (uuid.UUID, error) {
 	}
 	id := uuid.New()
 	m.runs[r.GitHub.RunID] = id
+	m.runIDs[id] = r.GitHub.RunID
 	return id, nil
 }
 
@@ -108,7 +112,25 @@ func (m *memRepo) LockReport(ctx context.Context, id uuid.UUID) (Entry, error) {
 	return m.Get(ctx, identity.Visibility{All: true}, id)
 }
 
-func (m *memRepo) SetStackCheck(_ context.Context, _ uuid.UUID, h Health, at *time.Time) error {
+func (m *memRepo) NewerRunExists(_ context.Context, _ uuid.UUID, runID int64) (bool, error) {
+	for _, id := range m.runIDs {
+		if id > runID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (m *memRepo) NewestDrifted(_ context.Context, _ uuid.UUID) (Entry, bool, error) {
+	for i := len(m.reports) - 1; i >= 0; i-- {
+		if m.reports[i].Result == ResultDrifted {
+			return *m.reports[i], true, nil
+		}
+	}
+	return Entry{}, false, nil
+}
+
+func (m *memRepo) SetStackCheck(_ context.Context, _ uuid.UUID, h requests.StackHealth, at *time.Time) error {
 	m.stack.Health = h
 	if at != nil {
 		m.checked = at
@@ -194,8 +216,8 @@ type fixture struct {
 func newFixture(t *testing.T, role rbac.Role) *fixture {
 	t.Helper()
 	teamID := uuid.New()
-	repo := &memRepo{stack: StackRow{ID: uuid.New(), TeamID: teamID, Status: "active", Health: HealthHealthy},
-		path: testPath, team: "payments", env: "development", runs: map[int64]uuid.UUID{}}
+	repo := &memRepo{stack: StackRow{ID: uuid.New(), TeamID: teamID, Status: "active", Health: requests.HealthUnknown},
+		path: testPath, team: "payments", env: "development", runs: map[int64]uuid.UUID{}, runIDs: map[uuid.UUID]int64{}}
 	rec := &fakeReconciler{}
 	svc := NewService(repo, fakeTeams{identity.Visibility{TeamIDs: []uuid.UUID{teamID}}}, fakeMembers{role}, rec,
 		fixedClock{time.Date(2026, 11, 26, 2, 0, 0, 0, time.UTC)}, platform.RandomIDs{})
@@ -217,7 +239,7 @@ func TestRecordDriftSetsHealthNotLifecycle(t *testing.T) {
 	if err != nil || res.Replayed || res.Entry.Status == nil || *res.Entry.Status != StatusOpen {
 		t.Fatalf("Record = %+v, %v", res, err)
 	}
-	if f.repo.stack.Health != HealthDrifted || f.repo.stack.Status != "active" {
+	if f.repo.stack.Health != requests.HealthDrifted || f.repo.stack.Status != "active" {
 		t.Fatalf("stack = %+v: drift moves health only", f.repo.stack)
 	}
 	if f.repo.checked == nil {
@@ -259,7 +281,7 @@ func TestCleanScanRestoresHealthAndClosesOpenReports(t *testing.T) {
 	if err != nil || res.Entry.Status != nil {
 		t.Fatalf("clean = %+v, %v", res, err)
 	}
-	if f.repo.stack.Health != HealthHealthy {
+	if f.repo.stack.Health != requests.HealthHealthy {
 		t.Fatal("a clean scan restores health")
 	}
 	if st := f.repo.reports[0].Status; st == nil || *st != StatusReconciled || f.repo.reports[0].ResolvedBy != nil {
@@ -272,13 +294,13 @@ func TestCleanScanRestoresHealthAndClosesOpenReports(t *testing.T) {
 
 func TestFailedCheckKeepsHealthAndCheckTime(t *testing.T) {
 	f := newFixture(t, rbac.RoleDeveloper)
-	f.repo.stack.Health = HealthDrifted
+	f.repo.stack.Health = requests.HealthDrifted
 	r := Report{StackPath: testPath, GitHub: validReport().GitHub, Result: ResultError, TerraformExitCode: ExitError, Error: "init failed"}
 	res, err := f.svc.Record(context.Background(), f.bot, r)
 	if err != nil || res.Entry.Result != ResultError || res.Entry.Status != nil {
 		t.Fatalf("error report = %+v, %v", res, err)
 	}
-	if f.repo.stack.Health != HealthDrifted || f.repo.checked != nil {
+	if f.repo.stack.Health != requests.HealthDrifted || f.repo.checked != nil {
 		t.Fatalf("a failed check must not change health or the check time: %+v", f.repo.stack)
 	}
 	if got := f.repo.actions(); len(got) != 1 || got[0] != "drift.check_failed" {
@@ -331,7 +353,7 @@ func TestRecordRefusals(t *testing.T) {
 			if _, err := f.svc.Record(context.Background(), f.bot, validReport()); !hasCode(err, "stack_not_checkable") {
 				t.Fatalf("err = %v", err)
 			}
-			if f.repo.stack.Health != HealthHealthy || len(f.repo.reports) != 0 {
+			if f.repo.stack.Health != requests.HealthUnknown || len(f.repo.reports) != 0 {
 				t.Fatal("a refused report changes nothing")
 			}
 		})
@@ -378,7 +400,7 @@ func TestResolveReconcileOpensRequestAndAudits(t *testing.T) {
 		t.Fatalf("audit payload = %s, %v", f.repo.audits[0].Payload, err)
 	}
 	// Health stays drifted until a clean scan: resolving is not proof.
-	if f.repo.stack.Health != HealthDrifted {
+	if f.repo.stack.Health != requests.HealthDrifted {
 		t.Fatal("resolving must not restore health")
 	}
 
@@ -425,7 +447,7 @@ func TestResolveIgnoreNeedsMaintainerAndReason(t *testing.T) {
 	if err != nil || *res.Entry.Status != StatusIgnored || res.Entry.ResolutionNote != ignore.Reason {
 		t.Fatalf("maintainer ignore = %+v, %v", res, err)
 	}
-	if f.repo.stack.Health != HealthDrifted || m.repo.stack.Health != HealthDrifted {
+	if f.repo.stack.Health != requests.HealthDrifted || m.repo.stack.Health != requests.HealthDrifted {
 		t.Fatal("an ignored report keeps the stack drifted")
 	}
 }

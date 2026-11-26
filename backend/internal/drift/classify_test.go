@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/rbac"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/requests"
 )
 
 func TestClassifyExit(t *testing.T) {
@@ -28,22 +29,70 @@ func TestClassifyExit(t *testing.T) {
 }
 
 func TestNextHealth(t *testing.T) {
+	const (
+		unk, hea, deg, dri = requests.HealthUnknown, requests.HealthHealthy, requests.HealthDegraded, requests.HealthDrifted
+	)
+	// Rows: starting health; columns: drifted, clean, error (ADR-0013).
 	tests := []struct {
-		cur  Health
-		res  Result
-		want Health
+		cur                   requests.StackHealth
+		drifted, clean, error requests.StackHealth
 	}{
-		{HealthHealthy, ResultDrifted, HealthDrifted},
-		{HealthDrifted, ResultDrifted, HealthDrifted},
-		{HealthDrifted, ResultClean, HealthHealthy},
-		{HealthHealthy, ResultClean, HealthHealthy},
-		// A failed check says nothing about the stack.
-		{HealthHealthy, ResultError, HealthHealthy},
-		{HealthDrifted, ResultError, HealthDrifted},
+		{unk, dri, unk, unk},
+		{hea, dri, hea, hea},
+		// A refresh-only scan runs no smoke test: it must not erase a smoke failure by itself.
+		{deg, dri, deg, deg},
+		{dri, dri, hea, dri},
 	}
 	for _, tt := range tests {
-		if got := NextHealth(tt.cur, tt.res); got != tt.want {
-			t.Errorf("NextHealth(%s, %s) = %s, want %s", tt.cur, tt.res, got, tt.want)
+		for r, want := range map[Result]requests.StackHealth{ResultDrifted: tt.drifted, ResultClean: tt.clean, ResultError: tt.error} {
+			if got := NextHealth(tt.cur, r); got != want {
+				t.Errorf("NextHealth(%s, %s) = %s, want %s", tt.cur, r, got, want)
+			}
+		}
+	}
+	// The one lossy path, spelled out: degraded -> drift -> clean ends healthy.
+	h := NextHealth(NextHealth(deg, ResultDrifted), ResultClean)
+	if h != hea {
+		t.Errorf("degraded, drifted, clean = %s; the documented lossy path ends healthy", h)
+	}
+}
+
+func TestSummarizeError(t *testing.T) {
+	tests := []struct{ name, in, want string }{
+		{"empty", "", ""},
+		{"first line only", "Error: creating S3 Bucket: AccessDenied\n  with module.b.aws_s3_bucket.this,\n  on main.tf line 4", "Error: creating S3 Bucket: AccessDenied"},
+		{"box drawing and blank lines", "\n\u2502 Error: boom\n\u2502 detail", "Error: boom"},
+		{"secret assignments", "Error: bad password=hunter2 for token: abc123", "Error: bad password= <redacted> for token: <redacted>"},
+		{"access key id", "Error: key AKIAABCDEFGHIJKLMNOP rejected", "Error: key <redacted> rejected"},
+		{"bearer", "Error: Authorization failed with Bearer abc.def.ghi", "Error: Authorization failed with <redacted>"},
+		{"control characters", "Error: a\x1b[31mb", "Error: a [31mb"},
+	}
+	for _, tt := range tests {
+		if got := SummarizeError(tt.in); got != tt.want {
+			t.Errorf("%s: SummarizeError = %q, want %q", tt.name, got, tt.want)
+		}
+	}
+	if got := SummarizeError("Error: " + strings.Repeat("x", 500)); len([]rune(got)) != MaxSummaryLen || !strings.HasSuffix(got, "...") {
+		t.Errorf("long line = %d runes", len([]rune(got)))
+	}
+}
+
+func TestSuppresses(t *testing.T) {
+	ign, open := StatusIgnored, StatusOpen
+	e := func(st *Status, hash string) Entry { return Entry{Status: st, PlanHash: hash} }
+	for name, tt := range map[string]struct {
+		e    Entry
+		hash string
+		want bool
+	}{
+		"ignored, same hash":       {e(&ign, "aa"), "aa", true},
+		"ignored, other hash":      {e(&ign, "aa"), "bb", false},
+		"open, same hash":          {e(&open, "aa"), "aa", false},
+		"no status":                {e(nil, "aa"), "aa", false},
+		"ignored, no hash in scan": {e(&ign, ""), "", false},
+	} {
+		if got := Suppresses(tt.e, tt.hash); got != tt.want {
+			t.Errorf("%s: Suppresses = %v, want %v", name, got, tt.want)
 		}
 	}
 }

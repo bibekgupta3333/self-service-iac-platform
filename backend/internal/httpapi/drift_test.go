@@ -68,7 +68,7 @@ func (f *fakeDriftIngest) DueStacks(_ context.Context, limit int) ([]drift.DueSt
 }
 
 func driftRouter(svc DriftRecorder) http.Handler {
-	return NewRouter(Deps{Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DevAuthenticator{Principal: devPrincipal},
+	return NewRouter(Deps{Policies: testPolicies(), Roles: noRoles{}, Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DevAuthenticator{Principal: devPrincipal},
 		Internal:         AnyAuthenticator{NewOIDCAuthenticator(driftVerifier{}), NewTokenAuthenticator(testInternalToken, releaseBot)},
 		Ready:            okPinger{},
 		InternalHandlers: []RouteRegistrar{NewDriftIngestHandler(svc)},
