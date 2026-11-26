@@ -84,6 +84,9 @@ func (p RedirectPolicy) Resolve(target string) string {
 	origin := u.Scheme + "://" + u.Host
 	for _, o := range p.Origins {
 		if strings.EqualFold(o, origin) {
+			if base, err := url.Parse(o); err == nil {
+				u.Scheme, u.Host = base.Scheme, base.Host // the configured spelling
+			}
 			return u.String()
 		}
 	}
