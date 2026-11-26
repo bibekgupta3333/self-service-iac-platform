@@ -33,7 +33,7 @@ func TestMigrationsApplyAndAreIdempotent(t *testing.T) {
 	for _, table := range []string{
 		"teams", "users", "memberships", "modules", "module_versions", "environments", "stacks",
 		"stack_resources", "requests", "locks", "idempotency_keys", "audit_events", "pipeline_runs",
-		"oidc_jti",
+		"oidc_jti", "budgets",
 	} {
 		var exists bool
 		if err := pool.QueryRow(ctx, "SELECT to_regclass('public.'||$1) IS NOT NULL", table).Scan(&exists); err != nil || !exists {
