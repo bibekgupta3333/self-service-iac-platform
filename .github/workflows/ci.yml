@@ -2,7 +2,7 @@
 # LocalStack / PostgreSQL service containers. No cloud credentials are used.
 #
 # Every job is gated on the `detect` job so it skips cleanly until the
-# directory it covers (modules/, backend/, tests/, tools/) exists.
+# directory it covers (modules/, backend/, tests/, tools/, portal/) exists.
 name: ci
 
 on:
@@ -45,6 +45,7 @@ jobs:
       backend: ${{ steps.detect.outputs.backend }}
       terratest: ${{ steps.detect.outputs.terratest }}
       python_tools: ${{ steps.detect.outputs.python_tools }}
+      portal: ${{ steps.detect.outputs.portal }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -69,6 +70,7 @@ jobs:
             echo "backend=$(has backend/go.mod)"
             echo "terratest=$(has tests/go.mod)"
             echo "python_tools=$(has tools/**/test_*.py)"
+            echo "portal=$(has portal/package-lock.json)"
           } | tee -a "$GITHUB_OUTPUT"
 
   actionlint:
@@ -383,3 +385,40 @@ jobs:
 
       - name: CODEOWNERS matches .github/teams.yaml
         run: python -m tools.codeowners --check
+
+  portal:
+    name: portal (lint, typecheck, test, build)
+    needs: detect
+    if: needs.detect.outputs.portal == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: portal
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: portal/.nvmrc
+          cache: npm
+          cache-dependency-path: portal/package-lock.json
+
+      - name: npm ci
+        run: npm ci --no-audit --no-fund
+
+      - name: lint
+        run: npm run lint
+
+      - name: typecheck
+        run: npm run typecheck
+
+      - name: test
+        run: npm test
+
+      - name: build
+        run: npm run build
