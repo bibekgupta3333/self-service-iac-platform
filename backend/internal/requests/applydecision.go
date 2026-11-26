@@ -102,6 +102,7 @@ func (s Status) acceptsApplyReports() bool {
 // stacks, and it is idempotent by construction: replaying the same progress against the
 // state it produced yields no events, and a terminal request is never touched.
 //
+//   - A failed lock release is audited whatever the request's status and moves nothing.
 //   - A request that is not approved, applying or terminal has no business with apply.yml
 //     (it was never approved, or merged outside the platform's knowledge): conflict
 //     request_not_applying, and nothing is recorded.
@@ -117,14 +118,15 @@ func DecideApply(status Status, kind Kind, stack StackStatus, p ApplyProgress) (
 		return ApplyDecision{}, apperr.Conflict("request_not_applying",
 			fmt.Sprintf("a %s request in status %s cannot receive apply reports; it must be approved first", kind, status))
 	}
+	if p.Phase == PhaseObserved {
+		// Even for a terminal request: the backend releases the lock when the request ends,
+		// so a failed release is typically reported after the verdict.
+		return ApplyDecision{ReleaseFailed: p.ReleaseFailure != ""}, nil
+	}
 	if status.IsTerminal() {
 		return ApplyDecision{Ignore: "request_terminal"}, nil
 	}
 	var d ApplyDecision
-	if p.Phase == PhaseObserved {
-		d.ReleaseFailed = p.ReleaseFailure != ""
-		return d, nil
-	}
 	if status == StatusApproved {
 		d.Events = append(d.Events, EventApplyStarted)
 	}

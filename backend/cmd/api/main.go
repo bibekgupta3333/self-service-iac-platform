@@ -159,7 +159,7 @@ func run() error {
 			httpapi.NewBudgetContextHandler(budgets.NewService(budgets.NewPostgresRepository(pool), clock)),
 		},
 		Webhooks:         []httpapi.RouteRegistrar{webhookHandler},
-		PipelineHandlers: []httpapi.RouteRegistrar{httpapi.NewRunHandler(runs.NewService(runs.NewPostgresRepository(pool), clock))},
+		PipelineHandlers: []httpapi.RouteRegistrar{httpapi.NewRunHandler(runs.NewService(runs.NewPostgresRepository(pool, requests.NewApplyDriver(requestSvc, auditWriter)), clock))},
 		Metrics:          newMetrics(pool),
 		MetricsAccess:    httpapi.NewMetricsAccess(cfg.MetricsToken),
 	}

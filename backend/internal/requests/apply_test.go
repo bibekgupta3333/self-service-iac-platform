@@ -66,6 +66,8 @@ func TestDecideApply(t *testing.T) {
 			p: succeeded(HealthHealthy, `{}`), wantEvents: []Event{EventApplySucceeded}},
 		{name: "a release report never moves anything", status: StatusApplying, kind: KindUpdate, stack: StackUpdating,
 			p: ApplyProgress{Phase: PhaseObserved, Run: runRef, ReleaseFailure: "boom"}},
+		{name: "a failed release of an applied request is still observed", status: StatusApplied, kind: KindUpdate, stack: StackActive,
+			p: ApplyProgress{Phase: PhaseObserved, Run: runRef, ReleaseFailure: "boom"}},
 		{name: "a late success for an applied request is ignored", status: StatusApplied, kind: KindUpdate, stack: StackActive,
 			p: succeeded(HealthHealthy, `{}`), wantIgnore: "request_terminal"},
 		{name: "a late failure for an applied request is ignored", status: StatusApplied, kind: KindUpdate, stack: StackActive,

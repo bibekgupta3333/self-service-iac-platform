@@ -13,31 +13,44 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/db"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/locks"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/requests"
 )
 
 // PostgresRepository implements Repository with pgx.
-type PostgresRepository struct{ tx *db.TxRunner }
+type PostgresRepository struct {
+	tx     *db.TxRunner
+	driver *requests.ApplyDriver
+}
 
 var _ Repository = (*PostgresRepository)(nil)
 
-// NewPostgresRepository returns a PostgresRepository.
-func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
-	return &PostgresRepository{tx: db.NewTxRunner(pool)}
+// NewPostgresRepository returns a PostgresRepository. driver applies apply-pipeline
+// reports to requests and stacks inside the report's transaction.
+func NewPostgresRepository(pool *pgxpool.Pool, driver *requests.ApplyDriver) *PostgresRepository {
+	return &PostgresRepository{tx: db.NewTxRunner(pool), driver: driver}
 }
 
 // InTx implements Repository.
 func (r *PostgresRepository) InTx(ctx context.Context, fn func(Store) error) error {
-	return r.tx.InTx(ctx, func(tx pgx.Tx) error { return fn(&pgStore{tx: tx}) })
+	return r.tx.InTx(ctx, func(tx pgx.Tx) error { return fn(&pgStore{tx: tx, applier: r.driver.ForTx(tx)}) })
 }
 
-type pgStore struct{ tx pgx.Tx }
+type pgStore struct {
+	tx      pgx.Tx
+	applier requests.Applier
+}
 
-// StackIDByPath takes FOR KEY SHARE on the stacks row before anything touches locks, so
-// run reports lock stacks then locks, the same order as every lock operation (which takes
-// stacks FOR UPDATE first). The opposite order deadlocks against release and promotion.
+// Applier implements Store.
+func (s *pgStore) Applier() requests.Applier { return s.applier }
+
+// StackIDByPath takes FOR UPDATE on the stacks row before anything touches locks or
+// requests, so run reports lock stacks, then locks, then the request: the same order as
+// every lock operation and lifecycle transition. The opposite order deadlocks against
+// release and promotion, and a weaker lock that is upgraded later deadlocks two reports
+// of one stack against each other. It also applies reports of one stack one at a time.
 func (s *pgStore) StackIDByPath(ctx context.Context, path string) (uuid.UUID, error) {
 	var id uuid.UUID
-	err := s.tx.QueryRow(ctx, `SELECT id FROM stacks WHERE path = $1 FOR KEY SHARE`, path).Scan(&id)
+	err := s.tx.QueryRow(ctx, `SELECT id FROM stacks WHERE path = $1 FOR UPDATE`, path).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return uuid.Nil, apperr.NotFound("stack %q not found", path)
 	}
@@ -49,8 +62,8 @@ func (s *pgStore) StackIDByPath(ctx context.Context, path string) (uuid.UUID, er
 
 func (s *pgStore) RequestByShortID(ctx context.Context, shortID string) (RequestRef, error) {
 	var r RequestRef
-	err := s.tx.QueryRow(ctx, `SELECT id, stack_id, status::text FROM requests WHERE short_id = $1`, shortID).
-		Scan(&r.ID, &r.StackID, &r.Status)
+	err := s.tx.QueryRow(ctx, `SELECT id, stack_id, status::text, fencing_token FROM requests WHERE short_id = $1`, shortID).
+		Scan(&r.ID, &r.StackID, &r.Status, &r.FencingToken)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RequestRef{}, apperr.NotFound("request %q not found", shortID)
 	}
