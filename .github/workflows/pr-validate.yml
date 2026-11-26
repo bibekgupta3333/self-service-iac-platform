@@ -279,9 +279,13 @@ jobs:
           terraform plan -input=false -lock=false -no-color -detailed-exitcode
           terraform destroy -input=false -lock=false -no-color -auto-approve
 
-      # TODO(WBS 4.10): report plan_ready / plan_failed with the summary JSON to
-      # POST /v1/runs through the OIDC-authenticated iacp-report action (WBS 5.6)
-      # once the API's OIDC JWT verifier exists. Skipped until then.
+      # TODO(WBS 5.6): report plan_ready / plan_failed with the summary JSON to
+      # POST /v1/runs through the OIDC-authenticated iacp-report action. The API's
+      # OIDC verifier (WBS 4.10) exists; this step is not wired yet. The API requires
+      # the report's head_sha to equal the token's sha claim, which for pull_request
+      # events is the merge commit github.sha, NOT github.event.pull_request.head.sha
+      # (the PR head shown in the comment); send github.sha or the API answers
+      # 403 run_mismatch.
 
       - name: Build plan summary
         if: always()

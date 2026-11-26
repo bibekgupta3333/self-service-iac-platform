@@ -84,7 +84,7 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 | ID | Task | Est | Dep |
 |----|------|-----|-----|
 | [x] 5.1 | Changed-stack detection + matrix (`tools/stack_pipeline detect`) | 0.5 | 2.1 |
-| [~] 5.2 | `pr-validate.yml`: fmt, validate, plan (plan role), PR comment, report to API (LocalStack instead of the plan role per ADR-0009; API report pending 4.10; SARIF and Infracost not yet) | 2 | 2.4, 4.10 |
+| [~] 5.2 | `pr-validate.yml`: fmt, validate, plan (plan role), PR comment, report to API (LocalStack instead of the plan role per ADR-0009; API report step not wired yet, waiting on the 5.6 action, and it must send `github.sha` as `head_sha`; SARIF and Infracost not yet) | 2 | 2.4, 4.10 |
 | [ ] 5.3 | `apply.yml`: lock claim, re-plan, plan-hash verify, apply (apply role), outputs report | 2 | 5.2, 4.6 |
 | [x] 5.4 | Concurrency groups per stack, caching (providers, plugins) | 0.5 | 5.2 |
 | [ ] 5.5 | Infracost step + PR comment (informational in MVP) | 1 | 5.2 |
