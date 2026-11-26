@@ -193,22 +193,24 @@ jobs:
 
       # The SARIF was written by tools that run PR-controlled configuration. A run's
       # automationDetails.id would win over the upload's `category`, so a same-repo PR
-      # could forge another category (and replace its alerts). Strip it and
-      # versionControlProvenance, as pr-validate does; a file that cannot be stripped
-      # is removed and not uploaded. Paths here are already repository-relative.
+      # could forge another category (and replace its alerts). The properties are
+      # dropped with the runner's own jq (no PR code, no pip install), into a separate
+      # directory. Only that directory is uploaded, so a file that cannot be stripped
+      # is never uploaded raw. Paths here are already repository-relative.
       - name: Strip run properties the upload owns
         if: always()
-        continue-on-error: true
         run: |
           shopt -s nullglob
-          python -m pip install --quiet "$(grep -E '^pyyaml==' tools/requirements.txt)"
+          mkdir -p "$RUNNER_TEMP/sarif-upload"
           for f in "$RUNNER_TEMP"/sarif/*.sarif; do
-            if python -m tools.stack_pipeline --repo-root "$GITHUB_WORKSPACE" sarif --strip-only \
-                 --in "$f" --out "$f.stripped"; then
-              mv "$f.stripped" "$f"
+            out="$RUNNER_TEMP/sarif-upload/$(basename "$f")"
+            if jq -e '(.runs | type) == "array" and all(.runs[]; type == "object")' "$f" >/dev/null 2>&1 \
+                && jq '.runs |= map(del(.automationDetails, .versionControlProvenance))' "$f" > "$out.tmp" \
+                && mv "$out.tmp" "$out"; then
+              echo "prepared $(basename "$f")"
             else
+              rm -f "$out" "$out.tmp"
               echo "::warning title=SARIF::$(basename "$f") could not be prepared and is not uploaded"
-              rm -f "$f" "$f.stripped"
             fi
           done
 
@@ -223,7 +225,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ci-sarif
-          path: ${{ runner.temp }}/sarif/*.sarif
+          path: ${{ runner.temp }}/sarif-upload/*.sarif
           if-no-files-found: ignore
           retention-days: 7
           overwrite: true
