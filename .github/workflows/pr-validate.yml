@@ -216,15 +216,12 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/bin" conftest
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
-      # Provider and TFLint plugin caches (WBS 5.4). Provider downloads are still
-      # verified against the committed .terraform.lock.hcl on init.
-      - name: Cache Terraform providers
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ${{ env.TF_PLUGIN_CACHE_DIR }}
-          key: tf-providers-${{ runner.os }}-${{ hashFiles(format('{0}/.terraform.lock.hcl', matrix.stack.path)) }}
-          restore-keys: tf-providers-${{ runner.os }}-
-
+      # No provider cache here. A PR's runs may restore caches saved on the PR's own ref, and
+      # an earlier run of the same PR (with a changed workflow) could have saved a provider
+      # package under the key a later, clean-looking run restores; `terraform init` accepts
+      # that package when the lock lists its hash. Providers are downloaded and verified
+      # against the pinned lock on every run instead (only the TFLint plugin cache below stays,
+      # TFLint plugins are keyed by the platform-owned .tflint.hcl).
       - name: Cache TFLint plugins
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
