@@ -61,7 +61,7 @@ type Policy struct {
 	Issuer       string
 	Audience     string
 	Repository   string   // owner/name; repository_owner must be its owner part
-	RepositoryID string   // optional numeric id; checked when set (survives repository renames)
+	RepositoryID string   // optional numeric id; when set every token must carry exactly this id (survives renames and re-registration)
 	Refs         []string // path.Match patterns for the ref claim
 	WorkflowRefs []string // path.Match patterns for the job_workflow_ref claim
 }

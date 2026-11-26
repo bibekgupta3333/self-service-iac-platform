@@ -166,6 +166,9 @@ func newMachineAuthenticator(cfg config.Config, clock platform.Clock) (httpapi.A
 			return nil, err
 		}
 		chain = append(chain, httpapi.NewOIDCAuthenticator(verifier))
+		if o.RepositoryID == "" {
+			slog.Warn("IACP_OIDC_REPOSITORY_ID is not set: tokens are matched by owner/name only, which can be re-registered after a rename or delete")
+		}
 		slog.Info("GitHub OIDC enabled for machine endpoints", "repository", o.Repository, "issuer", o.Issuer)
 	}
 	if cfg.InternalToken != "" {

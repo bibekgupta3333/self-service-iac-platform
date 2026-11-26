@@ -189,6 +189,9 @@ func TestVerify(t *testing.T) {
 		{name: "wrong repository id", token: func() string {
 			return sign(t, k1, "k1", mutate(func(c *Claims) { c.RepositoryID = "1" }))
 		}},
+		{name: "repository id missing while one is configured", token: func() string {
+			return sign(t, k1, "k1", mutate(func(c *Claims) { c.RepositoryID = "" }))
+		}},
 		{name: "ref not allowed", forbidden: true, token: func() string {
 			return sign(t, k1, "k1", mutate(func(c *Claims) { c.Ref = "refs/heads/feature" }))
 		}},
