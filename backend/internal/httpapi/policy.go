@@ -60,6 +60,11 @@ func DefaultPolicies() PolicyTable {
 		// Rollback is the matrix's "retry failed apply / rollback" (maintainer+); the service
 		// checks it again against the caller's role in the stack's team.
 		"POST /v1/stacks/{id}/rollback": {Action: rbac.ActionRetry, Scope: ScopeAnyTeam},
+		// Drift history of one visible stack. Resolving needs the developer role at least
+		// (reconcile, codify); the service raises it to maintainer for ignore and checks the
+		// caller's role in the report's team (docs/07 matrix).
+		"GET /v1/stacks/{id}/drift":   {Action: rbac.ActionRead, Scope: ScopeAnyTeam},
+		"POST /v1/drift/{id}/resolve": {Action: rbac.ActionDriftReconcile, Scope: ScopeAnyTeam},
 		// Extending an ephemeral stack's TTL needs the stack.extend_ttl role (developer) in the
 		// stack's team; the service checks it against the stack's team and environment and
 		// answers 404 for a stack of another team.

@@ -103,6 +103,9 @@ type Store interface {
 	// LatestSpec returns the spec of the stack's newest create or update request that is not
 	// failed, rejected or cancelled; ok is false when there is none.
 	LatestSpec(ctx context.Context, stackID uuid.UUID) (spec json.RawMessage, ok bool, err error)
+	// LastAppliedSpec returns the spec of the request that last applied successfully to the
+	// stack (stacks.last_applied_request_id); ok is false when none did.
+	LastAppliedSpec(ctx context.Context, stackID uuid.UUID) (spec json.RawMessage, ok bool, err error)
 	// OpenRequestKinds lists the kinds of the stack's requests that are not terminal yet.
 	OpenRequestKinds(ctx context.Context, stackID uuid.UUID) ([]Kind, error)
 	// LockRequest loads the request FOR UPDATE.
@@ -175,6 +178,10 @@ type CreateCommand struct {
 	IdempotencyKey string
 	RequestHash    string // RequestHash(method, path, body)
 	CorrelationID  string
+	// RefuseIfOpen makes an update or destroy of an existing stack fail with stack_busy when
+	// the stack has any open request, instead of queueing behind it. The check runs under
+	// the stack row lock, in the transaction that would queue the request.
+	RefuseIfOpen bool
 }
 
 // CreateResult is the outcome of Create.
@@ -460,6 +467,10 @@ func (s *Service) createForStack(ctx context.Context, st Store, by identity.Prin
 	}
 	if err := CheckStackAllowsKind(in.Kind, t.Status, open); err != nil {
 		return nil, err
+	}
+	if cmd.RefuseIfOpen && len(open) > 0 {
+		return nil, apperr.Conflict("stack_busy",
+			"a request is open for the stack; it re-asserts the configuration when it applies, so a reconcile now would race it")
 	}
 	if in.Kind == KindUpdate && !in.AllowRemovals {
 		if err := s.checkNoRemovals(ctx, st, t.ID, in); err != nil {
