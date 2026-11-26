@@ -327,8 +327,8 @@ CREATE TABLE budgets (
     updated_at      timestamptz   NOT NULL DEFAULT now(),
     override_reason text,                                           -- >= 20 chars; override_by, reason and expiry are set or null together
     override_expires_at timestamptz,
-    override_max_delta_usd numeric(12,2),                           -- the override covers a stack costing at most this per month
-    single_change_cap_usd  numeric(12,2) NOT NULL DEFAULT 5000,     -- one stack above this is denied whatever the headroom
+    override_max_delta_usd numeric(12,2),                           -- the override covers an overrun (projected - limit, or estimate - cap) of at most this
+    single_change_cap_usd  numeric(12,2),                           -- NULL = no cap; a stack above it is denied whatever the headroom
     actual_usd      numeric(12,2) CHECK (actual_usd IS NULL OR actual_usd >= 0),  -- recorded by POST /internal/budget-actuals
     actual_recorded_at timestamptz,
     UNIQUE NULLS NOT DISTINCT (team_id, environment_id, month),
@@ -924,11 +924,11 @@ data: {"request_id":"…","status":"applied"}
 
 ```json
 { "environment": "staging", "limit_usd": 2500.50, "currency": "USD", "hard_block": true,
-  "alert_thresholds": [50, 80, 100], "single_change_cap_usd": 5000,
+  "alert_thresholds": [50, 80, 100], "single_change_cap_usd": null,
   "override": { "reason": "launch week capacity, approved in CAB-123", "max_delta_usd": 750, "expires_at": "2026-12-01T00:00:00Z" } }
 ```
 
-`limit_usd` is required, from 0 to 1,000,000 with at most two decimals; `currency` is empty or `USD`; `environment` is `development`, `staging`, `production`, or omitted for a team-wide budget (an environment row wins over a team-wide row for that environment); `hard_block` defaults to true; `alert_thresholds` defaults to `[50,80,100]` (1 to 200 percent, at most ten, sorted and de-duplicated). `single_change_cap_usd` defaults to 5000 (0 to 1,000,000). `override` waives the hard limit or the cap until `expires_at` (at most 31 days away, reason 20 to 500 characters) for a stack whose monthly cost is at most `max_delta_usd` (required, above 0, at most 1,000,000), outside production only ([07 §6.7](07-security-and-policy.md#67-budget-limit)): an override on a production-scoped budget is a `422` (`/override`). Omitting it clears an override; re-sending an identical one keeps its grantor and is not audited as a new grant. A `PUT` replaces the row's settings, never `spent_usd` or `actual_usd`. All problems are returned together as `422 validation_failed` field errors (`/limit_usd`, `/currency`, `/environment`, `/alert_thresholds`, `/single_change_cap_usd`, `/override`, `/override/reason`, `/override/expires_at`, `/override/max_delta_usd`); `404` for an unknown team, `422 invalid_month` for a bad month. The response (`200`) is the stored budget: `id`, `team`, `environment` (null = every environment), `month`, `currency`, `limit_usd`, `spent_usd`, `actual_usd`, `used_usd` (the larger of `spent_usd` and `actual_usd`), `utilisation_pct`, `hard_block`, `alert_thresholds`, `single_change_cap_usd`, `override` (`granted_by`, `reason`, `expires_at`, `max_delta_usd`, or null), `updated_by`, `updated_at`. Each write appends to the audit chain in the same transaction: `budget.set` (amounts as decimal strings, with the previous limit), plus `budget.override.granted` or `budget.override.revoked`.
+`limit_usd` is required, from 0 to 1,000,000 with at most two decimals; `currency` is empty or `USD`; `environment` is `development`, `staging`, `production`, or omitted for a team-wide budget (an environment row wins over a team-wide row for that environment); `hard_block` defaults to true; `alert_thresholds` defaults to `[50,80,100]` (1 to 200 percent, at most ten, sorted and de-duplicated). `single_change_cap_usd` (0 to 1,000,000) is optional; omitted or null means no cap, because the policy compares it with the stack's whole estimated cost, not the change. `override` waives the hard limit or the cap until `expires_at` (at most 31 days away, reason 20 to 500 characters) while the overrun it allows (`projected - limit`, or `estimate - cap`) is at most `max_delta_usd` (required, above 0, at most 1,000,000), outside production only ([07 §6.7](07-security-and-policy.md#67-budget-limit)): an override on a production-scoped budget is a `422` (`/override`). Omitting it clears an override; re-sending an identical one keeps its grantor and is not audited as a new grant. A `PUT` replaces the row's settings, never `spent_usd` or `actual_usd`. All problems are returned together as `422 validation_failed` field errors (`/limit_usd`, `/currency`, `/environment`, `/alert_thresholds`, `/single_change_cap_usd`, `/override`, `/override/reason`, `/override/expires_at`, `/override/max_delta_usd`); `404` for an unknown team, `422 invalid_month` for a bad month. The response (`200`) is the stored budget: `id`, `team`, `environment` (null = every environment), `month`, `currency`, `limit_usd`, `spent_usd`, `actual_usd`, `used_usd` (the larger of `spent_usd` and `actual_usd`), `utilisation_pct`, `hard_block`, `alert_thresholds`, `single_change_cap_usd`, `override` (`granted_by`, `reason`, `expires_at`, `max_delta_usd`, or null), `updated_by`, `updated_at`. Each write appends to the audit chain in the same transaction: `budget.set` (amounts as decimal strings, with the previous limit), plus `budget.override.granted` or `budget.override.revoked`.
 
 The per-request override (`POST /requests/{id}/budget-override`) and the `budget_overrides` table remain planned; the budget-level override above is what `budget.rego` reads today.
 
@@ -1066,7 +1066,7 @@ Current implementation (WBS 4.10, 5.3): `pipeline` is one of `validate`, `apply`
       "environment": "development", "team": "payments", "stack": "order-events",
       "stack_path": "environments/development/payments/order-events",
       "allowed_regions": ["us-east-1"],
-      "budget": { "month": "2026-11", "limit_usd": 2000.0, "spent_usd": 0, "actual_usd": null, "hard_block": true, "scope": "environment", "single_change_cap_usd": 5000 },
+      "budget": { "month": "2026-11", "limit_usd": 2000.0, "spent_usd": 0, "actual_usd": null, "hard_block": true, "scope": "environment", "single_change_cap_usd": null },
       "budget_override": null,
       "current_committed_usd": 0,
       "exceptions": [],
