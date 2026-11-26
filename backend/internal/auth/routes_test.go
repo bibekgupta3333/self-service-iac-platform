@@ -39,6 +39,14 @@ func TestAuthorizeRoute(t *testing.T) {
 		{"drift may not read the budget context", RouteBudgetContext, wfFor("drift.yml", main, "schedule"), false},
 		{"module release may not read the budget context", RouteBudgetContext, wfFor("module-release.yml", main, "push"), false},
 		{"budget context refuses workflow_run", RouteBudgetContext, wfFor("apply.yml", main, "workflow_run"), false},
+		{"apply on main may look up the request", RouteRequestLookup, wfFor("apply.yml", main, "push"), true},
+		{"apply dispatch on main may look up the request", RouteRequestLookup, wfFor("apply.yml", main, "workflow_dispatch"), true},
+		{"shared token may look up the request", RouteRequestLookup, nil, true},
+		{"pr-validate may not look up the request", RouteRequestLookup, wfFor("pr-validate.yml", pr, "pull_request"), false},
+		{"pr-validate on main may not look up the request", RouteRequestLookup, wfFor("pr-validate.yml", main, "push"), false},
+		{"apply from a PR ref may not look up the request", RouteRequestLookup, wfFor("apply.yml", pr, "pull_request"), false},
+		{"apply on a schedule may not look up the request", RouteRequestLookup, wfFor("apply.yml", main, "schedule"), false},
+		{"ttl reaper may not look up the request", RouteRequestLookup, wfFor("ttl-reaper.yml", main, "schedule"), false},
 		{"unknown class denies", RouteClass("other"), wfFor("apply.yml", main, "push"), false},
 	}
 	for _, tt := range tests {

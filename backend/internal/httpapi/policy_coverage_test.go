@@ -33,8 +33,9 @@ func TestEveryUserRouteHasAPolicy(t *testing.T) {
 	ah := &AuthHandler{Login: &flowLogin{}, Profiles: flowProfiles{}}
 	h := NewRouter(Deps{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DenyAuthenticator{}, Ready: okPinger{},
-		Catalog:          NewCatalogHandler(nil),
-		Public:           []RouteRegistrar{NewRequestHandler(nil, nil), NewAuditHandler(nil), ah},
+		Catalog: NewCatalogHandler(nil),
+		Public: []RouteRegistrar{NewRequestHandler(nil, nil), NewRequestEventsHandler(nil, StreamOptions{}),
+			NewStackHandler(nil), NewAuditHandler(nil), ah},
 		PublicHandlers:   []RouteRegistrar{ah.Public()},
 		InternalHandlers: []RouteRegistrar{NewLockHandler(nil), NewBudgetContextHandler(nil)},
 		PipelineHandlers: []RouteRegistrar{NewRunHandler(nil)},

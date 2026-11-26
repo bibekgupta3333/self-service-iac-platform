@@ -53,6 +53,11 @@ func DefaultPolicies() PolicyTable {
 		"GET /v1/audit/verify":  {Action: rbac.ActionAuditViewAll, Scope: ScopePlatform},
 		"GET /v1/requests":      {Action: rbac.ActionRead, Scope: ScopeAnyTeam},
 		"GET /v1/requests/{id}": {Action: rbac.ActionRead, Scope: ScopeAnyTeam},
+		// The status stream of one request: read, limited to the request's team by the service.
+		"GET /v1/requests/{id}/events": {Action: rbac.ActionRead, Scope: ScopeAnyTeam},
+		// Stacks of the caller's teams; the queries are scoped by identity.Visibility.
+		"GET /v1/stacks":      {Action: rbac.ActionRead, Scope: ScopeAnyTeam},
+		"GET /v1/stacks/{id}": {Action: rbac.ActionRead, Scope: ScopeAnyTeam},
 		// The catalog is shared reference data (docs/03: "any").
 		"GET /v1/catalog/modules":                           {Action: rbac.ActionRead, Scope: ScopeAuthenticated},
 		"GET /v1/catalog/modules/{name}":                    {Action: rbac.ActionRead, Scope: ScopeAuthenticated},

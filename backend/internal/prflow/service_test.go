@@ -302,6 +302,45 @@ func TestBuildStackSpec(t *testing.T) {
 	}
 }
 
+// TestDestroyRendersAnEmptyMarkedRoot: a destroy request names no modules, resolves none,
+// and renders a root whose iacp.stack.json says lifecycle destroy.
+func TestDestroyRendersAnEmptyMarkedRoot(t *testing.T) {
+	r := draftRequest()
+	r.Kind = requests.KindDestroy
+	raw, _ := json.Marshal(requests.NormalizedSpec{Team: "payments", Environment: "development", Stack: "orders",
+		Region: "us-east-1", Resources: []requests.ResourceInput{}, DependsOn: []string{}})
+	r.Spec = raw
+	spec, err := DecodeSpec(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := BuildStackSpec(r, spec, nil, "cc-1", "~> 1.13", "~> 5.80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Lifecycle != generator.LifecycleDestroy || len(got.Resources) != 0 {
+		t.Fatalf("spec = %+v", got)
+	}
+	files, err := generator.New("https://example.test/iacp.git", generator.LocalBackend{},
+		generator.LocalStackProvider{Endpoint: "http://localhost:4566"}).Render(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(files[generator.FileMain]), "module ") ||
+		!strings.Contains(string(files[generator.FileStackJSON]), `"lifecycle": "destroy"`) {
+		t.Fatalf("main.tf:\n%s\niacp.stack.json:\n%s", files[generator.FileMain], files[generator.FileStackJSON])
+	}
+	// An update renders like a create, and an unmarked root stays active.
+	u := draftRequest()
+	u.Kind = requests.KindUpdate
+	us, _ := DecodeSpec(u)
+	v, _ := fakeVersions{}.GetVersion(context.Background(), "sqs", "1.3.0")
+	if g, err := BuildStackSpec(u, us, map[string]catalog.ModuleVersion{VersionKey("sqs", "1.3.0"): v}, "", "a", "b"); err != nil ||
+		g.Lifecycle != generator.LifecycleActive || len(g.Resources) != 1 {
+		t.Fatalf("update spec = %+v, %v", g, err)
+	}
+}
+
 // TestPublishToLocalGit runs the real generator and local git adapter end to end.
 func TestPublishToLocalGit(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {

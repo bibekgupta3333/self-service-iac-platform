@@ -233,7 +233,7 @@ func RenderStackJSON(spec StackSpec, res []decodedResource, backend string) ([]b
 	}
 	b, err := json.MarshalIndent(stackJSON{
 		Backend: backend, DependsOn: deps, Environment: spec.Environment, FencingToken: spec.FencingToken,
-		Lifecycle: "active", Modules: mods, Region: spec.Region, RequestID: spec.RequestID, Stack: spec.Stack, Team: spec.Team,
+		Lifecycle: spec.lifecycleOf(), Modules: mods, Region: spec.Region, RequestID: spec.RequestID, Stack: spec.Stack, Team: spec.Team,
 	}, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("encode %s: %w", FileStackJSON, err)

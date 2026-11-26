@@ -150,8 +150,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     lock = sub.add_parser("lock", help="claim or release the platform stack lock (/v1/internal/stacks/{id}/lock)")
     lock.add_argument("action", choices=("acquire", "release"))
-    lock.add_argument("--stack-id", required=True, help="stack UUID")
-    lock.add_argument("--request-id", required=True, help="request UUID")
+    lock.add_argument("--stack-id", help="stack UUID (acquire: resolved through --stack-path when omitted)")
+    lock.add_argument("--request-id", help="request UUID (acquire: resolved through --stack-path when omitted)")
+    lock.add_argument("--stack-path",
+                      help="environments/<env>/<team>/<stack>. acquire resolves the stack and request UUIDs, and the "
+                           "approved plan hash, with GET /v1/internal/requests/by-path when they are not passed; the "
+                           "lookup fails closed")
+    lock.add_argument("--head-sha", default="",
+                      help="commit that triggered the run; the API refuses a request that was merged as another commit")
     lock.add_argument("--fencing-token", type=int,
                       help="token from acquire (release only); without it, release whatever lock this request holds")
     _api_arguments(lock)
@@ -159,7 +165,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--github-output",
         type=str,
         default=os.environ.get("GITHUB_OUTPUT"),
-        help="append claimed= and fencing_token= here (default: $GITHUB_OUTPUT)",
+        help="append attempted=, claimed= and fencing_token= here, and stack_id=, request_id= and "
+             "approved_plan_hash= when acquire resolved them (default: $GITHUB_OUTPUT)",
     )
     return parser
 
@@ -274,6 +281,11 @@ def run_verify_modules(args: argparse.Namespace) -> int:
     meta = FileSystemStackRepository(args.repo_root).load_dir(args.stack_dir)
     manifest = Path(args.stack_dir) / MANIFEST
     data = _read_json(manifest)
+    if data is None and not meta.modules:
+        # terraform init writes no modules.json for a root with no module calls (a destroy
+        # root). With nothing pinned, a missing manifest can only mean there is nothing to check.
+        print(f"{meta.ref.key}: no module calls and no pins; nothing to verify")
+        return 0
     if data is None:
         raise PinError(f"{manifest} is missing or unreadable; run terraform init first")
     verifier = ModuleInstallVerifier(GitCli(args.repo_root), args.repo_url)
@@ -419,14 +431,17 @@ def run_lock(args: argparse.Namespace) -> int:
         return 0
     client = _client(args, os.environ)
     if args.action == "acquire":
+        stack_id, request_id = _lock_ids(client, args, out)
         # Recorded before the call: when the grant commits but every response is
         # lost (timeout), the always() release still runs and finds the lock.
         _write_outputs(out, {"attempted": "true"})
-        claim = client.acquire_lock(args.stack_id, args.request_id)
+        claim = client.acquire_lock(stack_id, request_id)
         _write_outputs(out, {"claimed": "true", "fencing_token": str(claim.fencing_token)})
         print(f"stack lock {claim.outcome} for request {claim.request_id}: fencing token {claim.fencing_token}, "
               f"expires {claim.expires_at}")
         return 0
+    if not (args.stack_id and args.request_id):
+        raise ValueError("lock release needs --stack-id and --request-id")
     token = args.fencing_token
     if token is None:
         token = _own_lock_token(client, args.stack_id, args.request_id)
@@ -438,6 +453,32 @@ def run_lock(args: argparse.Namespace) -> int:
     promoted = (body.get("promoted") or {}).get("request_id")
     print(f"stack lock released (token {token}); promoted: {promoted or 'none'}")
     return 0
+
+
+def _lock_ids(client: IacpApiClient, args: argparse.Namespace, out: Path | None) -> tuple[str, str]:
+    """The stack and request UUIDs to lock for.
+
+    With --stack-path the API is always asked (GET /v1/internal/requests/by-path), even when
+    both ids were passed: the answer supplies the approved plan hash and proves the ids name
+    the request that holds the stack lock and is merged. Ids passed next to --stack-path must
+    agree with it. The answer is written to the step outputs (stack_id, request_id,
+    approved_plan_hash) before the claim, so the release step and the plan-hash check can use
+    it. A lookup that finds nothing raises, so the job fails instead of applying without the
+    lock. Only without --stack-path are two passed ids used as they are (no lookup is possible).
+    """
+    if not args.stack_path:
+        if args.stack_id and args.request_id:
+            return args.stack_id, args.request_id
+        raise ValueError("lock acquire needs --stack-id and --request-id, or --stack-path to resolve them")
+    resolved = client.resolve_request(args.stack_path, args.head_sha)
+    for given, found, what in ((args.stack_id, resolved.stack_id, "stack"), (args.request_id, resolved.request_id, "request")):
+        if given and given.strip().lower() != found:
+            raise ApiError(f"--{what}-id {given} is not the {what} the API resolved for {args.stack_path} ({found})")
+    _write_outputs(out, {"stack_id": resolved.stack_id, "request_id": resolved.request_id,
+                         "approved_plan_hash": resolved.approved_plan_hash})
+    print(f"resolved {args.stack_path}: request {resolved.request_short_id or resolved.request_id}, "
+          f"approved plan hash {resolved.approved_plan_hash or 'none'}")
+    return resolved.stack_id, resolved.request_id
 
 
 def _own_lock_token(client: IacpApiClient, stack_id: str, request_id: str) -> int | None:

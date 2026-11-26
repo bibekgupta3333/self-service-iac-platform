@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -95,6 +96,13 @@ type Store interface {
 	// Locks returns the stack-lock store bound to the same transaction.
 	Locks() locks.Store
 	GetRequestByShortID(ctx context.Context, shortID string) (*Request, error)
+	// LockStackTarget loads an existing stack FOR UPDATE (apperr NotFound when it does not exist).
+	LockStackTarget(ctx context.Context, id uuid.UUID) (StackTarget, error)
+	// LatestSpec returns the spec of the stack's newest create or update request that is not
+	// failed, rejected or cancelled; ok is false when there is none.
+	LatestSpec(ctx context.Context, stackID uuid.UUID) (spec json.RawMessage, ok bool, err error)
+	// OpenRequestKinds lists the kinds of the stack's requests that are not terminal yet.
+	OpenRequestKinds(ctx context.Context, stackID uuid.UUID) ([]Kind, error)
 	// LockRequest loads the request FOR UPDATE.
 	LockRequest(ctx context.Context, id uuid.UUID) (*Request, error)
 	// UpdateRequest writes r's mutable fields if the stored status is still from;
@@ -133,6 +141,15 @@ type Repository interface {
 	InTx(ctx context.Context, fn func(Store) error) error
 	Get(ctx context.Context, id uuid.UUID) (*Request, error)
 	List(ctx context.Context, f ListFilter) ([]*Request, error)
+	// StackHolder returns the stack at a canonical path with its lock and the lock holder's
+	// request; apperr NotFound (stack_not_found) when no stack has that path.
+	StackHolder(ctx context.Context, path string) (StackHolder, error)
+	// StackTarget loads an existing stack for an update or destroy (apperr NotFound when missing).
+	StackTarget(ctx context.Context, id uuid.UUID) (StackTarget, error)
+	// StatusEventsAfter lists up to limit status changes of a request with Seq > after, oldest first.
+	StatusEventsAfter(ctx context.Context, id uuid.UUID, after int64, limit int) ([]StatusEvent, error)
+	// LatestStatusSeq is the Seq of the request's newest status change (0 when none).
+	LatestStatusSeq(ctx context.Context, id uuid.UUID) (int64, error)
 }
 
 // VersionLookup resolves pinned module versions (implemented by catalog.Service).
@@ -164,6 +181,8 @@ type Service struct {
 	ids      platform.IDGenerator
 	// publishing enqueues request.publish jobs for requests holding the stack lock.
 	publishing bool
+	// access scopes the status feed to the caller's visible teams (WithAccess).
+	access RequestViewer
 }
 
 // Memberships resolves a user's role in a team (users.is_platform_admin counts as admin).
@@ -260,14 +279,80 @@ func (s *Service) precheck(ctx context.Context, by identity.Principal, in Create
 	if errs := ValidateShape(in); len(errs) > 0 {
 		return apperr.Invalid("validation_failed", "request is invalid", errs...)
 	}
+	if in.Kind.TargetsExistingStack() {
+		return s.precheckExisting(ctx, by, in)
+	}
 	role, err := s.members.RoleInTeam(ctx, in.Team, by.UserID)
 	if err != nil {
 		return fieldLookupError(err, "/team", fmt.Sprintf("unknown team %q", in.Team))
 	}
-	if d := rbac.Decide(role, ActionFor(in.Kind), rbac.Resource{Environment: in.Environment}); !d.Allowed {
-		return apperr.Forbidden(fmt.Sprintf("creating a %s request for team %s needs the %s role or higher", in.Kind, in.Team, d.Need))
+	if err := authorizeKind(role, in.Kind, in.Environment, in.Team); err != nil {
+		return err
 	}
-	resolved, err := s.resolve(ctx, in.Resources)
+	return s.checkResources(ctx, in.Resources)
+}
+
+// precheckExisting is precheck for an update or destroy: the stack must exist, the caller
+// needs the role in its team, the stack must be in a state that takes the kind (checked
+// again inside the transaction, with the open requests), and a destroy must repeat the
+// stack's name.
+func (s *Service) precheckExisting(ctx context.Context, by identity.Principal, in CreateInput) error {
+	t, err := s.repo.StackTarget(ctx, *in.StackID)
+	if err != nil {
+		return stackLookupError(err, *in.StackID)
+	}
+	role, err := s.members.RoleInTeam(ctx, t.TeamSlug, by.UserID)
+	if err != nil {
+		return fmt.Errorf("lookup membership of team %s: %w", t.TeamSlug, err)
+	}
+	if role == RoleNone {
+		// No role in the team: the stack is hidden, exactly as if it did not exist.
+		return stackNotFound(*in.StackID)
+	}
+	if err := authorizeKind(role, in.Kind, t.Environment, t.TeamSlug); err != nil {
+		return err
+	}
+	if err := CheckStackAllowsKind(in.Kind, t.Status, nil); err != nil {
+		return err
+	}
+	if in.Kind == KindDestroy && in.ConfirmStackName != t.Name {
+		return apperr.Invalid("validation_failed", "the confirmation does not match the stack name",
+			apperr.FieldError{Pointer: "/confirm_stack_name", Code: "mismatch",
+				Message: fmt.Sprintf("must be %q, the name of the stack to destroy", t.Name)})
+	}
+	if !in.Kind.RequiresResources() {
+		return nil
+	}
+	return s.checkResources(ctx, in.Resources)
+}
+
+// authorizeKind is the one decision whether a caller with role in team may create a request
+// of kind against environment env. It is the rbac matrix (docs/07; ActionFor maps the kind),
+// so create, update and destroy all follow it, including "an unknown environment counts as
+// production". Pure.
+func authorizeKind(role Role, kind Kind, env, team string) error {
+	if d := rbac.Decide(role, ActionFor(kind), rbac.Resource{Environment: env}); !d.Allowed {
+		return apperr.Forbidden(fmt.Sprintf("creating a %s request for team %s needs the %s role or higher", kind, team, d.Need))
+	}
+	return nil
+}
+
+func stackNotFound(id uuid.UUID) error {
+	return &apperr.Error{Kind: apperr.KindNotFound, Code: "stack_not_found", Message: fmt.Sprintf("stack %s not found", id)}
+}
+
+// stackLookupError maps a failed stack lookup: a missing stack is the same not-found as a
+// hidden one.
+func stackLookupError(err error, id uuid.UUID) error {
+	if apperr.IsKind(err, apperr.KindNotFound) {
+		return stackNotFound(id)
+	}
+	return fmt.Errorf("lookup stack %s: %w", id, err)
+}
+
+// checkResources resolves the pinned module versions and validates every resource's inputs.
+func (s *Service) checkResources(ctx context.Context, resources []ResourceInput) error {
+	resolved, err := s.resolve(ctx, resources)
 	if err != nil {
 		return err
 	}
@@ -278,6 +363,9 @@ func (s *Service) precheck(ctx context.Context, by identity.Principal, in Create
 }
 
 func (s *Service) create(ctx context.Context, st Store, by identity.Principal, cmd CreateCommand) (*Request, error) {
+	if cmd.Input.Kind.TargetsExistingStack() {
+		return s.createForStack(ctx, st, by, cmd)
+	}
 	in := cmd.Input
 	team, err := st.TeamBySlug(ctx, in.Team)
 	if err != nil {
@@ -316,23 +404,96 @@ func (s *Service) create(ctx context.Context, st Store, by identity.Principal, c
 		return nil, fmt.Errorf("insert stack: %w", err)
 	}
 
-	spec, err := json.Marshal(Normalize(in, region))
+	return s.record(ctx, st, by, cmd, StackRef{ID: stack.ID, Path: path, Status: string(StackProvisioning)}, team.ID,
+		Normalize(in, region))
+}
+
+// createForStack records an update or destroy of an existing stack. It locks the stack row
+// first (the order every lock operation uses), re-checks the stack's state against its
+// open requests, and then takes the stack lock or queues like a create.
+func (s *Service) createForStack(ctx context.Context, st Store, by identity.Principal, cmd CreateCommand) (*Request, error) {
+	in := cmd.Input
+	t, err := st.LockStackTarget(ctx, *in.StackID)
+	if err != nil {
+		return nil, stackLookupError(err, *in.StackID)
+	}
+	open, err := st.OpenRequestKinds(ctx, t.ID)
+	if err != nil {
+		return nil, fmt.Errorf("list open requests: %w", err)
+	}
+	if err := CheckStackAllowsKind(in.Kind, t.Status, open); err != nil {
+		return nil, err
+	}
+	if in.Kind == KindUpdate && !in.AllowRemovals {
+		if err := s.checkNoRemovals(ctx, st, t.ID, in); err != nil {
+			return nil, err
+		}
+	}
+	return s.record(ctx, st, by, cmd, StackRef{ID: t.ID, Path: t.Path, Status: string(t.Status)}, t.TeamID, NormalizeForStack(in, t))
+}
+
+// createdPayload is the request.created audit payload. A destroy records why it was asked
+// for and the stack name that confirmed it, because the audit chain is where reviewers
+// look, not the request row. Pure.
+func createdPayload(req *Request, stack StackRef, in CreateInput) map[string]any {
+	p := map[string]any{"short_id": req.ShortID, "kind": req.Kind, "stack_path": stack.Path, "stack_id": stack.ID}
+	if in.Kind != KindCreate && strings.TrimSpace(in.Justification) != "" {
+		p["justification"] = in.Justification
+	}
+	if in.Kind == KindDestroy {
+		p["confirm_stack_name"] = in.ConfirmStackName
+	}
+	return p
+}
+
+// checkNoRemovals refuses an update that drops resources of the stack's newest spec (the
+// latest create or update that is not failed, rejected or cancelled) unless the caller said
+// so with allow_removals. The stack row is locked, so the newest spec cannot change under it.
+func (s *Service) checkNoRemovals(ctx context.Context, st Store, stackID uuid.UUID, in CreateInput) error {
+	raw, ok, err := st.LatestSpec(ctx, stackID)
+	if err != nil {
+		return fmt.Errorf("load the stack's current spec: %w", err)
+	}
+	if !ok {
+		return nil
+	}
+	var prev NormalizedSpec
+	if err := json.Unmarshal(raw, &prev); err != nil {
+		return fmt.Errorf("decode the stack's current spec: %w", err)
+	}
+	gone := RemovedResources(prev, in.Resources)
+	if len(gone) == 0 {
+		return nil
+	}
+	names := strings.Join(gone, ", ")
+	return apperr.Invalid("resources_removed",
+		fmt.Sprintf("this update would destroy %s, which the stack's current spec has; if that is intended, send allow_removals: true", names),
+		apperr.FieldError{Pointer: "/resources", Code: "removes_resources",
+			Message: fmt.Sprintf("the current spec has %s; start from the stack's current spec or send allow_removals", names)})
+}
+
+// record inserts the draft request for stack, audits request.created and takes the stack
+// lock or queues behind its holder, in the caller's transaction. Create, update and
+// destroy share it, so idempotency, audit and queueing behave the same for every kind.
+func (s *Service) record(ctx context.Context, st Store, by identity.Principal, cmd CreateCommand, stack StackRef,
+	teamID uuid.UUID, spec NormalizedSpec) (*Request, error) {
+	now := s.clock.Now()
+	raw, err := json.Marshal(spec)
 	if err != nil {
 		return nil, fmt.Errorf("encode spec: %w", err)
 	}
-	req := NewDraft(s.ids.NewID(), s.ids.NewShortID("req"), StackRef{ID: stack.ID, Path: path, Status: "provisioning"},
-		in.Kind, spec, in.Justification, by.UserID, now)
+	req := NewDraft(s.ids.NewID(), s.ids.NewShortID("req"), stack, cmd.Input.Kind, raw, cmd.Input.Justification, by.UserID, now)
 	if err := st.InsertRequest(ctx, req); err != nil {
 		return nil, fmt.Errorf("insert request: %w", err)
 	}
 
-	payload, err := json.Marshal(map[string]any{"short_id": req.ShortID, "kind": req.Kind, "stack_path": path})
+	payload, err := json.Marshal(createdPayload(req, stack, cmd.Input))
 	if err != nil {
 		return nil, fmt.Errorf("encode audit payload: %w", err)
 	}
 	if err := st.AppendAudit(ctx, audit.Event{
 		OccurredAt: now, ActorType: string(by.Type), ActorID: by.AuditActorID(), Action: "request.created",
-		SubjectType: "request", SubjectID: req.ID.String(), TeamID: &team.ID, CorrelationID: cmd.CorrelationID,
+		SubjectType: "request", SubjectID: req.ID.String(), TeamID: &teamID, CorrelationID: cmd.CorrelationID,
 		Payload: payload,
 	}); err != nil {
 		return nil, fmt.Errorf("audit: %w", err)
