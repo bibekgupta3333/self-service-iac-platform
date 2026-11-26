@@ -222,6 +222,7 @@ CREATE TABLE requests (
     github_branch      text,
     github_pr_number   int,
     github_pr_url      text,
+    github_head_sha    char(40),                       -- PR head last accepted (webhook replay/order guard)
     merge_commit_sha   char(40),
     approved_plan_hash char(64),                                 -- sha256 of normalised plan JSON
     approved_by        uuid        REFERENCES users(id),
@@ -548,10 +549,12 @@ stateDiagram-v2
 | `validating`/`plan_ready`/`approved` | `pull_request.synchronize` | `validating` | clear approval & pinned hash; restart validation |
 | `approved` | `pull_request_review` dismissed | `plan_ready` | clear approval & pinned hash |
 | `pr_open`/`validating`/`plan_ready`/`approved` | `pull_request.closed` (unmerged) | `rejected` | release lock |
-| `approved` | `pull_request.closed` merged (`pr_merged`, the push to main) / `workflow_run` apply in_progress | `applying` | store `merge_commit_sha`; stack → `updating`/`provisioning`/`destroying` |
+| `approved` | `pull_request.closed` merged (`pr_merged`, the push to main) / `workflow_run` apply in_progress | `applying` | store `merge_commit_sha`; the stack status is unchanged until the apply run reports (`provisioning`/`updating`/`destroying` arrive with WBS 5.3) |
 | `applying` | callback apply succeeded | `applied` | stack outputs, `last_applied_sha`; stack → `active`/`destroyed`; release lock; dispatch next queued |
 | `applying` | callback apply failed (transient), `retry_count < 2` | `applying` | `retry_count += 1`; re-dispatch with backoff |
 | `applying` | callback apply failed (non-transient, or transient with retries used up) | `failed` | stack → `failed`; notify; release lock |
+
+**Publishing (WBS 4.8), review hardening.** `PublishTarget` and `RecordPublished` check the stack's current lock row (`locks.CheckToken`), since `requests.fencing_token` is not cleared on release or takeover. Every promotion of a queued request (release, `DELETE …/lock`, or an expired lease handed to the head of the queue) runs the lock service's promotion hook, which enqueues the promoted request's publish job in the grant transaction. Commits replace the stack directory as a whole. A final publish failure withdraws the branch and PR it left behind (best effort, audited). Outbox outcome writes are guarded by the claim's attempt number.
 
 **Publishing (WBS 4.8).** `POST /v1/requests` inserts a `request.publish` outbox job in the creation transaction when the request holds the lock (and `IACP_PUBLISHER` is not `none`). The worker (`internal/prflow`) renders the stack with the generator outside any transaction, commits it on `iacp/<short_id>` through the `publish.Publisher` port (GitHub App via the git data API, or `localgit` for ADR-0009), opens and labels the PR, then records `pr_opened` in a second transaction that checks the request still holds the lock with the token it was rendered with. Every publisher call is idempotent (the branch is force-moved, an existing PR is returned), so retries converge. Each failed attempt is audited (`request.publish_failed`); the last one fires `publish_failed`. A terminal transition releases the lock in the same transaction (stacks row locked first) and enqueues the promoted request's publish job.
 
@@ -961,7 +964,7 @@ Current implementation (WBS 4.10): `pipeline` is one of `validate`, `apply`, `dr
 |---|---|---|
 | POST | `/webhooks/github` | GitHub App webhook. Verifies `X-Hub-Signature-256` (HMAC-SHA256, constant-time compare; `401 webhook_not_configured` without `IACP_GITHUB_WEBHOOK_SECRET`, `401 invalid_signature` otherwise), caps the body at 2 MiB, dedupes `X-GitHub-Delivery` (`webhook_deliveries` primary key) and enqueues the mapped command in the same transaction, returns `202 {"accepted","duplicate","enqueued"}`. Local-first: the queue is the `outbox` table, not SQS. |
 
-Current implementation (WBS 4.9): `pull_request` closed+merged → `pr_merged`, closed unmerged → `pr_closed` (→ `rejected`, lock released), `synchronize` → `new_commit`; `workflow_run` completed → audited as `request.workflow_run_completed` (no transition; run reports drive status). Only branches named `iacp/<short_id>` map to requests, and when `IACP_GITHUB_REPOSITORY` is set other repositories are ignored. The worker applies commands idempotently: an event that is not allowed in the current status, or names another PR, is audited as `request.github_event_ignored`. Every other event is acknowledged with `202` and no job. Reviews, `check_run`, `push` and installation events are follow-ups.
+Current implementation (WBS 4.9): `pull_request` closed+merged → `pr_merged`, closed unmerged → `pr_closed` (→ `rejected`, lock released), `synchronize` → `new_commit`; `workflow_run` completed → audited as `request.workflow_run_completed` (no transition; run reports drive status). Only branches named `iacp/<short_id>` map to requests, and when `IACP_GITHUB_REPOSITORY` is set other repositories are ignored. The worker applies commands idempotently: an event that is not allowed in the current status, or names another PR, is audited as `request.github_event_ignored`. Commands carry the PR head SHA, checked against `requests.github_head_sha` (the published commit, then each accepted push): a `synchronize` must start from the known head and any other event must name it, so a replayed or late body (the delivery id is not signed) is ignored as `stale_head`. A push still moves the tracked head when `new_commit` is not allowed in the current status. An event for a `draft` request whose PR is not recorded yet is retried through the outbox with backoff. The repository filter is case-insensitive. Every other event is acknowledged with `202` and no job. Reviews, `check_run`, `push` and installation events are follow-ups.
 
 Subscribed events and handling:
 

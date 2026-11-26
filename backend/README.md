@@ -252,39 +252,61 @@ outbox worker ─────────► Applier → ApplyGitHubEvent / Reco
 ```
 
 - **Publisher port** (`internal/publish`): `CommitFiles`, `OpenPullRequest`, `AddLabels`,
-  `DispatchWorkflow`. Every call is safe to retry: the branch is created or force-moved to the new
-  commit, and opening a PR whose head already has one returns it.
+  `DispatchWorkflow`, `ClosePullRequest`, `DeleteBranch`. Commits replace the stack root as a whole
+  (`Commit.Root`): files under it that a render no longer produces are deleted. Every call except
+  dispatch is safe to retry: the branch is created or force-moved, and opening a PR whose head
+  already has one returns it.
 - **`githubapp`**: RS256 App JWT (iat −60 s, exp +9 min) exchanged for an installation token
-  scoped to `IACP_GITHUB_REPOSITORY`, cached until 5 minutes before expiry and refreshed once on a
-  401. Files are committed atomically with the git data API (blobs, one tree on the base tree, a
-  commit, then the ref). 15 s per-request timeout, redirects only to the API host, bodies capped at
-  10 MiB, retries (4 attempts) on 5xx, 429 and secondary rate limits honouring `Retry-After`
-  (more than 60 s fails fast). The App needs Contents, Pull requests and Actions (read/write) and
-  Metadata (read). Registering it is WBS 2.5.
+  scoped to `IACP_GITHUB_REPOSITORY` with `contents`, `pull_requests` and `actions` write only,
+  cached until 5 minutes before expiry and refreshed once on a 401. Files are committed atomically
+  with the git data API (blobs, one tree on the base tree with null-sha deletions from a recursive
+  listing, a commit, then the ref; the ref is force-moved only when GitHub says it already exists).
+  15 s per-request timeout, redirects only to the API host, bodies capped at 10 MiB, retries
+  (4 attempts) on 5xx, 429 and secondary rate limits honouring `Retry-After` (more than 60 s fails
+  fast). Workflow dispatch is sent once, never retried. The App needs Contents, Pull requests and
+  Actions (read/write) and Metadata (read). Registering it is WBS 2.5.
 - **`localgit`**: `git` via `os/exec` with argument arrays (never a shell), hooks disabled, inherited
-  `GIT_*` dropped. Blobs and the tree are built on a temporary index, so the clone's checkout is
-  untouched and the branch moves with one `update-ref`. Fake PRs, labels and dispatches are recorded
-  in `<git dir>/iacp-local/state.json` and the PR URL is `file://<repo>#pull/<n>`.
+  `GIT_*` dropped. `IACP_LOCAL_GIT_REPO` must be the root of a work tree (`rev-parse
+  --show-toplevel`), so a directory inside another repository is refused. Blobs and the tree are
+  built on a temporary index, so the clone's checkout is untouched and the branch moves with one
+  `update-ref`. Fake PRs, labels and dispatches are recorded in `<git dir>/iacp-local/state.json`
+  and the PR URL is `file://<repo>#pull/<n>`. Repository-local git config of the clone (for example
+  `core.fsmonitor`) still applies, so use an operator-owned clone.
 - **Two-step consistency**: the publish job commits with the request. GitHub is called outside any
   transaction, and the result is recorded in a second one that checks the request is still `draft`
-  and holds the lock with the token the files were rendered with. Each failed attempt is audited
-  (`request.publish_failed`); after the last (6, backoff 2 s doubling up to 5 min), or a permanent
-  error such as an unresolvable module version, the request moves to `failed`
-  (`failure_reason = publish_failed`) and releases its lock.
-- **Lock release**: a terminal transition (`rejected`, `failed`, …) releases the stack lock in the
-  same transaction (stacks row locked first, as every lock operation does), and the promoted
-  waiter gets its own publish job.
+  and holds the **current lease** of its stack (the lock row, via `locks.CheckToken`) with the
+  token the files were rendered with; `PublishTarget` makes the same check before rendering. Each
+  failed attempt is audited (`request.publish_failed`); after the last (6, backoff 2 s doubling up
+  to 5 min), or a permanent error such as an unresolvable module version or a conflict when
+  recording, the request moves to `failed` (`failure_reason = publish_failed`), releases its lock,
+  and the branch and PR it left behind are withdrawn best effort (PR closed, branch deleted; the
+  outcome is in the audit payload).
+- **Promotion**: every time a queued request becomes the lock holder (a terminal transition,
+  `DELETE /v1/internal/stacks/{id}/lock`, or an expired lease handed to the head of the queue by a
+  newcomer's acquire), `locks.Service`'s promotion hook (`requests.PublishOnPromote`) enqueues its
+  publish job in the same transaction. Terminal transitions release the lock in their own
+  transaction, stacks row locked first, as every lock operation does.
 - **Webhooks**: `X-Hub-Signature-256` is checked with `hmac.Equal`; no secret means every delivery
   gets 401. The body is capped at 2 MiB. `X-GitHub-Delivery` is deduped by the
   `webhook_deliveries` primary key in the same transaction that enqueues the command, so a
   redelivery is acknowledged with `duplicate: true` and no second job. Mapping:
   `pull_request` closed+merged → `pr_merged` (approved → applying), closed unmerged → `pr_closed`
   (→ rejected), `synchronize` → `new_commit`, `workflow_run` completed → audited hint. Only
-  `iacp/<short id>` branches map to requests; everything else gets `202` with no job. Events not
-  allowed in the current status are audited as `request.github_event_ignored`.
+  `iacp/<short id>` branches map to requests; everything else gets `202` with no job. The
+  repository filter ignores case.
+- **Ordering and replay**: commands carry the PR head SHA. `requests.github_head_sha` tracks the
+  head (published commit, then each accepted push); a push must start from it and any other event
+  must name it, otherwise the event is audited as `stale_head`. Since the delivery id is not signed,
+  this is what stops a replayed body from moving a request. Events not allowed in the current
+  status are audited as `request.github_event_ignored`. An event that arrives before the PR is
+  recorded is retried through the outbox instead of being dropped.
 - **Queue**: the `outbox` table (migration 0006) and an in-process worker goroutine
-  (`FOR UPDATE SKIP LOCKED`, 2-minute lease, so several API replicas can drain it). An SQS adapter
-  is a follow-up behind the same `outbox.Handler` contract.
+  (`FOR UPDATE SKIP LOCKED`, 2-minute lease, so several API replicas can drain it). Outcome writes
+  are guarded by the claim's attempt number, so a worker whose lease ran out cannot complete or
+  reschedule a job another worker reclaimed, and each handler runs with a deadline of 3/4 of the
+  lease. An SQS adapter is a follow-up behind the same `outbox.Handler` contract.
+- **Housekeeping (follow-up)**: nothing calls `PurgeDeliveries` (7-day retention) yet, and processed
+  outbox rows are not removed; both need a scheduled job before real GitHub traffic.
 
 ### Try it locally (`IACP_PUBLISHER=local`)
 
