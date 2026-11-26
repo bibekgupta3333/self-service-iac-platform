@@ -20,6 +20,7 @@ const (
 	FileProviders = "providers.tf"
 	FileBackend   = "backend.tf"
 	FileOutputs   = "outputs.tf"
+	FileVariables = "variables.tf"
 	FileStackJSON = "iacp.stack.json"
 )
 
@@ -71,6 +72,7 @@ func (g *Generator) Render(spec StackSpec) (Files, error) {
 		FileProviders: providers,
 		FileBackend:   backend,
 		FileOutputs:   RenderOutputs(res),
+		FileVariables: RenderVariables(),
 		FileStackJSON: stackJSON,
 	}, nil
 }
@@ -164,6 +166,13 @@ func RenderBackend(blockType string, attrs []Attr) ([]byte, error) {
 	return finish(f), nil
 }
 
+// RenderVariables renders the standard-structure variables.tf. Stack roots take no input
+// variables (values are rendered into main.tf); cross-stack dependency variables
+// (iacp.deps.auto.tfvars.json) will be declared here when WBS 9.1 lands.
+func RenderVariables() []byte {
+	return finish(hclwrite.NewEmptyFile(), "No input variables: inputs are rendered into main.tf.")
+}
+
 // RenderOutputs exposes each resource's declared outputs as one object output.
 func RenderOutputs(res []decodedResource) []byte {
 	f := hclwrite.NewEmptyFile()
@@ -183,6 +192,7 @@ func RenderOutputs(res []decodedResource) []byte {
 			return hclwrite.ObjectAttrTokens{Name: hclwrite.TokensForIdentifier(o.Name), Value: moduleRef(r.Name, o.Name)}
 		})
 		blk := body.AppendNewBlock("output", []string{r.Name}).Body()
+		blk.SetAttributeValue("description", cty.StringVal(fmt.Sprintf("Outputs of %s (%s)", r.Name, catalog.GitTag(r.Module, r.Version))))
 		blk.SetAttributeRaw("value", hclwrite.TokensForObject(attrs))
 		if slices.ContainsFunc(outs, func(o catalog.Output) bool { return o.Sensitive }) {
 			blk.SetAttributeValue("sensitive", cty.True)

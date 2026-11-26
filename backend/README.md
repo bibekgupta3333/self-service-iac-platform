@@ -157,7 +157,7 @@ unique `short_id` are negligible.
 ## Config generator
 
 `generator.New(repoURL, backend, provider).Render(spec)` returns `main.tf`, `versions.tf`,
-`providers.tf`, `backend.tf`, `outputs.tf` and `iacp.stack.json` as bytes, with no I/O.
+`providers.tf`, `backend.tf`, `outputs.tf`, `variables.tf` and `iacp.stack.json` as bytes, with no I/O. Rendered files are `terraform fmt`- and `tflint`-clean with the repository config (both checked in tests when the tools are on `PATH`).
 
 - Output is deterministic: resources and keys are sorted, there are no timestamps, and
   `hclwrite.Format` gives `terraform fmt`-clean files. User strings are escaped, so `${` cannot

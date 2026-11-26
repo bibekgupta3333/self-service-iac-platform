@@ -76,7 +76,7 @@ func TestGolden(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := []string{FileBackend, FileStackJSON, FileMain, FileOutputs, FileProviders, FileVersions}
+			want := []string{FileBackend, FileStackJSON, FileMain, FileOutputs, FileProviders, FileVariables, FileVersions}
 			if !slices.Equal(files.Names(), want) {
 				t.Fatalf("files = %v, want %v", files.Names(), want)
 			}
@@ -172,6 +172,40 @@ func TestTerraformFmtClean(t *testing.T) {
 		if err != nil {
 			t.Fatalf("terraform fmt -check failed: %v\n%s", err, out)
 		}
+	}
+}
+
+// TestTflintClean lints rendered roots with the repository's .tflint.hcl, the same
+// check CI runs over environments/ and the golden files.
+func TestTflintClean(t *testing.T) {
+	tflint, err := exec.LookPath("tflint")
+	if err != nil {
+		t.Skip("tflint not on PATH")
+	}
+	cfg, err := filepath.Abs("../../../.tflint.hcl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(cfg); err != nil {
+		t.Skip("repository .tflint.hcl not found")
+	}
+	if out, err := exec.Command(tflint, "--init", "--config", cfg).CombinedOutput(); err != nil {
+		t.Skipf("tflint plugins unavailable (offline?): %v\n%s", err, out)
+	}
+	files, err := New(repoURL, LocalBackend{}, LocalStackProvider{Endpoint: "http://localhost:4566"}).Render(orderEventsSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	for _, name := range files.Names() {
+		if err := os.WriteFile(filepath.Join(dir, name), files[name], 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cmd := exec.Command(tflint, "--config", cfg, "--format", "compact")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("tflint found issues in rendered files: %v\n%s", err, out)
 	}
 }
 
