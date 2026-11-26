@@ -35,11 +35,19 @@ func draftRequest() *requests.Request {
 }
 
 type fakeRequests struct {
+	current   *requests.Request // what Get returns; nil means target
 	target    *requests.Request
 	targetErr error
 	recordErr error
 	published []requests.PublishedPR
 	failures  []requests.PublishFailure
+}
+
+func (f *fakeRequests) Get(context.Context, uuid.UUID) (*requests.Request, error) {
+	if f.current != nil {
+		return f.current, nil
+	}
+	return f.target, nil
 }
 
 func (f *fakeRequests) PublishTarget(context.Context, uuid.UUID) (*requests.Request, error) {
@@ -236,6 +244,9 @@ func TestFinalFailureWithdrawsTheUnrecordedPR(t *testing.T) {
 			pub: &fakePublisher{err: errors.New("github 502")}, attempt: 3, wantDeleted: true},
 		{name: "a retryable failure keeps the PR for the next attempt", reqs: &fakeRequests{target: draftRequest()},
 			pub: &fakePublisher{labelErr: errors.New("github 502")}, attempt: 1},
+		{name: "a PR recorded despite the error is never withdrawn", reqs: &fakeRequests{target: draftRequest(),
+			recordErr: apperr.Conflict("concurrent_update", "lost reply"), current: recordedRequest()},
+			pub: &fakePublisher{}, attempt: 3},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -251,6 +262,12 @@ func TestFinalFailureWithdrawsTheUnrecordedPR(t *testing.T) {
 			}
 		})
 	}
+}
+
+func recordedRequest() *requests.Request {
+	r := draftRequest()
+	r.Status, r.PR = requests.StatusPROpen, &requests.PRLink{Branch: "iacp/req-7k3p9x", Number: 812}
+	return r
 }
 
 func TestHandleRejectsBadPayload(t *testing.T) {

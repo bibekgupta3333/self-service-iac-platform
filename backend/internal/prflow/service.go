@@ -22,6 +22,7 @@ import (
 
 // Requests is the part of requests.Service the flow drives.
 type Requests interface {
+	Get(ctx context.Context, id uuid.UUID) (*requests.Request, error)
 	PublishTarget(ctx context.Context, id uuid.UUID) (*requests.Request, error)
 	RecordPublished(ctx context.Context, id uuid.UUID, p requests.PublishedPR, correlationID string) (*requests.Request, error)
 	RecordPublishFailure(ctx context.Context, id uuid.UUID, f requests.PublishFailure, correlationID string) error
@@ -111,9 +112,7 @@ func (s *Service) Handle(ctx context.Context, j outbox.Job) error {
 	final := permanent || j.Last()
 	failure := requests.PublishFailure{Publisher: s.pub.Name(), Attempt: j.Attempts, Error: err.Error(), Final: final}
 	if final {
-		// Nothing was recorded for this request, so a branch or PR this or an earlier
-		// attempt left behind carries a superseded render: withdraw it (best effort).
-		failure.Cleanup = s.withdraw(ctx, r.ShortID, partial.Number)
+		failure.Cleanup = s.withdrawUnrecorded(ctx, r, partial.Number)
 	}
 	if rerr := s.reqs.RecordPublishFailure(ctx, r.ID, failure, correlationID); rerr != nil {
 		return fmt.Errorf("publish %s: %w (recording the failure: %w)", r.ShortID, err, rerr)
@@ -122,6 +121,22 @@ func (s *Service) Handle(ctx context.Context, j outbox.Job) error {
 		return fmt.Errorf("publish %s: %w: %w", r.ShortID, err, outbox.ErrPermanent)
 	}
 	return fmt.Errorf("publish %s: %w", r.ShortID, err)
+}
+
+// withdrawUnrecorded withdraws the branch and PR of a request whose publish failed for
+// good, but only after re-reading the request: if a PR is recorded after all (for
+// example RecordPublished committed but its reply was lost), nothing is touched.
+func (s *Service) withdrawUnrecorded(ctx context.Context, r *requests.Request, number int) string {
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	cur, err := s.reqs.Get(rctx, r.ID)
+	switch {
+	case err != nil:
+		return "skipped: could not re-read the request: " + err.Error()
+	case cur.PR != nil:
+		return fmt.Sprintf("skipped: PR #%d is recorded for the request", cur.PR.Number)
+	}
+	return s.withdraw(ctx, r.ShortID, number)
 }
 
 // withdraw closes the PR (when its number is known) and deletes the request branch,
