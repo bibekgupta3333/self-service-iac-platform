@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .adapters import FileSystemStackRepository, GitCli, GitDiff
+from .adapters import AwsCliTagReader, FileSystemStackRepository, GitCli, GitDiff
 from .api_client import ApiError, FreshCredentials, IacpApiClient, TokenSource
 from .cost import parse_infracost
 from .detection import DEFAULT_MAX_STACKS, DetectionError, DetectionPolicy, DetectionResult, StackDetector
@@ -21,6 +21,7 @@ from .module_pins import DEFAULT_REPO_URL, DEFAULT_TRUSTED_REF, ModulePinVerifie
 from .plan_summary import render_markdown, summarize
 from .policy_context import build_context
 from .sarif import SarifError, rebase_sarif, result_count
+from .smoke import SmokeTester
 from .report import (
     GitHubRun,
     ReportError,
@@ -106,6 +107,17 @@ def build_parser() -> argparse.ArgumentParser:
     sarif.add_argument("--out", type=Path, required=True)
     sarif.add_argument("--external-dir", action="append", default=[],
                        help="Checkov --external-modules-download-path (repeatable)")
+
+    smoke = sub.add_parser("smoke", help="post-apply smoke test: declared outputs and iacp:* tags (state and live)")
+    smoke.add_argument("stack_dir", type=Path)
+    smoke.add_argument("--plan", type=Path, required=True, help="terraform show -json tfplan (declared outputs)")
+    smoke.add_argument("--outputs", type=Path, required=True, help="terraform output -json")
+    smoke.add_argument("--state", type=Path, required=True, help="terraform show -json after apply")
+    smoke.add_argument("--endpoint-url", default=os.environ.get("AWS_ENDPOINT_URL", ""),
+                       help="AWS endpoint for the live probes (default: $AWS_ENDPOINT_URL)")
+    smoke.add_argument("--region", default="", help="default: region in iacp.stack.json")
+    smoke.add_argument("--markdown-out", type=Path)
+    smoke.add_argument("--json-out", type=Path)
 
     report = sub.add_parser("report", help="POST one stage report to $IACP_API_URL/v1/runs")
     report.add_argument("stack_dir", type=Path)
@@ -273,6 +285,26 @@ def run_sarif(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_smoke(args: argparse.Namespace) -> int:
+    meta = FileSystemStackRepository(args.repo_root).load_dir(args.stack_dir)
+    docs = {name: _read_json(getattr(args, name)) for name in ("plan", "outputs", "state")}
+    unusable = [f"--{name} {getattr(args, name)}" for name, doc in docs.items() if not isinstance(doc, dict)]
+    if unusable:
+        raise ValueError(f"missing or not a JSON object: {', '.join(unusable)}")
+    reader = AwsCliTagReader(args.endpoint_url, args.region or meta.region)
+    result = SmokeTester(reader).run(meta, docs["plan"], docs["outputs"], docs["state"])
+    if args.markdown_out:
+        args.markdown_out.write_text(result.render_markdown(), encoding="utf-8")
+    if args.json_out:
+        args.json_out.write_text(json.dumps(result.to_dict(), indent=2) + "\n", encoding="utf-8")
+    for check in result.checks:
+        detail = f": {check.detail}" if check.detail else ""
+        print(f"{'ok  ' if check.passed else 'FAIL'} {check.kind} {check.subject}{detail}")
+    if not result.ok:
+        print(f"::error title=Smoke test failed::{annotation(f'{meta.ref.path}: {len(result.failures)} failed check(s)')}")
+    return 0 if result.ok else 1
+
+
 def _build_report(args: argparse.Namespace, env: Mapping[str, str]) -> RunReport:
     """Assemble the report from the stack file, the pipeline's files and the runner env."""
     meta = FileSystemStackRepository(args.repo_root).load_dir(args.stack_dir)
@@ -409,6 +441,7 @@ COMMANDS = {
     "verify-pins": run_verify_pins,
     "verify-modules": run_verify_modules,
     "sarif": run_sarif,
+    "smoke": run_smoke,
     "report": run_report,
     "lock": run_lock,
 }

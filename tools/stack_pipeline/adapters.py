@@ -1,12 +1,16 @@
-"""I/O adapters: git and the working tree. Everything else in the package is pure."""
+"""I/O adapters: git, the working tree and the AWS CLI. Everything else in the package is pure."""
 
 from __future__ import annotations
 
 import json
 import subprocess
 from pathlib import Path
+from typing import Any, Callable, Mapping, Sequence
 
 from .models import ENVIRONMENTS_DIR, STACK_FILE, StackMetadata, StackMetadataError, StackRef
+from .smoke import SmokeProbeError
+
+Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
 
 class GitDiff:
@@ -127,3 +131,38 @@ class FileSystemStackRepository:
         root = self.repo_root / ENVIRONMENTS_DIR
         found = (StackRef.from_path(p.relative_to(self.repo_root).as_posix()) for p in root.glob(f"*/*/*/{STACK_FILE}"))
         return sorted(ref for ref in found if ref is not None)
+
+
+class AwsCliTagReader:
+    """Read-only AWS CLI calls for the smoke test (``smoke.TagReader``).
+
+    Only the probe table in ``smoke.PROBES`` builds the arguments. While ADR-0009 is
+    in force the endpoint is the job's LocalStack and the credentials are the dummy
+    test/test pair from the environment.
+    """
+
+    def __init__(self, endpoint_url: str, region: str, run: Runner = subprocess.run, timeout: float = 60.0) -> None:
+        self.endpoint_url = endpoint_url
+        self.region = region
+        self._run = run
+        self.timeout = timeout
+
+    def read(self, argv: Sequence[str]) -> Mapping[str, Any]:
+        cmd = ["aws", *argv, "--region", self.region, "--output", "json", "--no-cli-pager"]
+        if self.endpoint_url:
+            cmd += ["--endpoint-url", self.endpoint_url]
+        call = " ".join(argv[:2])
+        try:
+            result = self._run(cmd, capture_output=True, text=True, check=False, timeout=self.timeout)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise SmokeProbeError(f"aws {call}: {exc}") from exc
+        if result.returncode != 0:
+            message = next((line.strip() for line in result.stderr.splitlines() if line.strip()), "no error output")
+            raise SmokeProbeError(f"aws {call} exited {result.returncode}: {message}")
+        if not result.stdout.strip():
+            return {}  # e.g. sqs list-queue-tags on a queue without tags
+        try:
+            body = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise SmokeProbeError(f"aws {call} returned invalid JSON") from exc
+        return body if isinstance(body, dict) else {}
