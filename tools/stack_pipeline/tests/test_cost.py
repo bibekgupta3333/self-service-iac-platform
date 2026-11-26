@@ -130,10 +130,28 @@ class TestSummaryIntegration:
 
 SECRET_PLAN = {
     "format_version": "1.2",
-    "variables": {"db_password": {"value": "hunter2"}},
+    "variables": {"db_password": {"value": "hunter2"}, "region": {"value": "eu-west-1"}},
     "prior_state": {"values": {"root_module": {"resources": [{"values": {"password": "old-secret"}}]}}},
     "output_changes": {"conn": {"after": "postgres://u:hunter2@h"}},
-    "configuration": {"provider_config": {"aws": {"expressions": {"region": {"constant_value": "us-east-1"}}}}},
+    "resource_drift": [{"address": "aws_db_instance.db", "change": {"before": {"password": "drift-secret"}}}],
+    "relevant_attributes": [{"resource": "aws_db_instance.db", "attribute": ["password"]}],
+    "checks": [{"address": {"kind": "var", "name": "x"}, "status": "pass"}],
+    "some_future_key": {"token": "tok-123"},
+    "configuration": {
+        "provider_config": {"aws": {"name": "aws", "expressions": {
+            "region": {"references": ["var.region", "var"]},
+            "access_key": {"constant_value": "AKIAKEY"},
+            "default_tags": [{"tags": {"constant_value": {"a": "b"}}}]}}},
+        "root_module": {
+            "resources": [{"address": "aws_db_instance.db", "type": "aws_db_instance", "provider_config_key": "aws",
+                           "expressions": {"password": {"constant_value": "cfg-secret"},
+                                           "identifier": {"references": ["var.name", "var"]}}}],
+            "variables": {"db_password": {"default": "var-default-secret", "sensitive": True}},
+            "module_calls": {"m": {"source": "./m", "expressions": {"p": {"constant_value": "call-secret"}},
+                                   "module": {"variables": {"x": {"default": "nested-secret"}}, "resources": []}}},
+            "outputs": {"conn": {"expression": {"constant_value": "out-secret"}}},
+        },
+    },
     "planned_values": {
         "outputs": {"conn": {"sensitive": True, "value": "postgres://u:hunter2@h"}},
         "root_module": {
@@ -165,12 +183,13 @@ SECRET_PLAN = {
 class TestRedactPlan:
     def test_no_sensitive_value_survives(self):
         out = json.dumps(redact_plan(SECRET_PLAN))
-        for secret in ("hunter2", "old-secret", "s3cr3t", '"v"'):
+        for secret in ("hunter2", "old-secret", "s3cr3t", '"v"', "drift-secret", "tok-123", "AKIAKEY",
+                       "cfg-secret", "var-default-secret", "call-secret", "nested-secret", "out-secret"):
             assert secret not in out
 
     def test_keeps_what_infracost_prices(self):
         out = redact_plan(SECRET_PLAN)
-        assert set(out) == {"format_version", "configuration", "planned_values", "resource_changes"}
+        assert set(out) == {"format_version", "configuration", "planned_values", "resource_changes", "variables"}
         db = out["planned_values"]["root_module"]["resources"][0]["values"]
         assert db == {"instance_class": "db.t3.micro", "password": None, "tags": {"a": "b"}}
         child = out["planned_values"]["root_module"]["child_modules"][0]["resources"][0]["values"]
@@ -181,13 +200,38 @@ class TestRedactPlan:
         assert change["actions"] == ["update"]
         assert "outputs" not in out["planned_values"]
 
+    def test_unknown_top_level_keys_are_dropped(self):
+        out = redact_plan(SECRET_PLAN)
+        for key in ("resource_drift", "relevant_attributes", "checks", "some_future_key", "prior_state",
+                    "output_changes"):
+            assert key not in out
+        assert set(redact_plan({"anything": 1, "terraform_version": "1.13.5"})) == {"terraform_version"}
+
+    def test_keeps_the_fields_infracost_reads(self):
+        out = redact_plan(SECRET_PLAN)
+        rc = out["resource_changes"][0]
+        assert (rc["address"], rc["type"], rc["mode"]) == ("aws_db_instance.db", "aws_db_instance", "managed")
+        res = out["planned_values"]["root_module"]["resources"][0]
+        assert (res["address"], res["type"]) == ("aws_db_instance.db", "aws_db_instance")
+        cfg = out["configuration"]
+        assert cfg["provider_config"]["aws"]["expressions"] == {
+            "region": {"references": ["var.region", "var"]},
+            "default_tags": [{"tags": {"constant_value": {"a": "b"}}}],
+        }
+        assert cfg["root_module"]["resources"][0]["expressions"] == {"identifier": {"references": ["var.name", "var"]}}
+        assert "variables" not in cfg["root_module"] and "outputs" not in cfg["root_module"]
+        assert cfg["root_module"]["module_calls"] == {"m": {"source": "./m", "module": {"resources": []}}}
+        # Only the variable the provider region refers to is kept.
+        assert out["variables"] == {"region": {"value": "eu-west-1"}}
+
     def test_does_not_mutate_and_tolerates_odd_shapes(self):
         before = json.dumps(SECRET_PLAN, sort_keys=True)
         redact_plan(SECRET_PLAN)
         assert json.dumps(SECRET_PLAN, sort_keys=True) == before
         assert redact_plan({}) == {}
         odd = {"resource_changes": ["x", {"change": None}], "planned_values": {"root_module": None}}
-        assert redact_plan(odd) == {"resource_changes": ["x", {"change": None}], "planned_values": {}}
+        assert redact_plan(odd) == {
+            "resource_changes": [{"change": {"before": None, "after": None}}], "planned_values": {}}
 
 
 SUMMARY_MD = """<!-- iacp-plan:id -->
