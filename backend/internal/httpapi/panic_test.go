@@ -27,7 +27,7 @@ func (p panicRoutes) Routes(r chi.Router) {
 
 func TestPanicBecomesProblem500(t *testing.T) {
 	var logs bytes.Buffer
-	h := NewRouter(Deps{
+	h := NewRouter(Deps{Policies: testPolicies(),
 		Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Auth: DevAuthenticator{Principal: devPrincipal},
 		Ready: okPinger{}, Catalog: NewCatalogHandler(&fakeCatalog{versions: []catalog.ModuleVersion{sqsVersion()}}),
 		Public: []RouteRegistrar{panicRoutes{}},

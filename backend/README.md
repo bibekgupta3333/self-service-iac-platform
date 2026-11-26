@@ -29,9 +29,10 @@ internal/
   locks/                 per-stack platform lock: pure Decide/NextInQueue/CheckToken, Service, Postgres repo
   auth/                  GitHub Actions OIDC: claim allow-lists (pure), JWKSCache, Verifier, jti ReplayGuard
   budgets/               policy context for conftest: pure ParseStackPath / BuildContext, Service, Postgres repo
-  runs/                  POST /v1/runs reports: pure Validate/CheckProvenance/RunStatus, Service, Postgres repo
   drift/                 drift reports: pure ClassifyExit/NextHealth/Allowed/Validate, Service (Record, Resolve), Postgres repo,
                          RequestReconciler adapter onto requests.Service.ReconcileStack
+  runs/                  POST /v1/runs reports: pure Validate/CheckProvenance/RunStatus/Progress, Service (drives apply reports into requests and stacks), Postgres repo
+  retention/             hourly sweeper for processed outbox jobs and webhook delivery ids
   generator/             pure Terraform renderer + BackendStrategy / ProviderStrategy, golden files
   publish/               Publisher port; pure BranchName/ParseBranch, ValidatePath/StackFiles, PR Title/Body/Labels
     githubapp/           GitHub App adapter: App JWT → cached installation token, git data API commit, PRs, labels, dispatch
@@ -80,7 +81,10 @@ together apply each migration once.
 | `0006_oidc_jti.sql` | `oidc_jti` (used GitHub OIDC token ids until `exp` + leeway, shared by replicas); `iacp_app` gets SELECT/INSERT/DELETE only, no UPDATE |
 | `0007_budgets.sql` | `budgets` (team monthly budget, optionally per environment; `spent_usd` 0 until cost data lands in WBS 8.5) |
 | `0008_webhooks_outbox.sql` | `webhook_deliveries` (delivery id primary key) and `outbox` (job queue: `available_at`, `locked_until`, `attempts`, `dedupe_key`); `iacp_app` gets SELECT/INSERT/DELETE and SELECT/INSERT/UPDATE respectively |
-| `0012_drift_reports.sql` | `stack_health`, `drift_result`, `drift_status`, `stacks.health` (drift never touches `stacks.status`) and `drift_reports` (one row per drift.yml run and stack, CHECKs tie result, status, counts and resolution together); `iacp_app` gets SELECT/INSERT and UPDATE on the resolution columns only, no DELETE |
+| `0009_sessions.sql` | `sessions` (hashed opaque session ids, absolute and idle expiry, revocation) |
+| `0010_outbox_purge.sql` | `purge_processed_outbox(cutoff, max_rows)`, a `SECURITY DEFINER` function that deletes only processed outbox rows; `iacp_app` gets `EXECUTE` on it and still no `DELETE` on `outbox` |
+| `0011_stack_health.sql` | `stacks.health` (`unknown`, `healthy`, `degraded`), set from the post-apply smoke test |
+| `0012_drift_reports.sql` | `drift_result`, `drift_status`, `drift_reports` (one row per drift.yml run and stack, CHECKs tie result, status, counts and resolution together) and `stacks.health` widened with `drifted`; `iacp_app` gets SELECT/INSERT and UPDATE on the resolution columns only, no DELETE |
 
 ### Database roles
 
@@ -139,6 +143,8 @@ dependencies) arrive with their features.
 | `IACP_PORTAL_URL` | `http://localhost:3000` | portal base URL for the request link in PR bodies |
 | `IACP_LOCALSTACK_ENDPOINT` | `http://localhost:4566` | endpoint rendered into generated provider blocks |
 | `IACP_WORKER_POLL_INTERVAL` | `1s` | idle poll interval of the in-process outbox worker (50ms–1m) |
+| `IACP_QUEUE_RETENTION` | `168h` | how long processed outbox jobs and webhook delivery ids are kept before the hourly sweeper deletes them (at least `1h`); pending and dead jobs are never deleted |
+| `IACP_TRUSTED_PROXIES` | unset (trust nobody) | comma-separated CIDRs or addresses of reverse proxies whose `X-Forwarded-For` is believed; see "Client address" below |
 
 The publisher settings fail closed: `github` with any App setting missing, App settings with
 another publisher, `local` without `IACP_LOCAL_GIT_REPO`, or an unknown value stop the API at startup.
@@ -345,15 +351,75 @@ environment-specific row wins over a team-wide one; `null` when no budget is set
   shows two racing acquirers always produce one `granted` and one `queued`.
 - Lease: 7 days (`locks.DefaultLease`), renewed by heartbeat. An expired lease can be taken over,
   but the oldest queued request gets it first, so newcomers never jump the queue.
-- Release checks the holder and token (`409 stale_fencing_token` otherwise), deletes the lease and,
+- Release checks the holder and token (`409 stale_fencing_token` otherwise; `200` with
+  `already_released: true` when the request is already terminal, so apply.yml's own release step
+  stays green after the API released the lease with the final transition), deletes the lease and,
   in the same transaction, grants the oldest waiter a new token and re-points the rest of the queue
   at it. `lock.acquired`, `lock.queued` and `lock.released` are written to the audit log; a waiter
   polling again behind the same holder writes nothing.
 - `POST /v1/runs` checks `fencing_token` against the current lease (`FOR SHARE`) for `validate`,
   `apply` and `ttl_destroy` reports, so a late callback from a superseded run is rejected. It
-  locks the `stacks` row (`FOR KEY SHARE`) first, the same order as lock operations, so reports
-  cannot deadlock with release (`TestRecordAndReleaseDoNotDeadlock`). A report for a stage the run
-  already recorded replaces that entry, so retries are idempotent; a run keeps at most 32 stages.
+  locks the `stacks` row (`FOR UPDATE`) first, the same order as lock operations, so reports
+  cannot deadlock with release (`TestRecordAndReleaseDoNotDeadlock`) and the reports of one stack
+  apply one at a time. A report for a stage the run already recorded replaces that entry, so
+  retries are idempotent; a run keeps at most 32 stages.
+
+## Apply reports drive request and stack status (WBS 5.3)
+
+`apply` reports (`apply.yml`: stages `plan`, `apply` or `destroy`, `smoke`, `summary`, `release`)
+now move the request and its stack in the report's transaction. `runs.Progress` (pure) turns the
+run's stages into an `requests.ApplyProgress`; `requests.DecideApply` (pure) turns that and the
+request and stack status into events and a stack change; `requests.Service.ApplyIn` applies them
+with `Request.Fire`, audits each (`request.transitioned`, `stack.status_changed`,
+`stack.destroyed`) and, for a terminal request, releases the lock and promotes the next waiter
+through the same `commit` path as every other terminal transition (the promotion hook schedules
+its publish job).
+
+| Report | Effect |
+|--------|--------|
+| first accepted apply report of an `approved` request | `approved → applying` (`apply_started`); stack → `provisioning` / `updating` / `destroying` |
+| `summary` passed, or failed only because `smoke` failed (mutating stage passed) | run `succeeded`; request `applied`; stack `active` (`destroyed` + `destroyed_at` after a destroy), outputs, `last_applied_sha`, `health` (`healthy`, `degraded`, `unknown`) |
+| `plan`, `apply`/`destroy` or `summary` failed or cancelled | run `failed`/`cancelled`; request `failed` with `failure_reason` (`plan_failed`, `apply_failed`, `apply_incomplete`, `apply_cancelled`) and `failure_detail`; stack `failed` |
+| `smoke` failed | does not finish the run; the summary decides (above) |
+| `release` failed | stored in the run, audited as `request.lock_release_failed` with the lock's current state; never changes the request |
+| `validate` pipeline | stored only; a passed validation is not an approval |
+
+A request that is not `approved`, `applying` or terminal answers `409 request_not_applying` and
+nothing is recorded. For a terminal request the API has already released the lease, so a report
+carrying the request's own token (a replayed `summary`, a failed `release`) is accepted, stored
+and ignored (`request.run_report_ignored`); any other token is `409 stale_fencing_token`. All
+existing checks stay: fencing token against the current lease, `head_sha` equal to the token's
+`sha`, per-pipeline workflow file and event allow-lists, and run id and attempt equality.
+
+Known limits: automatic retry of a transient failure (`apply_retry`, at most 2) needs a re-dispatch
+the platform does not have yet, so a transient failure fails the request like any other; the
+`ttl_destroy` and `drift` pipelines are stored but do not move requests or stacks yet (WBS 7.x,
+8.x); a run whose workflow dies before sending `summary` leaves the request `applying` until the
+lease expires.
+
+## Client address and trusted proxies
+
+Rate limiting of `GET /v1/auth/login` and the `actor_ip` of audit events use the client address.
+By default that is the TCP peer. With `IACP_TRUSTED_PROXIES` set, and only when the immediate peer
+is inside one of the listed CIDRs, the address is the right-most `X-Forwarded-For` entry that is not
+itself a trusted proxy (each hop appends the address it received from, so entries further left are
+whatever the client claimed). A header that is missing, made only of trusted hops or contains a
+non-address entry falls back to the peer. Without the setting the portal proxy's address is the key,
+so the limiter is effectively one global bucket. `GET /metrics` keeps its own, stricter rule
+(`X-Forwarded-For` disables the loopback exemption).
+
+Portal side (not part of this change): `portal/`'s proxy must forward the browser's address as
+`X-Forwarded-For` (append the connecting address to any incoming value rather than replacing it)
+for the login route and the audited routes, and its header allow-list must let that header through.
+Until then the limiter and the audit trail see the proxy.
+
+## Retention
+
+A sweeper (`internal/retention`, started in `main` like the OIDC replay sweeper) runs hourly and
+deletes webhook delivery ids and processed outbox jobs older than `IACP_QUEUE_RETENTION`, in
+batches of 1,000. `iacp_app` still cannot `DELETE` from `outbox`: the purge goes through the
+`purge_processed_outbox` function (migration `0010`, `SECURITY DEFINER`, only rows with
+`processed_at` set), so a compromised API cannot erase pending or dead jobs.
 
 Request ids look like `req-` followed by 10 Crockford base32 characters, so collisions on the
 unique `short_id` are negligible.

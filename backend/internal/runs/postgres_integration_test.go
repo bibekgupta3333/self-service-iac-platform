@@ -5,16 +5,13 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
-	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/audit"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/db/dbtest"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/locks"
-	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/runs"
 )
 
@@ -47,15 +44,15 @@ func TestPostgresRecordRun(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	writer := audit.NewWriter(platform.SystemClock{}, platform.RandomIDs{})
-	lockSvc := locks.NewService(locks.NewPostgresRepository(pool, writer), platform.SystemClock{}, time.Hour)
+	svcs := newServices(pool)
+	lockSvc := svcs.lock
 	grant, err := lockSvc.Acquire(ctx, locks.AcquireCommand{StackID: stackID, RequestID: reqID})
 	if err != nil {
 		t.Fatal(err)
 	}
 	token := grant.Lock.FencingToken
 
-	svc := runs.NewService(runs.NewPostgresRepository(pool), platform.SystemClock{})
+	svc := svcs.run
 	prRef := "refs/pull/812/merge"
 	bot := identity.Principal{Login: "acme/iacp/.github/workflows/pr-validate.yml@" + prRef, Type: identity.ActorGitHubActions,
 		Workflow: &identity.Workflow{Ref: prRef, JobWorkflowRef: "acme/iacp/.github/workflows/pr-validate.yml@" + prRef,

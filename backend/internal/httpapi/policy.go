@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -142,7 +141,7 @@ func routePattern(r *http.Request) string {
 // auditDenials records an rbac.denied audit event for every 403 an authenticated user
 // receives from the handlers below it (route policies and service-level role checks alike).
 // An audit failure is logged and never changes the response.
-func auditDenials(rec EventRecorder, lim *ratelimit.Limiter) func(http.Handler) http.Handler {
+func auditDenials(rec EventRecorder, lim *ratelimit.Limiter, proxies TrustedProxies) func(http.Handler) http.Handler {
 	if lim == nil {
 		lim = ratelimit.New(DenialAuditPerMinute, time.Minute, 10_000, platform.SystemClock{})
 	}
@@ -175,7 +174,7 @@ func auditDenials(rec EventRecorder, lim *ratelimit.Limiter) func(http.Handler) 
 			delete(suppressed, actor)
 			mu.Unlock()
 			route := r.Method + " " + routePattern(r)
-			ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+			ip := proxies.Request(r)
 			body := map[string]any{"method": r.Method, "route": routePattern(r), "login": p.Login}
 			if skipped > 0 {
 				body["suppressed_before"] = skipped

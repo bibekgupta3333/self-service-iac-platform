@@ -43,6 +43,16 @@ type latestRequestDTO struct {
 	CreatedAt time.Time       `json:"created_at"`
 }
 
+// stackLockDTO is the platform lock on a stack. It stays visible after a failed release, so the
+// team can see that the stack is still held, by which request, and until when.
+type stackLockDTO struct {
+	RequestID      uuid.UUID `json:"request_id"`
+	RequestShortID string    `json:"request_short_id"`
+	Holder         string    `json:"holder"`
+	AcquiredAt     time.Time `json:"acquired_at"`
+	ExpiresAt      time.Time `json:"expires_at"`
+}
+
 type stackLinks struct {
 	Self          string  `json:"self"`
 	Drift         string  `json:"drift"`
@@ -57,7 +67,8 @@ type stackDTO struct {
 	Path           string               `json:"path"`
 	Region         string               `json:"region"`
 	Status         requests.StackStatus `json:"status"`
-	Health         string               `json:"health"`
+	Health         requests.StackHealth `json:"health"`
+	Lock           *stackLockDTO        `json:"lock"`
 	IsEphemeral    bool                 `json:"is_ephemeral"`
 	ExpiresAt      *time.Time           `json:"expires_at"`
 	Outputs        json.RawMessage      `json:"outputs"`
@@ -70,10 +81,17 @@ type stackDTO struct {
 
 func toStackDTO(s stacks.Stack) stackDTO {
 	d := stackDTO{
-		ID: s.ID, Team: s.Team, Environment: s.Environment, Name: s.Name, Path: s.Path, Region: s.Region, Status: s.Status, Health: s.Health,
-		IsEphemeral: s.IsEphemeral, ExpiresAt: s.ExpiresAt, Outputs: s.Outputs, LastAppliedSHA: s.LastAppliedSHA,
+		ID: s.ID, Team: s.Team, Environment: s.Environment, Name: s.Name, Path: s.Path, Region: s.Region, Status: s.Status,
+		Health: s.Health, IsEphemeral: s.IsEphemeral, ExpiresAt: s.ExpiresAt, Outputs: s.Outputs, LastAppliedSHA: s.LastAppliedSHA,
 		CreatedAt: s.CreatedAt.UTC(), UpdatedAt: s.UpdatedAt.UTC(),
 		Links: stackLinks{Self: "/v1/stacks/" + s.ID.String(), Drift: "/v1/stacks/" + s.ID.String() + "/drift"},
+	}
+	if d.Health == "" {
+		d.Health = requests.HealthUnknown
+	}
+	if l := s.Lock; l != nil {
+		d.Lock = &stackLockDTO{RequestID: l.RequestID, RequestShortID: l.RequestShortID, Holder: l.Holder,
+			AcquiredAt: l.AcquiredAt.UTC(), ExpiresAt: l.ExpiresAt.UTC()}
 	}
 	if len(d.Outputs) == 0 {
 		d.Outputs = json.RawMessage(`{}`)

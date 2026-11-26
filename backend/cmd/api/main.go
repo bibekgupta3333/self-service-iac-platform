@@ -33,6 +33,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/publish/githubapp"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/publish/localgit"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/requests"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/retention"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/runs"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/stacks"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/webhooks"
@@ -110,7 +111,15 @@ func run() error {
 	} else {
 		slog.Info("publisher disabled (IACP_PUBLISHER=none): requests stay in draft")
 	}
-	worker := outbox.NewWorker(outbox.NewPostgresStore(pool), handlers, clock,
+	outboxStore := outbox.NewPostgresStore(pool)
+	webhookRepo := webhooks.NewPostgresRepository(pool)
+	go retention.NewSweeper([]retention.Purger{
+		retention.PurgerFunc{Label: "outbox", Fn: outboxStore.PurgeProcessed},
+		retention.PurgerFunc{Label: "webhook_deliveries", Fn: func(ctx context.Context, cutoff time.Time, _ int) (int64, error) {
+			return webhookRepo.PurgeDeliveries(ctx, cutoff)
+		}},
+	}, cfg.QueueRetention, retention.DefaultInterval, clock, logger).Run(ctx)
+	worker := outbox.NewWorker(outboxStore, handlers, clock,
 		outbox.Options{PollInterval: cfg.WorkerPollInterval, Logger: logger})
 	workerCtx, stopWorker := context.WithCancel(ctx)
 	workerDone := make(chan struct{})
@@ -120,7 +129,7 @@ func run() error {
 		slog.Warn("IACP_GITHUB_WEBHOOK_SECRET is not set: POST /v1/webhooks/github rejects every delivery")
 	}
 	webhookHandler := httpapi.NewWebhookHandler(
-		webhooks.NewIngester(webhooks.NewPostgresRepository(pool), clock, cfg.Publisher.GitHub.Repository()),
+		webhooks.NewIngester(webhookRepo, clock, cfg.Publisher.GitHub.Repository()),
 		cfg.WebhookSecret, worker.Wake)
 
 	replayStore := newReplayStore(cfg.OIDC, pool, clock)
@@ -130,7 +139,7 @@ func run() error {
 		return err
 	}
 
-	handler := httpapi.NewRouter(httpapi.Deps{
+	deps := httpapi.Deps{
 		Logger:   logger,
 		Auth:     ua.Authenticator,
 		Internal: internalAuth,
@@ -148,6 +157,7 @@ func run() error {
 		Policies:       httpapi.DefaultPolicies(),
 		Roles:          ua.Roles,
 		DenialAudit:    ua.Denials,
+		TrustedProxies: ua.Proxies,
 		InternalHandlers: []httpapi.RouteRegistrar{
 			httpapi.NewLockHandler(lockSvc),
 			httpapi.NewRequestLookupHandler(requestSvc),
@@ -155,10 +165,14 @@ func run() error {
 			httpapi.NewDriftIngestHandler(driftSvc),
 		},
 		Webhooks:         []httpapi.RouteRegistrar{webhookHandler},
-		PipelineHandlers: []httpapi.RouteRegistrar{httpapi.NewRunHandler(runs.NewService(runs.NewPostgresRepository(pool), clock))},
+		PipelineHandlers: []httpapi.RouteRegistrar{httpapi.NewRunHandler(runs.NewService(runs.NewPostgresRepository(pool, requests.NewApplyDriver(requestSvc, auditWriter)), clock))},
 		Metrics:          newMetrics(pool),
 		MetricsAccess:    httpapi.NewMetricsAccess(cfg.MetricsToken),
-	})
+	}
+	if err := deps.Validate(); err != nil {
+		return err
+	}
+	handler := httpapi.NewRouter(deps)
 
 	return serve(ctx, newServer(cfg.HTTPAddr, handler), cfg.ShutdownTimeout)
 }

@@ -41,25 +41,30 @@ type SessionChecker interface {
 
 // StreamSession tells an open stream whether the session behind its request is still live.
 type StreamSession interface {
-	// Alive returns nil while the request's session is valid and an error once it has been
-	// revoked, has expired, or its user is disabled (or the store cannot say).
-	Alive(ctx context.Context, r *http.Request) error
+	// Alive returns whether the session's user is a platform admin right now, and an error
+	// once the session has been revoked, has expired, or its user is disabled (or the store
+	// cannot say). The stream ends when the admin flag differs from the one the request was
+	// authenticated with, because that flag decides which teams the stream may read.
+	Alive(ctx context.Context, r *http.Request) (platformAdmin bool, err error)
 }
 
 // Alive implements StreamSession. It reads the session cookie of the original request again
 // and checks it against the store; it does not slide the idle window, so a stream does not
 // keep an idle session alive.
-func (a *SessionAuthenticator) Alive(ctx context.Context, r *http.Request) error {
+func (a *SessionAuthenticator) Alive(ctx context.Context, r *http.Request) (bool, error) {
 	c, err := r.Cookie(a.cookie)
 	if err != nil || c.Value == "" {
-		return ErrUnauthenticated
+		return false, ErrUnauthenticated
 	}
 	check := a.sessions.Resolve
 	if sc, ok := a.sessions.(SessionChecker); ok {
 		check = sc.Check
 	}
-	_, err = check(ctx, c.Value)
-	return err
+	rec, err := check(ctx, c.Value)
+	if err != nil {
+		return false, err
+	}
+	return rec.PlatformAdmin, nil
 }
 
 // Authenticate implements Authenticator.

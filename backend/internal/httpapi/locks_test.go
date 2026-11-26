@@ -69,7 +69,7 @@ func (f *fakeLocks) Get(_ context.Context, stackID uuid.UUID) (locks.Lock, error
 
 func TestLockHandlers(t *testing.T) {
 	fl := &fakeLocks{}
-	h := NewRouter(Deps{
+	h := NewRouter(Deps{Policies: testPolicies(),
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DevAuthenticator{Principal: devPrincipal},
 		Internal: NewTokenAuthenticator(testInternalToken, releaseBot), Ready: okPinger{},
 		Catalog: NewCatalogHandler(&fakeCatalog{versions: []catalog.ModuleVersion{sqsVersion()}}), InternalHandlers: []RouteRegistrar{NewLockHandler(fl)},
@@ -161,7 +161,7 @@ func TestLockHandlers(t *testing.T) {
 // Each machine route accepts only its own workflows: a pull-request token never reaches
 // the lock or catalog routes, apply.yml on main drives the lock, module-release.yml indexes.
 func TestMachineRoutesAreScopedPerWorkflow(t *testing.T) {
-	h := NewRouter(Deps{
+	h := NewRouter(Deps{Policies: testPolicies(),
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DevAuthenticator{Principal: devPrincipal},
 		Internal: AnyAuthenticator{NewOIDCAuthenticator(fakeTokenVerifier{}), NewTokenAuthenticator(testInternalToken, releaseBot)},
 		Ready:    okPinger{}, Catalog: NewCatalogHandler(&fakeCatalog{versions: []catalog.ModuleVersion{sqsVersion()}}),
