@@ -10,3 +10,16 @@ func TestRouteLabel(t *testing.T) {
 		t.Fatal("patterns pass through")
 	}
 }
+
+func TestMethodLabel(t *testing.T) {
+	for _, m := range []string{"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"} {
+		if MethodLabel(m) != m {
+			t.Errorf("%s must pass through", m)
+		}
+	}
+	for _, m := range []string{"", "get", "TRACE", "CONNECT", "PROPFIND", "JUNK42"} {
+		if MethodLabel(m) != OtherMethod {
+			t.Errorf("%q must map to OTHER", m)
+		}
+	}
+}

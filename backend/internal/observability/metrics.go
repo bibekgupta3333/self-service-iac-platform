@@ -53,8 +53,9 @@ func NewMetrics() *Metrics {
 }
 
 // ObserveRequest records one finished request. route must be a route pattern
-// (RouteLabel), never the raw path.
+// (RouteLabel), never the raw path; method is bounded here with MethodLabel.
 func (m *Metrics) ObserveRequest(method, route string, status int, elapsed time.Duration) {
+	method = MethodLabel(method)
 	m.requests.WithLabelValues(method, route, strconv.Itoa(status)).Inc()
 	m.duration.WithLabelValues(method, route).Observe(elapsed.Seconds())
 }
@@ -75,6 +76,20 @@ func RouteLabel(pattern string) string {
 		return UnmatchedRoute
 	}
 	return pattern
+}
+
+// OtherMethod labels every request method outside the standard set.
+const OtherMethod = "OTHER"
+
+// MethodLabel maps a request method to a bounded label value: net/http accepts any
+// token as a method, so anything but the standard API methods becomes OTHER. Pure.
+func MethodLabel(method string) string {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+		http.MethodPatch, http.MethodDelete, http.MethodOptions:
+		return method
+	}
+	return OtherMethod
 }
 
 // poolCollector reports PoolStats as iacp_db_pool_connections{state=...}.

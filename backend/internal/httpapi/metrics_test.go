@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -70,6 +71,29 @@ func TestMetricsUseRoutePatternsNotRawPaths(t *testing.T) {
 		if strings.Contains(body, leak) {
 			t.Errorf("raw path %q leaked into a label", leak)
 		}
+	}
+}
+
+func TestMetricsBoundJunkMethods(t *testing.T) {
+	h := metricsRouter(observability.NewMetrics())
+	for i := range 50 {
+		do(t, h, fmt.Sprintf("JUNK%d", i), "/healthz", "")
+	}
+	body := scrape(t, h)
+	series := 0
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "iacp_http_requests_total{") {
+			series++
+			if strings.Contains(line, "JUNK") {
+				t.Errorf("raw method leaked into a label: %s", line)
+			}
+		}
+	}
+	if series > 2 { // OTHER plus at most one bucket per status; never one per method
+		t.Fatalf("%d request series for 50 junk methods, want a bounded count:\n%s", series, body)
+	}
+	if !strings.Contains(body, `method="OTHER"`) {
+		t.Fatal("junk methods must be recorded as OTHER")
 	}
 }
 
