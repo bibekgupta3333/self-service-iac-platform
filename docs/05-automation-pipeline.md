@@ -588,58 +588,19 @@ Nothing in the workflow depends on that. When the generator switches to the S3 b
 
 ### 4.4 `drift.yml`
 
-```yaml
-name: drift
-on:
-  schedule: [{ cron: "0 2 * * *" }]            # nightly 02:00 UTC (fallback; primary trigger is EventBridge Scheduler)
-  workflow_dispatch:
-    inputs:
-      stacks: { description: "JSON array of stack paths (default: all)", required: false }
-permissions: { contents: read }
-jobs:
-  list:
-    runs-on: ubuntu-24.04
-    outputs: { matrix: "${{ steps.list.outputs.matrix }}" }
-    steps:
-      - uses: actions/checkout@<sha> # v4.2.2
-      - id: list
-        run: .github/scripts/list-stacks.sh --state present --paths '${{ inputs.stacks }}'   # max 256 per run; worker shards larger fleets
-  plan:
-    needs: list
-    runs-on: ubuntu-24.04
-    permissions: { contents: read, id-token: write }
-    strategy:
-      fail-fast: false
-      max-parallel: 20
-      matrix: { stack: "${{ fromJSON(needs.list.outputs.matrix) }}" }
-    concurrency: { group: "stack-${{ matrix.stack.stack_id }}-drift", cancel-in-progress: true }
-    defaults: { run: { working-directory: "${{ matrix.stack.path }}" } }
-    steps:
-      - uses: actions/checkout@<sha> # v4.2.2
-      - uses: hashicorp/setup-terraform@<sha> # v3.1.2
-        with: { terraform_version: "1.10.5", terraform_wrapper: false }
-      - uses: aws-actions/configure-aws-credentials@<sha> # v4.0.2
-        with:
-          role-to-assume: arn:aws:iam::${{ matrix.stack.account_id }}:role/iacp-plan
-          aws-region: us-east-1
-      - run: terraform init -lockfile=readonly
-      - id: plan
-        run: |
-          set +e
-          terraform plan -refresh-only -lock=false -detailed-exitcode -out=drift.tfplan -no-color > drift.txt; RC=$?
-          set -e
-          echo "rc=$RC" >> "$GITHUB_OUTPUT"
-          [ $RC -eq 1 ] && exit 1
-          terraform show -json drift.tfplan | jq '{drifted: [.resource_drift[]? | {address, actions: .change.actions}]}' > drift.json
-      - if: steps.plan.outputs.rc == '2'
-        uses: ./.github/actions/iacp-report
-        with: { event: drift_detected, stack-id: "${{ matrix.stack.stack_id }}", payload: "${{ matrix.stack.path }}/drift.json" }
-      - if: steps.plan.outputs.rc == '0'
-        uses: ./.github/actions/iacp-report
-        with: { event: drift_clean, stack-id: "${{ matrix.stack.stack_id }}" }
-```
+Triggers: `schedule` (`0 2 * * *`, 02:00 UTC) and `workflow_dispatch` (optional `stacks` input: a JSON array of stack paths). There is no `pull_request` trigger, so a fork cannot run it with a token; every job also skips a fork (`github.event.repository.fork`), scan and report run only on `refs/heads/main`, and the list job fails loudly on any other ref. Default token `contents: read`; `id-token: write` exists only on the `report` job.
 
-A second, non-refresh plan (`terraform plan -detailed-exitcode`) is run by the worker-dispatched variant when the stack has unapplied config changes on `main` (e.g. a failed apply); see [06-lifecycle-management.md](06-lifecycle-management.md#4-drift-detection).
+| Job | Permissions | What it does |
+|---|---|---|
+| `list` | `contents: read` | `python -m tools.stack_pipeline drift list`: the active stack roots under `environments/` (`lifecycle: active` in `iacp.stack.json`; a destroyed stack's marked root is skipped) as a matrix, at most 256 (warning when cut). The dispatch input is validated (existing, active stack paths) and never echoed. |
+| `scan` (matrix) | `contents: read` | Per stack, `concurrency: iacp-stack-<id>-drift` (a newer run replaces an older scan). A LocalStack service container with the dummy credentials and the Terraform local backend, as in `apply.yml`. Pins, `init -lockfile=readonly` and installed-module verification run with `continue-on-error`, then `terraform plan -refresh-only -lock=false -detailed-exitcode`; `terraform show -json` of the plan feeds `drift scan`, which classifies the exit code (0 clean, 2 drift, 1 error) and writes the result file. A step that stopped the plan becomes an `error` result: a failed check is never drift. The result file (addresses, resource types, actions, the **names** of the changed attributes, a fingerprint of those) is the only artifact (`drift-<id>`, one day); the plan file and every attribute value stay in the job. |
+| `report` | `contents: read`, `id-token: write` | One job, no Terraform and no module code, `concurrency: iacp-drift-report`. Downloads the result files as untrusted data, then `drift report`: `GET /v1/internal/drift/stacks` to learn which stacks the API wants checked now (settled, not locked by a request), then `POST /v1/internal/drift` for every scanned stack on that list, **each request with its own OIDC token** (the API refuses a reused `jti`). A scanned stack the API does not list (it became busy since) is skipped with a notice; a due stack with no result is a warning; a rejected report fails the job after the others were sent. With `vars.IACP_API_URL` empty the step prints a notice and sends nothing. |
+
+The result file is validated strictly on both sides: `tools.stack_pipeline.drift.outcome_from_dict` refuses unknown fields, wrong types and an inconsistent outcome before anything is sent, and the API validates the report again (`drift.Validate`). The route class (`drift`, [03 §6.9](03-data-model-and-api.md#69-pipeline-runs-actions-callbacks)) accepts only `drift.yml` on main via `schedule` or `workflow_dispatch`, and the report must carry the calling run's own id, attempt and commit.
+
+**What is and is not meaningful today (ADR-0009).** State is hermetic: no state file is committed, the local backend starts empty in every job and the LocalStack container is discarded. A refresh-only plan over an empty state has nothing to refresh, so every scan exits 0 and every report says `clean`. A scheduled run therefore proves the pipeline, not the infrastructure: listing, pins, init, the plan, classification, the result artifact, the API list, one OIDC token per report, the report and the stack-health transition. A `drifted` result needs state that survives between runs (the S3 backend once ADR-0009 ends, or a long-lived LocalStack with its state restored); until then the drifted path is covered by the backend and tools tests, which feed recorded refresh-only plans through the same code, and was run by hand against LocalStack (apply, change a bucket out of band, `plan -refresh-only` exits 2). Provider noise is real: right after a clean `apply`, `aws_s3_bucket` of the `s3` module already refreshes `policy`, `versioning`, `lifecycle_rule` and `server_side_encryption_configuration` (the resource's deprecated inline attributes, filled in by the separate sub-resources), so a persisted-state scan reports that bucket as drifted until the module hides those attributes (docs/06 §4, provider-side noise).
+
+A second, non-refresh plan (`terraform plan -detailed-exitcode`) for stacks with unapplied config changes on `main` (the `pending_changes` label) is not built yet; see [06-lifecycle-management.md](06-lifecycle-management.md#4-drift-detection).
 
 ### 4.5 `ttl-reaper.yml`
 

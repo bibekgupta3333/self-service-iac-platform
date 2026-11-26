@@ -36,7 +36,7 @@ Related: [01-system-architecture.md](01-system-architecture.md) · [04-module-re
 | `pipeline_runs` | One GitHub Actions workflow run (validate/apply/drift/ttl). | request (nullable for drift), stack |
 | `plan_summaries` | Parsed plan: add/change/destroy counts, resource changes, plan hash, policy results. | pipeline_run |
 | `cost_estimates` | Infracost result: monthly before/after/delta. | pipeline_run |
-| `drift_reports` | Nightly drift detection result per stack. | stack, pipeline_run |
+| `drift_reports` | One drift check of one stack (result, resource counts, plan hash) and, for drift, its resolution. | stack, pipeline_run, user (resolver), request (reconcile) |
 | `budgets` | Team monthly budget (`limit_usd`, `spent_usd`, `override_by`). | team, users (override_by) |
 | `budget_overrides` | Admin override for a specific request (max delta, reason, expiry). | budget, request |
 | `policy_exceptions` | Time-boxed waiver of a policy rule for a stack/team. | team, stack |
@@ -66,7 +66,9 @@ CREATE TYPE request_status    AS ENUM ('draft', 'pr_open', 'validating', 'plan_r
                                        'applied', 'failed', 'rejected', 'cancelled');
 CREATE TYPE pipeline_kind     AS ENUM ('validate', 'apply', 'drift', 'ttl_destroy', 'module_release');
 CREATE TYPE pipeline_status   AS ENUM ('queued', 'in_progress', 'succeeded', 'failed', 'cancelled', 'timed_out');
-CREATE TYPE drift_status      AS ENUM ('clean', 'drifted', 'error');
+CREATE TYPE stack_health      AS ENUM ('healthy', 'drifted');   -- drift health, separate from stack_status (see 4.2)
+CREATE TYPE drift_result      AS ENUM ('clean', 'drifted', 'error');
+CREATE TYPE drift_status      AS ENUM ('open', 'reconciled', 'ignored', 'codified');   -- resolution of a drifted report
 
 -- ---------- identity ----------
 CREATE TABLE teams (
@@ -165,6 +167,7 @@ CREATE TABLE stacks (
     state_key        text        NOT NULL UNIQUE,        -- development/payments/order-events/terraform.tfstate
     region           text        NOT NULL,
     status           stack_status NOT NULL DEFAULT 'provisioning',
+    health           stack_health NOT NULL DEFAULT 'healthy',   -- moved only by drift checks (migration 0012)
     is_ephemeral     boolean     NOT NULL DEFAULT false,
     expires_at       timestamptz,
     ttl_warned_at    timestamptz,
@@ -292,18 +295,33 @@ CREATE TABLE cost_estimates (
 );
 
 CREATE TABLE drift_reports (
-    id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    stack_id         uuid        NOT NULL REFERENCES stacks(id) ON DELETE CASCADE,
-    pipeline_run_id  uuid        NOT NULL REFERENCES pipeline_runs(id) ON DELETE RESTRICT,  -- the drift.yml run
-    status           drift_status NOT NULL,
-    changed          jsonb       NOT NULL DEFAULT '[]'::jsonb,   -- [{address, actions, attributes}]
-    resolved_by_request_id uuid  REFERENCES requests(id),
-    resolution       text        CHECK (resolution IN ('reconciled', 'codified', 'ignored')),
-    detected_at      timestamptz NOT NULL DEFAULT now(),
-    resolved_at      timestamptz
+    id                    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    stack_id              uuid         NOT NULL REFERENCES stacks(id) ON DELETE CASCADE,
+    pipeline_run_id       uuid         NOT NULL UNIQUE REFERENCES pipeline_runs(id) ON DELETE RESTRICT,  -- the drift.yml run: one report per run and stack
+    result                drift_result NOT NULL,
+    terraform_exit_code   smallint     NOT NULL CHECK (terraform_exit_code IN (0, 1, 2)),
+    resources_drifted     int          NOT NULL DEFAULT 0,
+    resources_updated     int          NOT NULL DEFAULT 0,
+    resources_deleted     int          NOT NULL DEFAULT 0,
+    changed               jsonb        NOT NULL DEFAULT '[]'::jsonb,   -- [{address, type, actions}], at most 200; never attribute values
+    plan_hash             char(64),                                    -- fingerprint of addresses, actions and changed attribute names
+    log_url               text,
+    error_message         text,                                        -- result = 'error'
+    status                drift_status,                                -- NULL unless result = 'drifted'
+    detected_at           timestamptz  NOT NULL DEFAULT now(),
+    resolved_by           uuid         REFERENCES users(id),           -- NULL when a clean scan closed the report
+    resolved_at           timestamptz,
+    resolution_reason     text,                                        -- required for ignore (CHECK)
+    resolution_request_id uuid         REFERENCES requests(id),        -- the update request a reconcile opened
+    CHECK ((result = 'drifted') = (status IS NOT NULL)),
+    CHECK ((status IS NULL OR status = 'open') = (resolved_at IS NULL)),
+    CHECK (result <> 'drifted' OR resources_drifted > 0),
+    CHECK (result = 'drifted' OR resources_drifted = 0)
 );
-CREATE INDEX drift_reports_stack_idx ON drift_reports (stack_id, detected_at DESC);
-CREATE INDEX drift_reports_open_idx  ON drift_reports (status) WHERE status = 'drifted' AND resolved_at IS NULL;
+CREATE INDEX drift_reports_stack_idx ON drift_reports (stack_id, detected_at DESC, id DESC);
+CREATE INDEX drift_reports_open_idx  ON drift_reports (stack_id) WHERE status = 'open';
+-- iacp_app: SELECT, INSERT, and UPDATE only on (status, resolved_by, resolved_at, resolution_reason,
+-- resolution_request_id). Findings are immutable and reports are never deleted.
 
 -- ---------- budgets & exceptions ----------
 CREATE TABLE budgets (
@@ -571,6 +589,8 @@ Transitions are enforced in `internal/requests/statemachine.go` by a pure transi
 
 ### 4.2 Stack
 
+Drift is **not** a lifecycle state. A drift check moves `stacks.health` (`healthy` ⇄ `drifted`) and never `stacks.status`, so it cannot disturb a request in flight: an `active` stack stays `active` and takes update and destroy requests while it is `drifted`. `stack_status` still lists `drifted` (editable like `active` in `requests.CheckStackAllowsKind`); no code path sets it any more. Health moves through the pure table `drift.NextHealth`: a drifted report sets `drifted`, a clean report restores `healthy`, a failed check (`error`) changes nothing.
+
 ```mermaid
 stateDiagram-v2
     [*] --> provisioning: create request applying
@@ -579,11 +599,7 @@ stateDiagram-v2
     active --> updating: update/upgrade request applying
     updating --> active: apply ok
     updating --> failed: apply failed
-    active --> drifted: drift detected
-    drifted --> updating: reconcile / codify request applying
-    drifted --> active: drift resolved (next scan clean)
     active --> destroying: destroy request applying (incl. TTL)
-    drifted --> destroying
     failed --> updating: fix-forward / rollback request applying
     failed --> destroying
     destroying --> destroyed: destroy ok
@@ -694,7 +710,7 @@ RBAC column uses team roles (see [07-security-and-policy.md](07-security-and-pol
 | Method | Path | Description | RBAC |
 |---|---|---|---|
 | GET | `/stacks?team=&env=&status=&limit=&cursor=` | List stacks, newest first, keyset-paginated (`next_cursor`). A user sees only the stacks of teams they belong to (any role); platform admins see all. Visibility is `identity.Visibility`, the helper the request routes use, so one caller sees the same teams on `/requests`, `/stacks` and `/requests/{id}/events`. `module=` is not implemented yet. | viewer |
-| GET | `/stacks/{id}` | Stack detail: `status`, `outputs` (non-sensitive, as reported by the last apply), `latest_request {id, short_id, kind, status}` and `links` to it. A stack the caller may not see is `404`. Resources, versions, lock holder, drift and TTL arrive with their features. | viewer |
+| GET | `/stacks/{id}` | Stack detail: `status`, `outputs` (non-sensitive, as reported by the last apply), `health` (`healthy` or `drifted`), `latest_request {id, short_id, kind, status}` and `links` (self, latest request, drift history). A stack the caller may not see is `404`. Resources, versions, lock holder and TTL arrive with their features. | viewer |
 | GET | `/stacks/{id}/requests` | Request history. | viewer |
 | GET | `/stacks/{id}/outputs` | Non-sensitive outputs. | viewer |
 | GET | `/stacks/{id}/files` | Current generated files (from `main`). | viewer |
@@ -884,11 +900,19 @@ data: {"request_id":"…","status":"applied"}
 
 | Method | Path | Description | RBAC |
 |---|---|---|---|
-| GET | `/drift?team=&env=&status=drifted` | Open drift reports. | viewer |
-| GET | `/stacks/{id}/drift` | Drift history for stack. | viewer |
-| POST | `/stacks/{id}/drift/check` | Trigger on-demand drift check (`workflow_dispatch` drift.yml for one stack). | developer |
-| POST | `/drift` | Drift result from `drift.yml` (one call per stack): `{stack_path, run_id, status: clean\|drifted\|error, changed[], plan_artifact_uri, logs_url}`. | OIDC JWT: `drift.yml@refs/heads/main` |
-| POST | `/drift/{report_id}/resolve` | `{"resolution":"reconcile"}` → creates a reconcile request; `"codify"` → opens update request from detected values (where module inputs map); `"ignore"` (maintainer, with reason). | developer / maintainer |
+| GET | `/stacks/{id}/drift?limit=` | Drift history of one stack, newest first (default 30, at most 200): `{data: [report]}`. A report is `{id, stack_id, stack_path, result: clean\|drifted\|error, status: open\|reconciled\|ignored\|codified\|null, terraform_exit_code, summary {drifted, updated, deleted}, changed [{address, type, actions}], plan_hash, log_url, error, detected_at, resolved_by, resolved_at, reason, request_id}`. A stack the caller may not see is `404`. | viewer |
+| POST | `/drift/{id}/resolve` | `{"action": "reconcile"\|"codify"\|"ignore", "reason": "…"}` on an `open` drifted report. **reconcile** opens an `update` request for the same stack from the stack's newest recorded spec (the same `POST /requests` path: same RBAC, queueing behind the stack lock, PR, review and apply; idempotent per report) and answers `request {id, short_id, status, link}`. **codify** records the decision only and answers a `note`: the platform does not turn the drift diff into module inputs, so the operator submits an update request that sets them. **ignore** needs a `reason` of at least 8 characters (`422` otherwise) and keeps the stack `drifted` until a clean scan. Resolving also closes the stack's other open reports with the same status. Replaying the same action returns the stored resolution (`replayed: true`); another action on a resolved report is `409 drift_already_resolved`, on a clean or failed check `409 drift_not_resolvable`. Audited as `drift.resolved`. | reconcile, codify: developer; ignore: maintainer |
+| GET | `/drift?team=&env=&status=open` | Open drift reports across teams. **Not implemented yet.** | viewer |
+| POST | `/stacks/{id}/drift/check` | Trigger an on-demand drift check (`workflow_dispatch` of drift.yml for one stack). **Not implemented yet.** | developer |
+
+Machine routes (`drift` route class, [6.9](#69-pipeline-runs-actions-callbacks)):
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/internal/drift/stacks?limit=` | The stacks to check: lifecycle `active` (or the legacy `drifted`), no request holding their lock, least recently checked first, at most 256: `{stacks: [{stack_id, path, team, environment, region}]}`. |
+| POST | `/internal/drift` | One check of one stack: `{stack_path, github {run_id, run_attempt, head_sha}, result, terraform_exit_code, summary {drifted, updated, deleted}, changed [{address, type, actions}], plan_hash, log_url, error}`. Strict decoding. `result` must be what the exit code means (`0` clean, `2` drifted, `1` error; an exit `2` with no drifted resource, i.e. only output values changed, is `clean`), the counts must agree with the result, a drifted report needs `plan_hash`, an error report an `error`. The report must come from the calling run (`run_mismatch`), drift.yml on main via `schedule` or `workflow_dispatch` (`workflow_not_allowed`). A stack that is not settled (`provisioning`, `updating`, `destroying`, `failed`, `destroyed`) is `409 stack_not_checkable`. In one transaction: the drift `pipeline_runs` row is upserted, the report is stored (a replay of the same run returns it with `replayed: true` and changes nothing), `stacks.health` and `last_drift_check_at` move, and `drift.detected`, `drift.check_failed` or `drift.cleared` is audited. A clean report closes the stack's open reports as `reconciled` with no resolver. Answer: `{accepted, report_id, result, status, replayed}`. |
+
+Severity (`high`/`medium`), team notifications, the cross-team list and the on-demand check are part of the rest of WBS 8.3 and not built yet.
 
 ### 6.7 Budgets and exceptions
 
@@ -938,7 +962,8 @@ Called only by GitHub Actions jobs with `Authorization: Bearer <GitHub OIDC JWT>
 | POST | `/runs` | `pr-validate.yml`, `apply.yml`, `ttl-reaper.yml` | Report run status and stage results (validating, plan summary, policy, cost, apply outcome, outputs). Creates/updates `pipeline_runs`, `plan_summaries`, `cost_estimates`. |
 | GET | `/internal/requests/by-path?stack_path=&head_sha=` | `apply.yml` (before the lock claim) | Resolves the request that holds the stack's lock: stack and request ids, `fencing_token`, `approved_plan_hash` (below). Fails closed. |
 | GET | `/internal/budget-context?stack_path=` | `pr-validate.yml`, `apply.yml` | OPA input (`conftest --data`): environment, team, allowed regions, budget (`limit_usd`, `spent_usd`, active override), approved policy exceptions, yanked module versions. |
-| POST | `/drift` | `drift.yml` | Drift result per stack (see [6.6](#66-drift)). |
+| GET | `/internal/drift/stacks` | `drift.yml` | Stacks to check (see [6.6](#66-drift)). |
+| POST | `/internal/drift` | `drift.yml` | Drift result per stack (see [6.6](#66-drift)). |
 | POST | `/internal/catalog/index` | `module-release.yml` | Index a released module version (see [6.2](#62-catalog-modules-and-versions)). |
 | GET | `/internal/stacks/{id}/lock` | worker, `apply.yml` | Current platform lock: `stack_id`, `request_id`, `holder`, `fencing_token`, `acquired_at`, `expires_at`; `404` when unlocked. |
 | POST | `/internal/stacks/{id}/lock` | worker, `apply.yml` | Acquire for `{"request_id"}`: `200 {"lock": "granted"\|"held", "queued_behind": null, "current": {…}}` or `202 {"lock": "queued", "queued_behind": "<holder request id>", "current": {…}}`. |
@@ -957,9 +982,10 @@ Route classes (`backend/internal/auth/routes.go`, pure table enforced by middlew
 | catalog_index | `/internal/catalog/index` | `module-release.yml` | `refs/heads/main` | `push`, `workflow_dispatch` |
 | runs | `/runs` | `pr-validate.yml`, `apply.yml`, `drift.yml`, `ttl-reaper.yml` | per pipeline | `pull_request`, `push`, `workflow_dispatch`, `schedule` |
 | request_lookup | `/internal/requests/by-path` (read-only) | `apply.yml` only | `refs/heads/main` (ref and workflow definition) | `push`, `workflow_dispatch` |
+| drift | `/internal/drift`, `/internal/drift/stacks` | `drift.yml` only | `refs/heads/main` (ref and workflow definition) | `schedule`, `workflow_dispatch` |
 | budget_context | `/internal/budget-context` (read-only) | `pr-validate.yml`, `apply.yml` | global allow-list (PR merge ref for `pr-validate.yml`, main otherwise) | `pull_request`, `push`, `workflow_dispatch` |
 
-Per pipeline on `/runs`: `validate` ← `pr-validate.yml` on `pull_request`; `apply` ← `apply.yml` on main via `push`/`workflow_dispatch`; `drift` ← `drift.yml` on main via `schedule`/`workflow_dispatch`; `ttl_destroy` ← `ttl-reaper.yml` on main via `schedule`/`workflow_dispatch`. `pull_request_target` and `workflow_run` never qualify.
+Per pipeline on `/runs`: `validate` ← `pr-validate.yml` on `pull_request`; `apply` ← `apply.yml` on main via `push`/`workflow_dispatch`; `drift` ← `drift.yml` on main via `schedule`/`workflow_dispatch` (drift.yml itself reports through `/internal/drift`, see [6.6](#66-drift); `/runs` still accepts the pipeline); `ttl_destroy` ← `ttl-reaper.yml` on main via `schedule`/`workflow_dispatch`. `pull_request_target` and `workflow_run` never qualify.
 
 `GET /v1/internal/requests/by-path?stack_path=environments/production/payments/order-events&head_sha=a1b2c3d4e5f60718293a4b5c6d7e8f9012345678` (apply) → `200`
 
