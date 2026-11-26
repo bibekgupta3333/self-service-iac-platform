@@ -197,7 +197,12 @@ class SmokeResult:
 
     @property
     def ok(self) -> bool:
-        return bool(self.checks) and all(c.passed for c in self.checks)
+        """No failed check. A stack with nothing to check passes (see ``empty``)."""
+        return all(c.passed for c in self.checks)
+
+    @property
+    def empty(self) -> bool:
+        return not self.checks
 
     @property
     def failures(self) -> tuple[Check, ...]:
@@ -207,14 +212,20 @@ class SmokeResult:
         return {
             "stack_path": self.stack_path,
             "ok": self.ok,
+            "empty": self.empty,
             "checks": [{"kind": c.kind, "subject": c.subject, "passed": c.passed, "detail": c.detail} for c in self.checks],
             "unprobed_types": list(self.unprobed),
         }
 
+    def _verdict(self) -> str:
+        if self.empty:
+            return "passed, nothing to check"
+        return "passed" if self.ok else "failed"
+
     def render_markdown(self) -> str:
         counts = {kind: sum(1 for c in self.checks if c.kind == kind) for kind in ("output", "state-tags", "live-tags")}
         lines = [
-            f"### Smoke test of `{self.stack_path}` ({'passed' if self.ok else 'failed'})",
+            f"### Smoke test of `{self.stack_path}` ({self._verdict()})",
             "",
             f"{counts['output']} output(s), {counts['state-tags']} tagged resource(s) in state, "
             f"{counts['live-tags']} read back from the API.",

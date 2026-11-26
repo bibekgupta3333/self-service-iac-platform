@@ -218,9 +218,11 @@ class TestSmokeTester:
         result = SmokeTester(FakeReader({})).run(metadata("development", "platform", "smoke"), {}, {}, state)
         assert [c.detail for c in result.failures] == ["no arn in state"]
 
-    def test_nothing_to_check_is_not_ok(self):
+    def test_nothing_to_check_passes(self):
         result = SmokeTester(FakeReader({})).run(metadata("development", "platform", "smoke"), {}, {}, {})
-        assert not result.ok and "Nothing to check" in result.render_markdown()
+        assert result.ok and result.empty and result.to_dict()["empty"] is True
+        md = result.render_markdown()
+        assert "(passed, nothing to check)" in md and "Nothing to check" in md and "failed" not in md
 
 
 class FakeRun:
