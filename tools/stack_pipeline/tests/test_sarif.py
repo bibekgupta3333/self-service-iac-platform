@@ -48,6 +48,30 @@ class TestRebaseUri:
     def test_rebase(self, uri, expected):
         assert rebase_uri(uri, STACK, [DL], repo_root="/home/runner/work/repo/repo") == expected
 
+    @pytest.mark.parametrize(
+        "inner",
+        [
+            "../../../../../etc/passwd",  # traversal out of the repository
+            "/etc/passwd",  # v1.0.0//etc/passwd: absolute
+            "x/..",  # normalises to "."
+            "..",
+            "modules/../../etc/passwd",
+            "README.md",  # inside the repository but not a module file
+            "environments/production/team/stack/main.tf",
+        ],
+    )
+    def test_module_branch_is_contained(self, inner):
+        uri = f"{DL}/github.com/o/r/modules/s3/v1.0.0/{inner}"
+        assert rebase_uri(uri, STACK, [DL]) == f"{STACK}/main.tf"
+
+    def test_module_branch_normalises(self):
+        uri = f"{DL}/github.com/o/r/modules/s3/v1.0.0/modules/s3/./sub/../kms.tf"
+        assert rebase_uri(uri, STACK, [DL]) == "modules/s3/kms.tf"
+
+    @pytest.mark.parametrize("rest", ["../../etc/passwd", "/etc/passwd", "."])
+    def test_repo_root_branch_is_contained(self, rest):
+        assert rebase_uri(f"/repo/{rest}", STACK, repo_root="/repo") == f"{STACK}/main.tf"
+
     def test_prerelease_tag(self):
         uri = f"{DL}/x/modules/sqs/v2.0.0-rc.1/modules/sqs/main.tf"
         assert rebase_uri(uri, STACK, [DL]) == "modules/sqs/main.tf"

@@ -6,12 +6,13 @@ to a temporary directory and names those files by absolute path. Code scanning
 needs paths relative to the repository root, so ``rebase_sarif`` rewrites every
 ``artifactLocation.uri``:
 
-- a stack-relative path is joined to the stack root;
+- a stack-relative path is joined to the stack root and must stay inside it;
 - a file of a downloaded module (``<download dir>/.../modules/<name>/vX.Y.Z/<path>``)
   becomes ``<path>``, the module's file in this repository (at its pinned tag, so
-  line numbers can differ from the default branch);
-- anything else, such as a path that leaves the stack root, points at the stack's
-  ``main.tf``, where the module calls are.
+  line numbers can differ from the default branch), and must stay under ``modules/``;
+- anything else, such as an absolute path or one that leaves the repository, the
+  stack root or ``modules/``, points at the stack's ``main.tf``, where the module
+  calls are.
 
 Everything here is pure.
 """
@@ -56,19 +57,28 @@ def rebase_uri(uri: str, stack_path: str, external_dirs: Iterable[str] = (), rep
         rest = _inside(path, directory)
         if rest is not None:
             match = _MODULE_FILE_RE.search(rest)
-            return posixpath.normpath(match.group(1)) if match else fallback
+            # A module file must stay a file under modules/ in this repository.
+            return _contained(match.group(1), fallback, under="modules") if match else fallback
     if repo_root:
         rest = _inside(path, repo_root)
         if rest is not None:
-            return _contained(posixpath.normpath(rest), fallback)
+            return _contained(rest, fallback)
     if path.startswith("/"):
         return fallback
-    joined = posixpath.normpath(posixpath.join(stack_path, path))
-    return joined if joined.startswith(stack_path + "/") else fallback
+    return _contained(posixpath.join(stack_path, path), fallback, under=stack_path)
 
 
-def _contained(path: str, fallback: str) -> str:
-    return fallback if path in (".", "..") or path.startswith("../") else path
+def _contained(path: str, fallback: str, under: str = "") -> str:
+    """``path`` normalised, or ``fallback`` when it is absolute, leaves the repository or ``under``,
+    or names no file. Every branch of ``rebase_uri`` returns through here. Pure."""
+    if path.startswith("/"):
+        return fallback
+    normal = posixpath.normpath(path)
+    if normal in (".", "..") or normal.startswith(("../", "/")):
+        return fallback
+    if under and not normal.startswith(under.strip("/") + "/"):
+        return fallback
+    return normal
 
 
 def rebase_sarif(
