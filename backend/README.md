@@ -343,7 +343,9 @@ environment-specific row wins over a team-wide one; `null` when no budget is set
   shows two racing acquirers always produce one `granted` and one `queued`.
 - Lease: 7 days (`locks.DefaultLease`), renewed by heartbeat. An expired lease can be taken over,
   but the oldest queued request gets it first, so newcomers never jump the queue.
-- Release checks the holder and token (`409 stale_fencing_token` otherwise), deletes the lease and,
+- Release checks the holder and token (`409 stale_fencing_token` otherwise; `200` with
+  `already_released: true` when the request is already terminal, so apply.yml's own release step
+  stays green after the API released the lease with the final transition), deletes the lease and,
   in the same transaction, grants the oldest waiter a new token and re-points the rest of the queue
   at it. `lock.acquired`, `lock.queued` and `lock.released` are written to the audit log; a waiter
   polling again behind the same holder writes nothing.
