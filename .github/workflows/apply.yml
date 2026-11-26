@@ -7,7 +7,8 @@
 #
 #   detect -> changed stacks (tools/stack_pipeline detect, base = github.event.before),
 #             or the one stack named by workflow_dispatch
-#   apply  -> per stack, one at a time per stack (concurrency iacp-stack-<id>-apply):
+#   apply  -> per stack, one at a time per stack (concurrency iacp-stack-<id>-apply,
+#             or iacp-stack-<id>-destroy for a destroy dispatch):
 #               claim the platform stack lock (POST /v1/internal/stacks/{id}/lock)
 #               verify module pins, init, verify installed modules
 #               plan (or plan -destroy), show -json, conftest pre-apply gate
@@ -163,9 +164,15 @@ jobs:
       max-parallel: 5
       matrix:
         stack: ${{ fromJSON(needs.detect.outputs.matrix) }}
-    # One apply per stack across all runs, never cancelled mid-apply.
+    # One apply per stack across all runs, never cancelled mid-apply. GitHub keeps
+    # only the newest pending job per group, so a queued destroy would be replaced
+    # silently by a later push apply. Destroys therefore get their own group; the
+    # platform stack lock (or, with no API, the job-local LocalStack) keeps an apply
+    # and a destroy of the same stack from mutating it together, and a destroy that
+    # meets another request's lock fails instead of disappearing. Pending push
+    # applies replacing each other is fine: the newest main contains every change.
     concurrency:
-      group: iacp-stack-${{ matrix.stack.id }}-apply
+      group: iacp-stack-${{ matrix.stack.id }}-${{ github.event_name == 'workflow_dispatch' && inputs.destroy && 'destroy' || 'apply' }}
       cancel-in-progress: false
     services:
       localstack:
