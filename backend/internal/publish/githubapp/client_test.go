@@ -110,6 +110,11 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 			reply(http.StatusUnauthorized, map[string]string{"message": "bad jwt"})
 			return
 		}
+		perms, _ := body["permissions"].(map[string]any)
+		if len(perms) != 3 || perms["contents"] != "write" || perms["pull_requests"] != "write" || perms["actions"] != "write" {
+			reply(http.StatusUnprocessableEntity, map[string]string{"message": "token must be narrowed to the publisher's permissions"})
+			return
+		}
 		if repos, _ := body["repositories"].([]any); len(repos) != 1 || repos[0] != "infra" {
 			reply(http.StatusUnprocessableEntity, map[string]string{"message": "token must be scoped to the repo"})
 			return
@@ -313,6 +318,26 @@ func TestPublishIsRetrySafe(t *testing.T) {
 	again, err := c.OpenPullRequest(ctx, publish.PullRequestSpec{Head: cm.Branch, Title: "t"})
 	if err != nil || again != first {
 		t.Fatalf("existing PR not returned: %+v, %v", again, err)
+	}
+}
+
+func TestDispatchIsNotRetried(t *testing.T) {
+	f, srv := newFake(t)
+	c, sl := newClient(t, srv, f)
+	f.failNext["POST /repos/acme/infra/actions/workflows/pr-validate.yml/dispatches"] = []int{502}
+	err := c.DispatchWorkflow(context.Background(), publish.Dispatch{Workflow: "pr-validate.yml", Ref: "main"})
+	if !IsStatus(err, 502) || len(sl.d) != 0 || f.count("POST /repos/acme/infra/actions/workflows/pr-validate.yml/dispatches") != 1 {
+		t.Fatalf("err = %v, sleeps = %v", err, sl.d)
+	}
+}
+
+func TestOnlyExistingRefIsForceMoved(t *testing.T) {
+	f, srv := newFake(t)
+	c, _ := newClient(t, srv, f)
+	f.failNext["POST /repos/acme/infra/git/refs"] = []int{422} // "injected failure", not "Reference already exists"
+	_, err := c.CommitFiles(context.Background(), publish.Commit{Branch: "iacp/req-abcdef", Message: "m", Files: files})
+	if !IsStatus(err, 422) || f.count("PATCH /repos/acme/infra/git/refs/heads/iacp/req-abcdef") != 0 {
+		t.Fatalf("err = %v; a different 422 must not force-move the branch", err)
 	}
 }
 

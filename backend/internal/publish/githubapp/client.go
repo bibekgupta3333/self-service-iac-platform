@@ -201,6 +201,10 @@ func (c *Client) appJWT() (string, error) {
 // installationToken returns a cached installation token, fetching a new one when the
 // cached one is missing or within tokenRefreshMargin of expiry. The token is scoped to
 // the configured repository.
+// TokenPermissions narrows the installation token to what the publisher uses: commits
+// and refs, pull requests (including their labels), and workflow dispatch.
+var TokenPermissions = map[string]string{"contents": "write", "pull_requests": "write", "actions": "write"}
+
 func (c *Client) installationToken(ctx context.Context) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -212,7 +216,7 @@ func (c *Client) installationToken(ctx context.Context) (string, error) {
 		ExpiresAt time.Time `json:"expires_at"`
 	}
 	path := fmt.Sprintf("/app/installations/%d/access_tokens", c.cfg.InstallationID)
-	body := map[string]any{"repositories": []string{c.cfg.Repo}}
+	body := map[string]any{"repositories": []string{c.cfg.Repo}, "permissions": TokenPermissions}
 	if err := c.do(ctx, http.MethodPost, path, body, &out, authApp); err != nil {
 		return "", fmt.Errorf("installation token: %w", err)
 	}
@@ -239,6 +243,15 @@ const (
 // do sends one API call with retries. body (if non-nil) is JSON-encoded once and resent
 // on each attempt; a 2xx response is decoded into out when out is non-nil.
 func (c *Client) do(ctx context.Context, method, path string, body, out any, auth authKind) error {
+	return c.doN(ctx, c.cfg.MaxAttempts, method, path, body, out, auth)
+}
+
+// doOnce sends a call that is not idempotent (workflow dispatch) without retries.
+func (c *Client) doOnce(ctx context.Context, method, path string, body, out any) error {
+	return c.doN(ctx, 1, method, path, body, out, authInstallation)
+}
+
+func (c *Client) doN(ctx context.Context, maxAttempts int, method, path string, body, out any, auth authKind) error {
 	var payload []byte
 	if body != nil {
 		var err error
@@ -248,7 +261,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any, aut
 	}
 	refreshed := false
 	var lastErr error
-	for attempt := 1; attempt <= c.cfg.MaxAttempts; attempt++ {
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		status, header, respBody, err := c.send(ctx, method, path, payload, auth)
 		switch {
 		case err != nil:
@@ -276,7 +289,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any, aut
 			}
 			lastErr = apiErr
 		}
-		if attempt == c.cfg.MaxAttempts {
+		if attempt == maxAttempts {
 			break
 		}
 		delay, ok := RetryDelay(attempt, header, c.clock.Now())
@@ -287,7 +300,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any, aut
 			return fmt.Errorf("%w (retry interrupted: %w)", lastErr, err)
 		}
 	}
-	return fmt.Errorf("after %d attempts: %w", c.cfg.MaxAttempts, lastErr)
+	return fmt.Errorf("after %d attempts: %w", maxAttempts, lastErr)
 }
 
 func (c *Client) send(ctx context.Context, method, path string, payload []byte, auth authKind) (int, http.Header, []byte, error) {

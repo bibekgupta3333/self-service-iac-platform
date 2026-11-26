@@ -3,6 +3,7 @@ package githubapp
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -103,7 +104,7 @@ func (c *Client) CommitFiles(ctx context.Context, cm publish.Commit) (publish.Co
 
 	err := c.do(ctx, http.MethodPost, c.repoPath("/git/refs"),
 		map[string]string{"ref": "refs/heads/" + cm.Branch, "sha": commit.SHA}, nil, authInstallation)
-	if IsStatus(err, http.StatusUnprocessableEntity) { // the branch exists: a retried publish
+	if refExists(err) { // the branch exists: a retried publish
 		err = c.do(ctx, http.MethodPatch, c.repoPath("/git/refs/"+refPath(cm.Branch)),
 			map[string]any{"sha": commit.SHA, "force": true}, nil, authInstallation)
 	}
@@ -111,6 +112,14 @@ func (c *Client) CommitFiles(ctx context.Context, cm publish.Commit) (publish.Co
 		return publish.CommitRef{}, fmt.Errorf("point %s at %s: %w", cm.Branch, commit.SHA, err)
 	}
 	return publish.CommitRef{Branch: cm.Branch, SHA: commit.SHA, TreeSHA: tree.SHA}, nil
+}
+
+// refExists reports whether err is GitHub's 422 for creating a ref that already exists;
+// any other 422 (bad sha, invalid name) must not turn into a forced update. Pure.
+func refExists(err error) bool {
+	var e *APIError
+	return errors.As(err, &e) && e.Status == http.StatusUnprocessableEntity &&
+		strings.Contains(strings.ToLower(e.Message), "reference already exists")
 }
 
 type pullResponse struct {
@@ -174,8 +183,9 @@ func (c *Client) DispatchWorkflow(ctx context.Context, d publish.Dispatch) error
 	if inputs == nil {
 		inputs = map[string]string{}
 	}
-	if err := c.do(ctx, http.MethodPost, c.repoPath("/actions/workflows/"+url.PathEscape(d.Workflow)+"/dispatches"),
-		map[string]any{"ref": d.Ref, "inputs": inputs}, nil, authInstallation); err != nil {
+	// A dispatch is not idempotent: a retried POST after a lost response could start two runs.
+	if err := c.doOnce(ctx, http.MethodPost, c.repoPath("/actions/workflows/"+url.PathEscape(d.Workflow)+"/dispatches"),
+		map[string]any{"ref": d.Ref, "inputs": inputs}, nil); err != nil {
 		return fmt.Errorf("dispatch %s on %s: %w", d.Workflow, d.Ref, err)
 	}
 	return nil
