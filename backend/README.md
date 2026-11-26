@@ -204,7 +204,11 @@ Authentication goes through `httpapi.Authenticator`, and it fails closed:
   fresh OIDC token for every call. The default store is the `oidc_jti` table, whose primary key
   makes the claim atomic across replicas; `IACP_OIDC_REPLAY_STORE=memory` keeps a bounded cache
   in the process instead (expired ids dropped first, then the soonest-expiring id evicted when
-  full), which only protects one instance. Store errors fail closed (401).
+  full), which only protects one instance. A claim only deletes an expired row for its own `jti`;
+  a background sweeper (`auth.RunReplaySweeper`, every 5 min) purges the rest in batches of
+  1,000 through a `ctid` subquery. A store outage still refuses the token, but as
+  `503 replay_store_unavailable` with `Retry-After`, logged as `authentication dependency
+  unavailable`, so it is distinguishable from a replay (401).
 - Calls with the shared token are not workflow-scoped and skip these OIDC checks.
 - 401 bodies are generic; the reason is only logged.
 
@@ -225,6 +229,15 @@ peer (a sidecar scraper in the same task or pod) is allowed; any request carryin
 `X-Forwarded-For` or `X-Real-Ip` is never treated as loopback, because a local reverse proxy would
 otherwise make every client look local. Other scrapers send `IACP_METRICS_TOKEN`, a separate secret
 from `IACP_INTERNAL_TOKEN` (which can take stack locks). A wrong token is refused even from loopback.
+Request methods outside GET, HEAD, POST, PUT, PATCH, DELETE and OPTIONS are labelled `OTHER`
+(`observability.MethodLabel`), since net/http accepts any token as a method.
+
+**Deployment assumption: loopback means "this host".** The loopback rule is only safe when no
+same-host proxy relays outside traffic to the API from 127.0.0.1 without adding a forwarding
+header. A service-mesh or ECS Service Connect sidecar, or a local nginx with `proxy_pass` and no
+`X-Forwarded-For`, would make every external caller look local. In such a deployment set
+`IACP_METRICS_TOKEN`, make the proxy add `X-Forwarded-For` (which disables the loopback rule), or
+keep `/metrics` off the proxied listener. A separate internal metrics listener is the long-term fix.
 
 ## Budget context (docs/07 §6.1)
 
