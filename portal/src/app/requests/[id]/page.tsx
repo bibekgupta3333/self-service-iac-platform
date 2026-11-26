@@ -3,17 +3,13 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import type { ReactNode } from "react";
 
-import { AutoRefresh } from "@/components/AutoRefresh";
 import { ErrorPanel } from "@/components/ErrorPanel";
-import { StatusBadge, StatusTimeline } from "@/components/StatusTimeline";
+import { RequestLive } from "@/components/RequestLive";
 import { serverApi } from "@/lib/api/server";
 import { attempt, isNotFound } from "@/lib/api/result";
-import { formatDateTime, isTerminal, requestStatusLabel } from "@/lib/format";
+import { formatDateTime } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
-
-/** Poll interval while the request can still change (SSE replaces this in WBS 7.4). */
-const REFRESH_MS = 5000;
 
 type Props = { params: Promise<{ id: string }> };
 
@@ -27,11 +23,9 @@ export default async function RequestPage({ params }: Props) {
   if (!result.ok && isNotFound(result.error)) notFound();
   if (!result.ok) return <ErrorPanel error={result.error} title="Could not load the request" />;
   const r = result.data;
-  const live = !isTerminal(r.status);
 
   return (
     <article aria-labelledby="request-title" className="space-y-8">
-      <AutoRefresh intervalMs={REFRESH_MS} enabled={live} />
       <header className="space-y-2">
         <p className="text-sm">
           <Link href="/requests" className="text-indigo-700 hover:underline">
@@ -43,30 +37,10 @@ export default async function RequestPage({ params }: Props) {
           <h1 id="request-title" className="font-mono text-2xl font-semibold tracking-tight">
             {r.short_id}
           </h1>
-          <StatusBadge status={r.status} label={requestStatusLabel(r.status)} />
         </div>
-        <p className="text-sm text-slate-600" aria-live="polite">
-          {live
-            ? `Refreshing every ${REFRESH_MS / 1000} seconds while the request is in progress.`
-            : `Finished ${formatDateTime(r.completed_at ?? r.updated_at)}.`}
-        </p>
       </header>
 
-      <section aria-labelledby="progress-title" className="space-y-3 rounded-lg border border-slate-200 bg-white p-5">
-        <h2 id="progress-title" className="text-base font-semibold">
-          Progress
-        </h2>
-        <StatusTimeline status={r.status} />
-        {r.queued_behind && (
-          <p className="text-sm text-amber-900">
-            Waiting for the stack lock held by{" "}
-            <Link href={`/requests/${encodeURIComponent(r.queued_behind)}`} className="font-mono underline">
-              {r.queued_behind.slice(0, 8)}
-            </Link>
-            . The pull request opens when that request finishes.
-          </p>
-        )}
-      </section>
+      <RequestLive request={r} />
 
       <section aria-labelledby="details-title" className="space-y-3">
         <h2 id="details-title" className="text-base font-semibold">
@@ -124,9 +98,6 @@ export default async function RequestPage({ params }: Props) {
         </section>
       )}
 
-      <p className="text-xs text-slate-500">
-        Pull request, plan summary, cost and run links arrive with the request timeline (WBS 7.4).
-      </p>
     </article>
   );
 }

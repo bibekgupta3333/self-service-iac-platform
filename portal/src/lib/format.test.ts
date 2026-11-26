@@ -4,6 +4,7 @@ import {
   catalogStatusTone,
   categoriesOf,
   formatDateTime,
+  httpsUrl,
   isTerminal,
   requestStatusLabel,
   requestStatusTone,
@@ -81,5 +82,16 @@ describe("timeline", () => {
     expect(steps).toHaveLength(7);
     expect(steps.slice(0, -1).every((t) => t.state === "unknown")).toBe(true);
     expect(steps.at(-1)).toEqual({ status: "failed", label: "Failed", state: "stopped" });
+  });
+});
+
+describe("httpsUrl", () => {
+  it("accepts only absolute https URLs", () => {
+    expect(httpsUrl("https://example.com/o/r/pull/1")).toBe("https://example.com/o/r/pull/1");
+    expect(httpsUrl("http://example.com/x")).toBeNull();
+    expect(httpsUrl("javascript:alert(1)")).toBeNull();
+    expect(httpsUrl("/relative")).toBeNull();
+    expect(httpsUrl("")).toBeNull();
+    expect(httpsUrl(undefined)).toBeNull();
   });
 });

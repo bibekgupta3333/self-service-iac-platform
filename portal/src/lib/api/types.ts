@@ -94,6 +94,13 @@ export interface StackRef {
   status: string;
 }
 
+export interface PullRequestLink {
+  branch: string;
+  pr_number: number;
+  pr_url: string;
+  head_sha?: string;
+}
+
 /** A request as returned by POST, GET and list (backend httpapi requestDTO). */
 export interface RequestSummary {
   id: string;
@@ -117,6 +124,10 @@ export interface RequestSummary {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+  /** The branch and pull request that carry the request's files; null until the PR is opened. */
+  github?: PullRequestLink | null;
+  /** Why the request failed, when it did (a short machine-readable reason). */
+  failure_reason?: string;
   links: { self: string; events: string };
   allowed_events: string[];
 }
