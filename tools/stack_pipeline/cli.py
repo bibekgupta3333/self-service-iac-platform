@@ -456,16 +456,19 @@ def run_lock(args: argparse.Namespace) -> int:
 
 
 def _lock_ids(client: IacpApiClient, args: argparse.Namespace, out: Path | None) -> tuple[str, str]:
-    """The stack and request UUIDs to lock for: the ones passed, else resolved from --stack-path.
+    """The stack and request UUIDs to lock for.
 
-    A resolved answer is written to the step outputs (stack_id, request_id, approved_plan_hash)
-    before the claim, so the release step and the plan-hash check can use it. Ids passed
-    next to --stack-path must agree with the API's answer. A lookup that finds nothing raises,
-    so the job fails instead of applying without the lock.
+    With --stack-path the API is always asked (GET /v1/internal/requests/by-path), even when
+    both ids were passed: the answer supplies the approved plan hash and proves the ids name
+    the request that holds the stack lock and is merged. Ids passed next to --stack-path must
+    agree with it. The answer is written to the step outputs (stack_id, request_id,
+    approved_plan_hash) before the claim, so the release step and the plan-hash check can use
+    it. A lookup that finds nothing raises, so the job fails instead of applying without the
+    lock. Only without --stack-path are two passed ids used as they are (no lookup is possible).
     """
-    if args.stack_id and args.request_id:
-        return args.stack_id, args.request_id
     if not args.stack_path:
+        if args.stack_id and args.request_id:
+            return args.stack_id, args.request_id
         raise ValueError("lock acquire needs --stack-id and --request-id, or --stack-path to resolve them")
     resolved = client.resolve_request(args.stack_path, args.head_sha)
     for given, found, what in ((args.stack_id, resolved.stack_id, "stack"), (args.request_id, resolved.request_id, "request")):

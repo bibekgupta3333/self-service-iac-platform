@@ -231,11 +231,24 @@ class IacpApiClient:
         """POST /v1/runs. Retried on 429/5xx: a stage report replaces its earlier entry."""
         return self._call("POST", RUNS_PATH, payload, ok=(200,))
 
-    def resolve_request(self, stack_path: str, head_sha: str = "") -> ResolvedRequest:
+    def resolve_request(self, stack_path: str, head_sha: str = "", *, merge_wait_attempts: int = 6,
+                        merge_wait_seconds: float = 5.0) -> ResolvedRequest:
         """GET /v1/internal/requests/by-path: the stack id, the request holding the stack lock
         and its approved plan hash. Fails closed: a 404 (no stack, no lock) or 409 (holder not
         approved, merge commit mismatch) is an ApiError, and so is an answer that does not
-        carry valid ids."""
+        carry valid ids. ``merge_not_recorded`` (the pr_merged webhook has not recorded the
+        merge yet) is the one retryable answer: it is asked again up to ``merge_wait_attempts``
+        times, ``merge_wait_seconds`` apart, then raised."""
+        for attempt in range(1, max(1, merge_wait_attempts) + 1):
+            try:
+                return self._resolve_request(stack_path, head_sha)
+            except ApiError as exc:
+                if exc.code != "merge_not_recorded" or attempt >= max(1, merge_wait_attempts):
+                    raise
+                self._sleep(merge_wait_seconds)
+        raise AssertionError("unreachable")
+
+    def _resolve_request(self, stack_path: str, head_sha: str) -> ResolvedRequest:
         if not STACK_PATH_RE.match(stack_path):
             raise ValueError(f"stack path must look like environments/<env>/<team>/<stack>, got {stack_path!r}")
         query = {"stack_path": stack_path}

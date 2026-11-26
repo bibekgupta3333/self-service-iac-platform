@@ -130,6 +130,27 @@ class TestResolveRequest:
         with pytest.raises(ApiError):
             client(api).resolve_request(STACK_PATH)
 
+    def test_merge_not_recorded_is_retried_then_raised(self, api):
+        api.reply("GET", BY_PATH, 409, {"code": "merge_not_recorded"})
+        naps = []
+        c = IacpApiClient(api.url, Credential(INTERNAL, "internal"), sleep=naps.append)
+        with pytest.raises(ApiError, match="merge_not_recorded") as exc:
+            c.resolve_request(STACK_PATH, merge_wait_attempts=3, merge_wait_seconds=1.5)
+        assert exc.value.status == 409 and len(api.calls) == 3 and naps == [1.5, 1.5]
+
+    def test_merge_not_recorded_is_retried_until_recorded(self, api):
+        api.reply("GET", BY_PATH, 409, {"code": "merge_not_recorded"})
+        api.reply("GET", BY_PATH, 200, RESOLVED)
+        assert client(api).resolve_request(STACK_PATH).request_id == REQ
+        assert len(api.calls) == 2
+
+    @pytest.mark.parametrize("code", ["merge_commit_mismatch", "request_not_approved"])
+    def test_other_conflicts_are_not_retried(self, api, code):
+        api.reply("GET", BY_PATH, 409, {"code": code})
+        with pytest.raises(ApiError, match=code):
+            client(api).resolve_request(STACK_PATH)
+        assert len(api.calls) == 1
+
     def test_errors_are_not_retried(self, api):
         api.reply("GET", BY_PATH, 404, {"code": "no_active_request"})
         with pytest.raises(ApiError, match="no_active_request") as exc:
@@ -440,12 +461,41 @@ class TestLockCommand:
                                    "attempted=true\nclaimed=true\nfencing_token=48214\n")
         assert "resolved environments/development/payments/orders: request req-7k3p9x" in capsys.readouterr().out
 
-    def test_acquire_with_both_ids_does_not_look_up(self, runner_env, api):
+    def test_acquire_with_both_ids_and_a_path_still_resolves(self, tmp_path, runner_env, api):
+        """The lookup supplies the approved hash and proves the ids name the lock holder."""
+        api.reply("GET", BY_PATH, 200, RESOLVED)
         api.reply("POST", f"/v1/internal/stacks/{STACK}/lock", 200, {"lock": "granted", "current": LOCK})
+        out = tmp_path / "out"
         rc = main(["lock", "acquire", "--stack-path", STACK_PATH, "--stack-id", STACK, "--request-id", REQ,
-                   "--api-url", api.url])
+                   "--api-url", api.url, "--github-output", str(out)])
         assert rc == 0
+        assert [c["method"] for c in api.calls] == ["GET", "POST"]
+        assert f"approved_plan_hash={HASH}\n" in out.read_text()
+
+    def test_acquire_with_both_ids_that_disagree_fails_before_the_claim(self, runner_env, api, capsys):
+        api.reply("GET", BY_PATH, 200, RESOLVED)
+        other = "33333333-3333-4333-8333-333333333333"
+        rc = main(["lock", "acquire", "--stack-path", STACK_PATH, "--stack-id", STACK, "--request-id", other,
+                   "--api-url", api.url])
+        assert rc == 1
+        assert "not the request the API resolved" in capsys.readouterr().err
+        assert [c["method"] for c in api.calls] == ["GET"]
+
+    def test_acquire_with_ids_and_no_path_uses_them_as_they_are(self, runner_env, api):
+        api.reply("POST", f"/v1/internal/stacks/{STACK}/lock", 200, {"lock": "granted", "current": LOCK})
+        assert main(["lock", "acquire", "--stack-id", STACK, "--request-id", REQ, "--api-url", api.url]) == 0
         assert [c["method"] for c in api.calls] == ["POST"]
+
+    def test_acquire_waits_for_the_merge_to_be_recorded(self, runner_env, api, monkeypatch):
+        naps = []
+        monkeypatch.setattr("tools.stack_pipeline.api_client.time.sleep", naps.append)
+        api.reply("GET", BY_PATH, 409, {"code": "merge_not_recorded"})
+        api.reply("GET", BY_PATH, 409, {"code": "merge_not_recorded"})
+        api.reply("GET", BY_PATH, 200, RESOLVED)
+        api.reply("POST", f"/v1/internal/stacks/{STACK}/lock", 200, {"lock": "granted", "current": LOCK})
+        assert main(["lock", "acquire", "--stack-path", STACK_PATH, "--api-url", api.url]) == 0
+        assert [c["method"] for c in api.calls] == ["GET", "GET", "GET", "POST"]
+        assert naps == [5.0, 5.0]
 
     @pytest.mark.parametrize("status,body", [
         (404, {"code": "no_active_request"}),
