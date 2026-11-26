@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/audit"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/auth"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/catalog"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/config"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/db"
@@ -72,11 +73,10 @@ func run() error {
 	lockSvc := locks.NewService(locks.NewPostgresRepository(pool, auditWriter), clock, locks.DefaultLease)
 	requestSvc := requests.NewService(requestRepo, catalogSvc, requestRepo, lockSvc, clock, ids)
 
-	if cfg.InternalToken == "" {
-		slog.Warn("IACP_INTERNAL_TOKEN is not set: /v1/internal endpoints reject every request")
+	internalAuth, err := newMachineAuthenticator(cfg, clock)
+	if err != nil {
+		return err
 	}
-	internalAuth := httpapi.NewTokenAuthenticator(cfg.InternalToken,
-		identity.Principal{Login: "internal-token", Type: identity.ActorGitHubActions})
 
 	handler := httpapi.NewRouter(httpapi.Deps{
 		Logger:   logger,
@@ -138,6 +138,39 @@ func newAuthenticator(ctx context.Context, cfg config.Config, users *identity.Us
 		return httpapi.DevAuthenticator{Principal: p}, nil
 	}
 	return nil, fmt.Errorf("unsupported auth mode %q", cfg.AuthMode)
+}
+
+// newMachineAuthenticator builds the authenticator for /v1/internal/* and /v1/runs. It
+// fails closed: GitHub OIDC when configured, the shared token when set, and with
+// neither every call is rejected.
+func newMachineAuthenticator(cfg config.Config, clock platform.Clock) (httpapi.Authenticator, error) {
+	var chain httpapi.AnyAuthenticator
+	if cfg.OIDC.Enabled() {
+		o := cfg.OIDC
+		policy := auth.Policy{Issuer: o.Issuer, Audience: o.Audience, Repository: o.Repository, RepositoryID: o.RepositoryID,
+			Refs: o.Refs, WorkflowRefs: o.WorkflowRefs}
+		if len(policy.Refs) == 0 {
+			policy.Refs = auth.DefaultRefs
+		}
+		if len(policy.WorkflowRefs) == 0 {
+			policy.WorkflowRefs = auth.DefaultWorkflowRefs(o.Repository)
+		}
+		verifier, err := auth.NewVerifier(policy, auth.NewJWKSCache(o.JWKSURL, clock, auth.JWKSOptions{}), clock, o.Leeway)
+		if err != nil {
+			return nil, err
+		}
+		chain = append(chain, httpapi.NewOIDCAuthenticator(verifier))
+		slog.Info("GitHub OIDC enabled for machine endpoints", "repository", o.Repository, "issuer", o.Issuer)
+	}
+	if cfg.InternalToken != "" {
+		chain = append(chain, httpapi.NewTokenAuthenticator(cfg.InternalToken,
+			identity.Principal{Login: "internal-token", Type: identity.ActorGitHubActions}))
+	}
+	if len(chain) == 0 {
+		slog.Warn("neither IACP_OIDC_AUDIENCE nor IACP_INTERNAL_TOKEN is set: /v1/internal and /v1/runs reject every request")
+		return httpapi.DenyAuthenticator{}, nil
+	}
+	return chain, nil
 }
 
 // serve runs srv until ctx is cancelled, then drains in-flight requests.
