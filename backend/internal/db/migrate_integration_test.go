@@ -23,13 +23,13 @@ func TestMigrationsApplyAndAreIdempotent(t *testing.T) {
 		t.Fatalf("re-run migrations: %v", err)
 	}
 	v, err := m.Version(ctx)
-	if err != nil || v != 4 {
-		t.Fatalf("version = %d, %v; want 4", v, err)
+	if err != nil || v != 5 {
+		t.Fatalf("version = %d, %v; want 5", v, err)
 	}
 
 	for _, table := range []string{
 		"teams", "users", "memberships", "modules", "module_versions", "environments", "stacks",
-		"stack_resources", "requests", "locks", "idempotency_keys", "audit_events",
+		"stack_resources", "requests", "locks", "idempotency_keys", "audit_events", "pipeline_runs",
 	} {
 		var exists bool
 		if err := pool.QueryRow(ctx, "SELECT to_regclass('public.'||$1) IS NOT NULL", table).Scan(&exists); err != nil || !exists {
@@ -75,6 +75,8 @@ func TestRuntimeRoleIsLeastPrivileged(t *testing.T) {
 		"CREATE TABLE sneaky (n int)",
 		"SELECT * FROM goose_db_version",
 		"DROP TABLE requests",
+		"DELETE FROM pipeline_runs", // run reports are insert/update only (0005)
+		"TRUNCATE locks",
 	} {
 		if _, err := app.Exec(ctx, stmt); err == nil {
 			t.Errorf("iacp_app could run %q", stmt)
