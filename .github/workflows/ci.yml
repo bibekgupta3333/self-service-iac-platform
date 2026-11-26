@@ -223,7 +223,7 @@ jobs:
         ports:
           - 4566:4566
         env:
-          SERVICES: s3,sqs,sns,lambda,iam,sts,kms,logs,cloudwatch,secretsmanager,events
+          SERVICES: s3,sqs,sns,lambda,iam,sts,kms,logs,cloudwatch,secretsmanager,events,ec2,dynamodb,dynamodbstreams,kinesis
           AWS_DEFAULT_REGION: us-east-1
         volumes:
           - /var/run/docker.sock:/var/run/docker.sock
@@ -322,7 +322,7 @@ jobs:
         ports:
           - 4566:4566
         env:
-          SERVICES: s3,sqs,sns,lambda,iam,sts,kms,logs,cloudwatch,secretsmanager,events
+          SERVICES: s3,sqs,sns,lambda,iam,sts,kms,logs,cloudwatch,secretsmanager,events,ec2,dynamodb,dynamodbstreams,kinesis
           AWS_DEFAULT_REGION: us-east-1
         volumes:
           - /var/run/docker.sock:/var/run/docker.sock
