@@ -73,12 +73,25 @@ type fakeCosts struct{}
 
 func (fakeCosts) TeamCostCenter(context.Context, uuid.UUID) (string, error) { return "cc-4102", nil }
 
-// fakePublisher records calls; err fails CommitFiles.
+// fakePublisher records calls; err fails CommitFiles, labelErr fails AddLabels.
 type fakePublisher struct {
-	err     error
-	commits []publish.Commit
-	prs     []publish.PullRequestSpec
-	labels  []string
+	err      error
+	labelErr error
+	commits  []publish.Commit
+	prs      []publish.PullRequestSpec
+	labels   []string
+	closed   []int
+	deleted  []string
+}
+
+func (f *fakePublisher) ClosePullRequest(_ context.Context, n int) error {
+	f.closed = append(f.closed, n)
+	return nil
+}
+
+func (f *fakePublisher) DeleteBranch(_ context.Context, b string) error {
+	f.deleted = append(f.deleted, b)
+	return nil
 }
 
 func (f *fakePublisher) Name() string { return "fake" }
@@ -97,6 +110,9 @@ func (f *fakePublisher) OpenPullRequest(_ context.Context, s publish.PullRequest
 }
 
 func (f *fakePublisher) AddLabels(_ context.Context, _ int, labels []string) error {
+	if f.labelErr != nil {
+		return f.labelErr
+	}
 	f.labels = labels
 	return nil
 }
@@ -195,6 +211,41 @@ func TestHandleFailures(t *testing.T) {
 			case tt.wantFailure != nil && (len(tt.reqs.failures) != 1 || tt.reqs.failures[0].Final != *tt.wantFailure ||
 				tt.reqs.failures[0].Attempt != tt.attempt || tt.reqs.failures[0].Publisher != "fake"):
 				t.Fatalf("failures = %+v", tt.reqs.failures)
+			}
+		})
+	}
+}
+
+func TestFinalFailureWithdrawsTheUnrecordedPR(t *testing.T) {
+	tests := []struct {
+		name        string
+		reqs        *fakeRequests
+		pub         *fakePublisher
+		attempt     int
+		wantClosed  []int
+		wantDeleted bool
+	}{
+		{name: "record conflict after the PR opened", reqs: &fakeRequests{target: draftRequest(),
+			recordErr: apperr.Conflict("stale_fencing_token", "lost")}, pub: &fakePublisher{}, attempt: 1,
+			wantClosed: []int{812}, wantDeleted: true},
+		{name: "last attempt fails after the PR opened", reqs: &fakeRequests{target: draftRequest()},
+			pub: &fakePublisher{labelErr: errors.New("github 502")}, attempt: 3, wantClosed: []int{812}, wantDeleted: true},
+		{name: "last attempt fails before the PR", reqs: &fakeRequests{target: draftRequest()},
+			pub: &fakePublisher{err: errors.New("github 502")}, attempt: 3, wantDeleted: true},
+		{name: "a retryable failure keeps the PR for the next attempt", reqs: &fakeRequests{target: draftRequest()},
+			pub: &fakePublisher{labelErr: errors.New("github 502")}, attempt: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := NewService(tt.reqs, fakeVersions{}, fakeCosts{}, renderer(), tt.pub, Options{})
+			if err := svc.Handle(context.Background(), job(tt.attempt)); err == nil {
+				t.Fatal("want an error")
+			}
+			if !slices.Equal(tt.pub.closed, tt.wantClosed) || (len(tt.pub.deleted) == 1) != tt.wantDeleted {
+				t.Fatalf("closed %v deleted %v", tt.pub.closed, tt.pub.deleted)
+			}
+			if tt.wantDeleted && (tt.pub.deleted[0] != "iacp/req-7k3p9x" || tt.reqs.failures[0].Cleanup == "") {
+				t.Fatalf("deleted %v, failure %+v", tt.pub.deleted, tt.reqs.failures)
 			}
 		})
 	}

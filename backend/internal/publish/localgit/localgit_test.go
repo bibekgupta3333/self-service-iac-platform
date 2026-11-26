@@ -165,6 +165,17 @@ func TestFakePullRequests(t *testing.T) {
 	if err := p.DispatchWorkflow(ctx, publish.Dispatch{Workflow: "pr-validate.yml", Ref: "iacp/req-aaaaaa"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := p.ClosePullRequest(ctx, 2); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := p.DeleteBranch(ctx, "iacp/req-bbbbbb"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out, err := exec.Command("git", "-C", dir, "rev-parse", "--verify", "--quiet", "refs/heads/iacp/req-bbbbbb").CombinedOutput(); err == nil {
+		t.Fatalf("branch still exists: %s", out)
+	}
 	// A new adapter on the same repository sees the recorded state.
 	p2, err := New(ctx, Config{RepoPath: dir, BaseBranch: "main"})
 	if err != nil {
@@ -176,6 +187,9 @@ func TestFakePullRequests(t *testing.T) {
 	}
 	if pr := st.Pulls["iacp/req-aaaaaa"]; pr == nil || pr.Body != "body" || !slices.Equal(pr.Labels, []string{"iacp", "iacp:team:x"}) {
 		t.Fatalf("state = %+v", st.Pulls["iacp/req-aaaaaa"])
+	}
+	if st.Pulls["iacp/req-bbbbbb"].State != "closed" || st.Pulls["iacp/req-aaaaaa"].State != "open" {
+		t.Fatalf("states = %+v", st.Pulls)
 	}
 	if st.NextNumber != 3 || len(st.Dispatches) != 1 {
 		t.Fatalf("state = %+v", st)

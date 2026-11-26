@@ -189,6 +189,20 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		f.refs[strings.TrimPrefix(p, "/git/refs/heads/")] = body["sha"].(string)
 		reply(http.StatusOK, nil)
+	case r.Method == http.MethodPatch && strings.HasPrefix(p, "/pulls/"):
+		if body["state"] != "closed" {
+			reply(http.StatusUnprocessableEntity, map[string]string{"message": "only closing is expected"})
+			return
+		}
+		reply(http.StatusOK, map[string]any{"state": "closed"})
+	case r.Method == http.MethodDelete && strings.HasPrefix(p, "/git/refs/heads/"):
+		branch := strings.TrimPrefix(p, "/git/refs/heads/")
+		if _, ok := f.refs[branch]; !ok {
+			reply(http.StatusUnprocessableEntity, map[string]string{"message": "Reference does not exist"})
+			return
+		}
+		delete(f.refs, branch)
+		reply(http.StatusNoContent, nil)
 	case r.Method == http.MethodPost && p == "/pulls":
 		head := body["head"].(string)
 		if _, exists := f.pulls[head]; exists {
@@ -353,6 +367,26 @@ func TestPublishIsRetrySafe(t *testing.T) {
 	again, err := c.OpenPullRequest(ctx, publish.PullRequestSpec{Head: cm.Branch, Title: "t"})
 	if err != nil || again != first {
 		t.Fatalf("existing PR not returned: %+v, %v", again, err)
+	}
+}
+
+func TestCloseAndDeleteBranch(t *testing.T) {
+	f, srv := newFake(t)
+	c, _ := newClient(t, srv, f)
+	ctx := context.Background()
+	if _, err := c.CommitFiles(ctx, publish.Commit{Branch: "iacp/req-7k3p9x", Message: "m", Files: files}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ClosePullRequest(ctx, 800); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 { // the second delete finds nothing and is still fine
+		if err := c.DeleteBranch(ctx, "iacp/req-7k3p9x"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, ok := f.refs["iacp/req-7k3p9x"]; ok || f.count("PATCH /repos/acme/infra/pulls/800") != 1 {
+		t.Fatalf("refs = %v", f.refs)
 	}
 }
 

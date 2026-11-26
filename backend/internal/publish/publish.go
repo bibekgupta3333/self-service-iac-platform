@@ -105,6 +105,10 @@ type Publisher interface {
 	AddLabels(ctx context.Context, number int, labels []string) error
 	// DispatchWorkflow starts a workflow_dispatch run.
 	DispatchWorkflow(ctx context.Context, d Dispatch) error
+	// ClosePullRequest closes a PR without merging it. Closing a closed PR is a no-op.
+	ClosePullRequest(ctx context.Context, number int) error
+	// DeleteBranch deletes a branch; a missing branch is not an error.
+	DeleteBranch(ctx context.Context, branch string) error
 }
 
 // ErrInvalidPath is returned for a file path that could escape the repository.

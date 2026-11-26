@@ -205,6 +205,28 @@ func (c *Client) AddLabels(ctx context.Context, number int, labels []string) err
 	return nil
 }
 
+// ClosePullRequest implements publish.Publisher.
+func (c *Client) ClosePullRequest(ctx context.Context, number int) error {
+	if err := c.do(ctx, http.MethodPatch, c.repoPath(fmt.Sprintf("/pulls/%d", number)),
+		map[string]string{"state": "closed"}, nil, authInstallation); err != nil {
+		return fmt.Errorf("close pull request #%d: %w", number, err)
+	}
+	return nil
+}
+
+// DeleteBranch implements publish.Publisher. GitHub answers 422 for a ref that does not
+// exist (and 404 on some versions); both mean there is nothing to delete.
+func (c *Client) DeleteBranch(ctx context.Context, branch string) error {
+	if err := publish.ValidatePath(branch); err != nil {
+		return fmt.Errorf("branch: %w", err)
+	}
+	err := c.do(ctx, http.MethodDelete, c.repoPath("/git/refs/"+refPath(branch)), nil, nil, authInstallation)
+	if err != nil && !IsStatus(err, http.StatusUnprocessableEntity) && !IsStatus(err, http.StatusNotFound) {
+		return fmt.Errorf("delete branch %s: %w", branch, err)
+	}
+	return nil
+}
+
 // DispatchWorkflow implements publish.Publisher.
 func (c *Client) DispatchWorkflow(ctx context.Context, d publish.Dispatch) error {
 	if err := publish.ValidatePath(d.Workflow); err != nil || strings.Contains(d.Workflow, "/") {

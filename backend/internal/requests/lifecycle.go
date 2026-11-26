@@ -227,6 +227,8 @@ type PublishFailure struct {
 	Error     string
 	// Final means the worker gives up: the request fires publish_failed and releases its lock.
 	Final bool
+	// Cleanup describes the best-effort withdrawal of an unrecorded branch/PR (final only).
+	Cleanup string
 }
 
 // RecordPublishFailure audits a failed publish attempt; on the final attempt a draft
@@ -241,6 +243,7 @@ func (s *Service) RecordPublishFailure(ctx context.Context, id uuid.UUID, f Publ
 		by := publisherPrincipal(f.Publisher)
 		if err := s.audit(ctx, st, by, "request.publish_failed", r.ID, correlationID, map[string]any{
 			"short_id": r.ShortID, "publisher": f.Publisher, "attempt": f.Attempt, "error": f.Error, "final": f.Final,
+			"cleanup": f.Cleanup,
 		}); err != nil {
 			return err
 		}

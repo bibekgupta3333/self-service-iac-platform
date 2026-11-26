@@ -56,6 +56,7 @@ type Pull struct {
 	Body   string   `json:"body"`
 	Labels []string `json:"labels"`
 	URL    string   `json:"url"`
+	State  string   `json:"state"` // open or closed
 }
 
 // Publisher implements publish.Publisher on a local repository.
@@ -256,7 +257,7 @@ func (p *Publisher) OpenPullRequest(ctx context.Context, spec publish.PullReques
 	}
 	n := st.NextNumber
 	pr := &Pull{Number: n, Head: spec.Head, Base: p.cfg.BaseBranch, Title: spec.Title, Body: spec.Body,
-		Labels: []string{}, URL: fmt.Sprintf("file://%s#pull/%d", filepath.ToSlash(p.repo), n)}
+		Labels: []string{}, URL: fmt.Sprintf("file://%s#pull/%d", filepath.ToSlash(p.repo), n), State: "open"}
 	st.Pulls[spec.Head], st.NextNumber = pr, n+1
 	if err := p.saveState(st); err != nil {
 		return publish.PullRequest{}, err
@@ -279,6 +280,37 @@ func (p *Publisher) AddLabels(_ context.Context, number int, labels []string) er
 		}
 	}
 	return fmt.Errorf("localgit: pull request #%d not found", number)
+}
+
+// ClosePullRequest implements publish.Publisher by marking the fake PR closed.
+func (p *Publisher) ClosePullRequest(_ context.Context, number int) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	st, err := p.LoadState()
+	if err != nil {
+		return err
+	}
+	for _, pr := range st.Pulls {
+		if pr.Number == number {
+			pr.State = "closed"
+			return p.saveState(st)
+		}
+	}
+	return fmt.Errorf("localgit: pull request #%d not found", number)
+}
+
+// DeleteBranch implements publish.Publisher.
+func (p *Publisher) DeleteBranch(ctx context.Context, branch string) error {
+	if err := publish.ValidatePath(branch); err != nil {
+		return fmt.Errorf("branch: %w", err)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, err := p.resolve(ctx, branch); err != nil {
+		return nil // nothing to delete
+	}
+	_, err := p.git(ctx, nil, nil, "update-ref", "-d", "refs/heads/"+branch)
+	return err
 }
 
 // DispatchWorkflow implements publish.Publisher by recording the dispatch; no workflow runs

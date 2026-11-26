@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -94,6 +96,7 @@ func (s *Service) Handle(ctx context.Context, j outbox.Job) error {
 	}
 
 	published, err := s.Publish(ctx, r)
+	partial := published
 	if err == nil {
 		_, err = s.reqs.RecordPublished(ctx, r.ID, published, correlationID)
 		if err == nil {
@@ -106,8 +109,13 @@ func (s *Service) Handle(ctx context.Context, j outbox.Job) error {
 	}
 	permanent := errors.Is(err, errRender)
 	final := permanent || j.Last()
-	if rerr := s.reqs.RecordPublishFailure(ctx, r.ID, requests.PublishFailure{Publisher: s.pub.Name(), Attempt: j.Attempts,
-		Error: err.Error(), Final: final}, correlationID); rerr != nil {
+	failure := requests.PublishFailure{Publisher: s.pub.Name(), Attempt: j.Attempts, Error: err.Error(), Final: final}
+	if final {
+		// Nothing was recorded for this request, so a branch or PR this or an earlier
+		// attempt left behind carries a superseded render: withdraw it (best effort).
+		failure.Cleanup = s.withdraw(ctx, r.ShortID, partial.Number)
+	}
+	if rerr := s.reqs.RecordPublishFailure(ctx, r.ID, failure, correlationID); rerr != nil {
 		return fmt.Errorf("publish %s: %w (recording the failure: %w)", r.ShortID, err, rerr)
 	}
 	if permanent {
@@ -116,8 +124,39 @@ func (s *Service) Handle(ctx context.Context, j outbox.Job) error {
 	return fmt.Errorf("publish %s: %w", r.ShortID, err)
 }
 
+// withdraw closes the PR (when its number is known) and deletes the request branch,
+// which also closes any PR on it. It runs on a fresh 30 s context, since the handler's
+// may be what expired, and reports what happened for the audit trail.
+func (s *Service) withdraw(ctx context.Context, shortID string, number int) string {
+	branch, err := publish.BranchName(shortID)
+	if err != nil {
+		return "skipped: " + err.Error()
+	}
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	var problems []string
+	if number > 0 {
+		if err := s.pub.ClosePullRequest(cctx, number); err != nil {
+			problems = append(problems, err.Error())
+		}
+	}
+	if err := s.pub.DeleteBranch(cctx, branch); err != nil {
+		problems = append(problems, err.Error())
+	}
+	if len(problems) > 0 {
+		observability.Logger(ctx).WarnContext(ctx, "could not withdraw unrecorded PR", "branch", branch, "pr", number,
+			"errors", problems)
+		return "failed: " + strings.Join(problems, "; ")
+	}
+	if number > 0 {
+		return fmt.Sprintf("closed PR #%d and deleted %s", number, branch)
+	}
+	return "deleted " + branch
+}
+
 // Publish renders the request's stack and writes it through the publisher: commit on
-// iacp/<short id>, open the PR, add labels. It does not touch the database.
+// iacp/<short id>, open the PR, add labels. It does not touch the database. On error the
+// returned value carries what was already created (branch, PR number).
 func (s *Service) Publish(ctx context.Context, r *requests.Request) (requests.PublishedPR, error) {
 	spec, err := DecodeSpec(r)
 	if err != nil {
@@ -161,12 +200,14 @@ func (s *Service) Publish(ctx context.Context, r *requests.Request) (requests.Pu
 	if err != nil {
 		return requests.PublishedPR{}, fmt.Errorf("commit files: %w", err)
 	}
+	partial := requests.PublishedPR{Publisher: s.pub.Name(), Branch: branch, CommitSHA: ref.SHA, TreeSHA: ref.TreeSHA}
 	pr, err := s.pub.OpenPullRequest(ctx, publish.PullRequestSpec{Head: branch, Title: publish.Title(pc), Body: publish.Body(pc)})
 	if err != nil {
-		return requests.PublishedPR{}, fmt.Errorf("open pull request: %w", err)
+		return partial, fmt.Errorf("open pull request: %w", err)
 	}
+	partial.Number, partial.URL = pr.Number, pr.URL
 	if err := s.pub.AddLabels(ctx, pr.Number, publish.Labels(pc)); err != nil {
-		return requests.PublishedPR{}, fmt.Errorf("label pull request: %w", err)
+		return partial, fmt.Errorf("label pull request: %w", err)
 	}
 	observability.Logger(ctx).InfoContext(ctx, "request published", slog.String("request", r.ShortID),
 		slog.String("branch", branch), slog.Int("pr", pr.Number), slog.String("publisher", s.pub.Name()))
