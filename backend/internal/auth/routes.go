@@ -29,6 +29,11 @@ const (
 	// apply is verified against, and a pull-request token comes from a workflow file the
 	// PR author controls. pr-validate.yml reads its request id and token from iacp.stack.json.
 	RouteRequestLookup RouteClass = "request_lookup"
+	// RouteDrift: GET /v1/internal/drift/stacks and POST /v1/internal/drift. Only drift.yml
+	// on main, on its schedule or by dispatch: a report moves a stack's health and the list
+	// names what to scan, and a pull-request token comes from a workflow file the PR author
+	// controls.
+	RouteDrift RouteClass = "drift"
 )
 
 // RoutePolicy is what an OIDC caller must be to use a route class.
@@ -64,6 +69,11 @@ var RoutePolicies = map[RouteClass]RoutePolicy{
 		Workflows: []string{"apply.yml"},
 		MainOnly:  true,
 		Events:    []string{"push", "workflow_dispatch"},
+	},
+	RouteDrift: {
+		Workflows: []string{"drift.yml"},
+		MainOnly:  true,
+		Events:    []string{"schedule", "workflow_dispatch"},
 	},
 }
 
