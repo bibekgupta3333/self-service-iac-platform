@@ -90,11 +90,17 @@ func TestSQSComplete(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ListQueueTags(%s): %v", url, err)
 			}
-			if missing := missingTags(out.Tags); len(missing) > 0 {
-				t.Errorf("%s missing required tags %v", url, missing)
+			want := map[string]string{"iacp:module": "sqs", "cost-center": "cc-1234"}
+			for k, v := range expectedTags {
+				want[k] = v
 			}
-			if role != "" && out.Tags["iacp:role"] != role {
-				t.Errorf("%s iacp:role = %q, want %q", url, out.Tags["iacp:role"], role)
+			if role != "" {
+				want["iacp:role"] = role
+			} else if _, ok := out.Tags["iacp:role"]; ok {
+				t.Errorf("%s: main queue must not carry iacp:role", url)
+			}
+			if problems := tagProblems(out.Tags, want); len(problems) > 0 {
+				t.Errorf("%s tags: %v (all tags: %v)", url, problems, out.Tags)
 			}
 		}
 	})

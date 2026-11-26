@@ -99,11 +99,12 @@ func TestS3Complete(t *testing.T) {
 		for _, tag := range out.TagSet {
 			tags[aws.ToString(tag.Key)] = aws.ToString(tag.Value)
 		}
-		if missing := missingTags(tags); len(missing) > 0 {
-			t.Errorf("missing required tags %v in %v", missing, tags)
+		want := map[string]string{"iacp:module": "s3", "cost-center": "cc-1234"}
+		for k, v := range expectedTags {
+			want[k] = v
 		}
-		if tags["iacp:team"] != team || tags["cost-center"] != "cc-1234" {
-			t.Errorf("unexpected tag values: %v", tags)
+		if problems := tagProblems(tags, want); len(problems) > 0 {
+			t.Errorf("bucket tags: %v (all tags: %v)", problems, tags)
 		}
 	})
 

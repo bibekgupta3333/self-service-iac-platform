@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"testing"
 
@@ -23,8 +24,17 @@ const (
 	environment     = "development"
 )
 
-// requiredTags must be present on every taggable resource (docs/07 section 6.3).
-var requiredTags = []string{"iacp:team", "iacp:environment", "iacp:stack", "iacp:managed-by"}
+// stack is the iacp:stack value the examples are applied with.
+const stack = "terratest"
+
+// expectedTags are the platform tags (and values) every taggable resource
+// must carry, mirroring policies/opa/tags.rego with a matching stack context.
+var expectedTags = map[string]string{
+	"iacp:team":        team,
+	"iacp:environment": environment,
+	"iacp:stack":       stack,
+	"iacp:managed-by":  "iacp",
+}
 
 // endpoint returns the LocalStack edge URL, overridable with LOCALSTACK_ENDPOINT.
 func endpoint() string {
@@ -62,7 +72,7 @@ func exampleOptions(t *testing.T, module, name string) *terraform.Options {
 			"name":                name,
 			"team":                team,
 			"environment":         environment,
-			"stack":               "terratest",
+			"stack":               stack,
 			"localstack_endpoint": endpoint(),
 		},
 		EnvVars: map[string]string{
@@ -74,32 +84,41 @@ func exampleOptions(t *testing.T, module, name string) *terraform.Options {
 	})
 }
 
-// missingTags returns the required tags absent from tags.
-func missingTags(tags map[string]string) []string {
-	var missing []string
-	for _, k := range requiredTags {
-		if _, ok := tags[k]; !ok {
-			missing = append(missing, k)
+// tagProblems describes every expected platform tag that is missing or has
+// the wrong value in tags, sorted for stable output.
+func tagProblems(tags, want map[string]string) []string {
+	var problems []string
+	for k, v := range want {
+		got, ok := tags[k]
+		switch {
+		case !ok:
+			problems = append(problems, fmt.Sprintf("%s missing", k))
+		case got != v:
+			problems = append(problems, fmt.Sprintf("%s=%q, want %q", k, got, v))
 		}
 	}
-	return missing
+	sort.Strings(problems)
+	return problems
 }
 
-func TestMissingTags(t *testing.T) {
+func TestTagProblems(t *testing.T) {
 	t.Parallel()
+	want := map[string]string{"iacp:team": "platform", "iacp:stack": "terratest"}
 	cases := []struct {
 		name string
 		tags map[string]string
-		want int
+		want []string
 	}{
-		{"all present", map[string]string{"iacp:team": "a", "iacp:environment": "b", "iacp:stack": "c", "iacp:managed-by": "iacp"}, 0},
-		{"none", map[string]string{}, 4},
-		{"one missing", map[string]string{"iacp:team": "a", "iacp:environment": "b", "iacp:stack": "c"}, 1},
+		{"all match", map[string]string{"iacp:team": "platform", "iacp:stack": "terratest", "extra": "x"}, nil},
+		{"missing", map[string]string{"iacp:team": "platform"}, []string{"iacp:stack missing"}},
+		{"wrong value", map[string]string{"iacp:team": "payments", "iacp:stack": "terratest"}, []string{`iacp:team="payments", want "platform"`}},
+		{"empty value", map[string]string{"iacp:team": "", "iacp:stack": "terratest"}, []string{`iacp:team="", want "platform"`}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := len(missingTags(tc.tags)); got != tc.want {
-				t.Fatalf("missingTags() returned %d, want %d", got, tc.want)
+			got := tagProblems(tc.tags, want)
+			if strings.Join(got, ";") != strings.Join(tc.want, ";") {
+				t.Fatalf("tagProblems() = %v, want %v", got, tc.want)
 			}
 		})
 	}
