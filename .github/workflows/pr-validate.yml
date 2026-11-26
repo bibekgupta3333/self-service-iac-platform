@@ -10,6 +10,9 @@
 #                plan, show -json, conftest, hermetic LocalStack apply round
 #                trip; uploads the plan summary
 #   comment   -> sticky PR comment per stack (the only job that can write to the PR)
+#   report    -> per stack: POST /v1/runs (pipeline validate) through the iacp-report
+#                action; the only job with id-token: write, and it runs no Terraform.
+#                Skipped with a notice while vars.IACP_API_URL is empty (ADR-0009)
 #   result    -> single required status check, independent of matrix size
 #
 # The workflow runs on every PR (no paths filter) so pr-validate-result always
@@ -107,7 +110,7 @@ jobs:
       matrix:
         stack: ${{ fromJSON(needs.detect.outputs.matrix) }}
     # One plan per stack per PR: a new push cancels the stale plan of the same stack.
-    # apply.yml (WBS 5.3) will use the non-cancelling group iacp-stack-<id>.
+    # apply.yml uses the non-cancelling group iacp-stack-<id>-apply.
     concurrency:
       group: iacp-stack-${{ matrix.stack.id }}-plan-pr${{ github.event.pull_request.number }}
       cancel-in-progress: true
@@ -279,14 +282,6 @@ jobs:
           terraform plan -input=false -lock=false -no-color -detailed-exitcode
           terraform destroy -input=false -lock=false -no-color -auto-approve
 
-      # TODO(WBS 5.6): report plan_ready / plan_failed with the summary JSON to
-      # POST /v1/runs through the OIDC-authenticated iacp-report action. The API's
-      # OIDC verifier (WBS 4.10) exists; this step is not wired yet. The API requires
-      # the report's head_sha to equal the token's sha claim, which for pull_request
-      # events is the merge commit github.sha, NOT github.event.pull_request.head.sha
-      # (the PR head shown in the comment); send github.sha or the API answers
-      # 403 run_mismatch.
-
       - name: Build plan summary
         if: always()
         env:
@@ -377,6 +372,61 @@ jobs:
               echo "created comment for $id"
             fi
           done
+
+  # Reports each stack's summary to the Platform API. A separate job so the OIDC
+  # permission is never present while PR-controlled Terraform and providers run.
+  # A report failure is a warning and never fails the PR (docs/05 stage 9).
+  report:
+    name: report (${{ matrix.stack.path }})
+    needs: [detect, validate]
+    # Fork PRs get neither id-token nor secrets; their result stays in the job summary.
+    if: >-
+      always() && needs.detect.outputs.count != '0'
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: ${{ fromJSON(needs.detect.outputs.matrix) }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install tool dependencies
+        run: python -m pip install --quiet "$(grep -E '^pyyaml==' tools/requirements.txt)"
+
+      # A missing summary (the leg failed before writing it) is reported as failed.
+      - name: Download plan summary
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: pr-validate-${{ matrix.stack.id }}
+          path: ${{ runner.temp }}/summary
+
+      # head_sha is github.sha (the merge commit the OIDC token names), never the PR
+      # head; request_short_id and fencing_token come from iacp.stack.json.
+      - name: Report to the Platform API
+        uses: ./.github/actions/iacp-report
+        with:
+          api-url: ${{ vars.IACP_API_URL }}
+          audience: ${{ vars.IACP_OIDC_AUDIENCE }}
+          internal-token: ${{ secrets.IACP_INTERNAL_TOKEN }}
+          pipeline: validate
+          stack-path: ${{ matrix.stack.path }}
+          stage: summary
+          summary-json: ${{ runner.temp }}/summary/summary.json
 
   result:
     name: pr-validate-result
