@@ -3,8 +3,9 @@
 -- spent_usd is the committed-cost estimate; it stays 0 until cost estimates and Cost
 -- Explorer actuals are recorded (WBS 8.5). budget_overrides arrives with 8.5.
 --
--- Privileges: 0004's default grant gives iacp_app DML here; admins set and replace
--- budgets through the API (PUT /v1/teams/{slug}/budgets/{month}).
+-- Privileges: 0004's default grant gives iacp_app DML here. Nothing writes budgets yet:
+-- rows are inserted by hand until the admin budget API (planned in docs/03 §6.7) and
+-- overrides arrive with WBS 8.5.
 
 -- +goose Up
 CREATE TABLE budgets (
