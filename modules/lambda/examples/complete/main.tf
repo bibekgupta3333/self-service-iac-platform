@@ -49,6 +49,13 @@ resource "aws_s3_object" "handler" {
   source      = data.archive_file.handler.output_path
   source_hash = data.archive_file.handler.output_base64sha256
   kms_key_id  = module.artifacts.kms_key_arn
+
+  tags = {
+    "iacp:team"        = var.team
+    "iacp:environment" = var.environment
+    "iacp:stack"       = var.stack
+    "iacp:managed-by"  = "iacp"
+  }
 }
 
 module "function" {
@@ -72,11 +79,19 @@ module "function" {
     LOG_LEVEL = "info"
   }
 
+  # Batches of up to 50 messages, gathered for at most 5 seconds. Passing the
+  # queue's key lets the role decrypt messages without extra policies.
   sqs_trigger = {
-    queue_arn  = module.queue.arn
-    batch_size = 5
+    queue_arn                          = module.queue.arn
+    kms_key_arn                        = module.queue.kms_key_arn
+    batch_size                         = 50
+    maximum_batching_window_in_seconds = 5
   }
-  extra_policy_jsons = [module.queue.consumer_policy_json]
+
+  # Extra access from another module's output, keyed by a stable name.
+  extra_policy_jsons = {
+    artifacts-read = module.artifacts.read_policy_json
+  }
 
   tags = {
     "cost-center" = "cc-1234"

@@ -1,0 +1,12 @@
+{
+  "iacp": {
+    "context": {
+      "environment": "development",
+      "team": "platform",
+      "stack": "lambda-example",
+      "allowed_regions": ["us-east-1"],
+      "exceptions": [],
+      "now": "2026-11-25T00:00:00Z"
+    }
+  }
+}
