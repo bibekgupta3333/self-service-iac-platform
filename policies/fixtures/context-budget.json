@@ -18,8 +18,10 @@
         "spent_usd": 1500,
         "actual_usd": null,
         "hard_block": true,
-        "scope": "team"
+        "scope": "team",
+        "single_change_cap_usd": 5000
       },
+      "current_committed_usd": 0,
       "budget_override": null,
       "budget_gate": true,
       "estimated_monthly_cost_usd": 600

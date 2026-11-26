@@ -25,7 +25,9 @@ with_estimate(ctx, usd) := object.union(ctx, {"estimated_monthly_cost_usd": usd}
 # replace_budget swaps the whole budget object (object.union would merge into it).
 replace_budget(ctx, b) := object.union(object.remove(ctx, ["budget"]), {"budget": b})
 
-with_override(ctx, expires) := object.union(ctx, {"budget_override": {"granted_by": "ada", "reason": "launch week capacity", "expires_at": expires}})
+with_override(ctx, expires) := with_bounded_override(ctx, expires, 1000)
+
+with_bounded_override(ctx, expires, max_delta) := object.union(ctx, {"budget_override": {"granted_by": "ada", "reason": "launch week capacity", "expires_at": expires, "max_delta_usd": max_delta}})
 
 with_budget(ctx, patch) := object.union(ctx, {"budget": object.union(ctx.budget, patch)})
 
@@ -49,7 +51,7 @@ test_over_budget_denied_in_every_environment if {
 test_deny_message_names_stack_numbers_and_fix if {
 	ms := budget.deny with input as create_plan with data.iacp.context as with_estimate(base("staging"), 600)
 	some m in ms
-	m == "[iacp.budget.exceeded] environments/staging/payments/orders: estimated cost 600.00 USD/month would raise payments's spend for 2026-11 to 2100.00 USD, over its 2000.00 USD budget (1500.00 used already). Fix: reduce the stack's cost or destroy unused stacks, or ask a team admin to raise the budget (PUT /v1/teams/payments/budgets/2026-11) or, outside production, to grant an override"
+	m == "[iacp.budget.exceeded] environments/staging/payments/orders: estimated cost 600.00 USD/month would raise payments's spend for 2026-11 to 2100.00 USD, over its 2000.00 USD budget (1500.00 used already). Fix: reduce the stack's cost or destroy unused stacks, or ask a team admin to raise the budget (PUT /v1/teams/payments/budgets/2026-11) or, outside production, to grant an override that covers it"
 }
 
 test_exactly_at_the_limit_passes if {
@@ -114,7 +116,7 @@ test_override_waives_the_hard_limit_outside_production if {
 		ms := budget.warn with input as create_plan with data.iacp.context as ctx
 		ids(ms) == {"[iacp.budget.exceeded_waived]"}
 		some m in ms
-		contains(m, "an admin override granted by ada is in effect")
+		contains(m, "an admin override granted by ada (up to 1000.00 USD/month) is in effect")
 	}
 }
 
@@ -219,11 +221,13 @@ test_invalid_estimates_count_as_missing if {
 	}
 }
 
-test_override_waives_a_missing_estimate_in_staging_only if {
-	count(budget.deny) == 0 with input as create_plan with data.iacp.context as with_override(base("staging"), future)
-	ids(budget.warn) == {"[iacp.budget.no_estimate]"} with input as create_plan with data.iacp.context as with_override(base("staging"), future)
-	ms := budget.deny with input as create_plan with data.iacp.context as with_override(base("production"), future)
-	ids(ms) == {"[iacp.budget.no_estimate]"}
+test_override_never_waives_a_missing_estimate if {
+	every env in ["staging", "production"] {
+		ms := budget.deny with input as create_plan with data.iacp.context as with_override(base(env), future)
+		ids(ms) == {"[iacp.budget.no_estimate]"}
+		some m in ms
+		contains(m, "an admin override cannot waive a missing estimate")
+	}
 }
 
 test_soft_budget_only_warns_about_a_missing_estimate if {
@@ -272,4 +276,103 @@ test_budget_without_a_numeric_limit_is_denied if {
 test_budget_denies_reach_the_main_namespace if {
 	ms := data.main.deny with input as create_plan with data.iacp.context as with_estimate(base("staging"), 600)
 	"[iacp.budget.exceeded]" in ids(ms)
+}
+
+# --- the override is bounded --------------------------------------------------------------------
+
+test_override_covers_an_estimate_up_to_its_bound if {
+	# the estimate is 600: a bound of exactly 600 covers it, 599.99 does not
+	count(budget.deny) == 0 with input as create_plan with data.iacp.context as with_bounded_override(with_estimate(base("staging"), 600), future, 600)
+	ms := budget.deny with input as create_plan with data.iacp.context as with_bounded_override(with_estimate(base("staging"), 600), future, 599.99)
+	ids(ms) == {"[iacp.budget.exceeded]"}
+	some m in ms
+	contains(m, "the admin override covers at most 599.99 USD/month")
+}
+
+test_override_without_a_bound_covers_nothing if {
+	no_bound := object.union(with_estimate(base("staging"), 600), {"budget_override": {"granted_by": "ada", "reason": "launch week capacity", "expires_at": future}})
+	ids(budget.deny) == {"[iacp.budget.exceeded]"} with input as create_plan with data.iacp.context as no_bound
+	bad_bound := object.union(with_estimate(base("staging"), 600), {"budget_override": {"granted_by": "ada", "reason": "launch week capacity", "expires_at": future, "max_delta_usd": "lots"}})
+	ids(budget.deny) == {"[iacp.budget.exceeded]"} with input as create_plan with data.iacp.context as bad_bound
+}
+
+# --- the team-wide committed total ----------------------------------------------------------------
+
+test_committed_cost_of_other_stacks_counts_as_used if {
+	# 100 spent + 0 actual, but the team's other stacks already commit 1900
+	ctx := with_estimate(with_budget(base("staging"), {"spent_usd": 100}), 150)
+	ids(budget.deny) == {"[iacp.budget.exceeded]"} with input as create_plan with data.iacp.context as object.union(ctx, {"current_committed_usd": 1900})
+	count(budget.deny) == 0 with input as create_plan with data.iacp.context as object.union(ctx, {"current_committed_usd": 1700})
+}
+
+test_used_is_the_largest_of_spent_actual_and_committed if {
+	ms := budget.deny with input as create_plan with data.iacp.context as object.union(with_estimate(base("staging"), 600), {"current_committed_usd": 1900})
+	some m in ms
+	contains(m, "(1900.00 used already)")
+}
+
+test_a_missing_or_invalid_committed_total_counts_as_zero if {
+	ctx := with_estimate(with_budget(base("staging"), {"spent_usd": 100}), 150)
+	count(budget.deny) == 0 with input as create_plan with data.iacp.context as ctx
+	count(budget.deny) == 0 with input as create_plan with data.iacp.context as object.union(ctx, {"current_committed_usd": "lots"})
+}
+
+test_splitting_spend_over_stacks_does_not_evade_the_limit if {
+	# each of three 700 stacks alone is under the 2000 limit; the third one tips the total over
+	base_ctx := with_budget(base("staging"), {"spent_usd": 0})
+	count(budget.deny) == 0 with input as create_plan with data.iacp.context as object.union(with_estimate(base_ctx, 700), {"current_committed_usd": 1300})
+	ids(budget.deny) == {"[iacp.budget.exceeded]"} with input as create_plan with data.iacp.context as object.union(with_estimate(base_ctx, 700), {"current_committed_usd": 1400})
+}
+
+# --- the single-change cap --------------------------------------------------------------------------
+
+big := with_budget(base("staging"), {"limit_usd": 100000, "spent_usd": 0})
+
+test_a_stack_above_the_cap_is_denied_whatever_the_headroom if {
+	ms := budget.deny with input as create_plan with data.iacp.context as with_estimate(big, 5000.01)
+	ids(ms) == {"[iacp.budget.single_change_cap]"}
+	some m in ms
+	contains(m, "5000.01 USD/month is above the 5000.00 USD single-change cap")
+	count(budget.deny) == 0 with input as create_plan with data.iacp.context as with_estimate(big, 5000)
+}
+
+test_the_cap_is_configurable_per_budget if {
+	ctx := with_budget(big, {"single_change_cap_usd": 8000})
+	count(budget.deny) == 0 with input as create_plan with data.iacp.context as with_estimate(ctx, 7999)
+	ids(budget.deny) == {"[iacp.budget.single_change_cap]"} with input as create_plan with data.iacp.context as with_estimate(ctx, 8000.01)
+
+	# a cap of zero denies any cost
+	ids(budget.deny) == {"[iacp.budget.single_change_cap]"} with input as create_plan with data.iacp.context as with_estimate(with_budget(big, {"single_change_cap_usd": 0}), 0.01)
+
+	# an unreadable cap falls back to the default
+	ids(budget.deny) == {"[iacp.budget.single_change_cap]"} with input as create_plan with data.iacp.context as with_estimate(with_budget(big, {"single_change_cap_usd": "lots"}), 6000)
+}
+
+test_the_cap_applies_to_soft_budgets_too if {
+	ctx := with_estimate(with_budget(big, {"hard_block": false}), 6000)
+	ids(budget.deny) == {"[iacp.budget.single_change_cap]"} with input as create_plan with data.iacp.context as ctx
+}
+
+test_an_override_covering_the_estimate_waives_the_cap_outside_production if {
+	ctx := with_bounded_override(with_estimate(big, 6000), future, 6000)
+	count(budget.deny) == 0 with input as create_plan with data.iacp.context as ctx
+	ids(budget.warn) == {"[iacp.budget.single_change_cap_waived]"} with input as create_plan with data.iacp.context as ctx
+
+	# an override too small for the stack does not
+	small := with_bounded_override(with_estimate(big, 6000), future, 5500)
+	ids(budget.deny) == {"[iacp.budget.single_change_cap]"} with input as create_plan with data.iacp.context as small
+}
+
+test_no_override_waives_the_cap_in_production if {
+	prod := with_budget(base("production"), {"limit_usd": 100000, "spent_usd": 0})
+	ms := budget.deny with input as create_plan with data.iacp.context as with_override(with_estimate(prod, 6000), future)
+	ids(ms) == {"[iacp.budget.single_change_cap]"}
+	some m in ms
+	contains(m, "an admin override does not apply in production")
+}
+
+test_the_cap_ignores_destroys_and_budgetless_teams if {
+	count(budget.deny) == 0 with input as destroy_plan with data.iacp.context as with_estimate(big, 9000)
+	no_budget := object.union(object.remove(base("staging"), ["budget"]), {"estimated_monthly_cost_usd": 9000})
+	count(budget.deny) == 0 with input as create_plan with data.iacp.context as no_budget
 }

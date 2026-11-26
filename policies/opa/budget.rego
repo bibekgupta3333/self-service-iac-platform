@@ -5,27 +5,35 @@
 #   hard budget, and warns near the limit. Inputs, all from data.iacp.context:
 #
 #     budget                      the month's budget from GET /v1/internal/budget-context
-#                                 (limit_usd, spent_usd, actual_usd, hard_block, month).
-#                                 No budget means nothing to enforce.
+#                                 (limit_usd, spent_usd, actual_usd, hard_block, month,
+#                                 single_change_cap_usd). No budget means nothing to enforce.
+#     current_committed_usd       the committed monthly cost of the team's other active
+#                                 stacks in the budget's scope (this stack excluded), summed
+#                                 by the API.
 #     estimated_monthly_cost_usd  the stack's monthly cost, a plain number put there by
 #                                 `tools.stack_pipeline budget-context` from the Infracost
 #                                 output of the isolated cost job (docs/05, docs/07 6.7).
 #     budget_gate                 true only in the evaluation that is the budget gate. Only
 #                                 then does a missing estimate count (the validate job runs
 #                                 these rules before any estimate exists).
-#     budget_override             an admin override (granted_by, reason, expires_at).
+#     budget_override             an admin override (granted_by, reason, expires_at,
+#                                 max_delta_usd).
 #
-#   Already-used spend is the larger of spent_usd (committed estimates) and actual_usd.
+#   Already-used spend is the largest of spent_usd, actual_usd and current_committed_usd.
 #   A plan that creates or updates nothing (destroy only, or no change) adds no cost, so it
 #   always passes: a team over budget can still free budget.
 #
 #   Missing or invalid estimate with a budget set, in the gate:
 #     development           warn (the estimate is informational there);
-#     staging, production,  deny while the budget is a hard block, unless the override is
-#     unknown environment   effective; otherwise warn. Cost data that cannot be read must
-#                           never read as "free".
+#     staging, production,  deny while the budget is a hard block; otherwise warn. Cost data
+#     unknown environment   that cannot be read must never read as "free", and an override
+#                           cannot waive it (its bound cannot be checked).
 #
-#   The override waives a hard limit in development and staging only. It never waives one
+#   A single stack costing more per month than single_change_cap_usd (default 5000) is
+#   denied whatever the headroom.
+#
+#   The override waives a hard limit, or the cap, in development and staging only, and only
+#   for a stack whose estimate is at most the override's max_delta_usd. It never waives one
 #   in production, and an unknown environment is treated as production. Budget rules are
 #   not waivable through policy exceptions.
 #
@@ -35,6 +43,8 @@ package iacp.budget
 import data.lib.iacp as f
 
 default_warn_pct := 80
+
+default_single_change_cap := 5000
 
 # --- Context ---------------------------------------------------------------------
 
@@ -73,8 +83,15 @@ spent := num_or_zero(object.get(budget, "spent_usd", 0))
 
 actual := num_or_zero(object.get(budget, "actual_usd", 0))
 
+committed := num_or_zero(f.ctx_value("current_committed_usd", 0))
+
 # used: what the month has already consumed.
-used := max([spent, actual])
+used := max([spent, actual, committed])
+
+# cap: the most one stack may cost per month, whatever the headroom.
+cap := budget.single_change_cap_usd if is_number(budget.single_change_cap_usd)
+
+cap := default_single_change_cap if not is_number(object.get(budget, "single_change_cap_usd", null))
 
 warn_pct := object.get(budget, "warn_pct", default_warn_pct)
 
@@ -134,22 +151,32 @@ override_active if {
 	time.parse_rfc3339_ns(o.expires_at) > f.now_ns
 }
 
+# The override waives a limit only outside production, and only for a stack whose estimate it
+# covers: max_delta_usd bounds it, and without an estimate there is nothing to compare.
 override_effective if {
 	override_active
 	env in {"development", "staging"}
+	has_estimate
+	estimate <= num_or_zero(f.ctx.budget_override.max_delta_usd)
 }
+
+default override_ignored_note := ""
 
 override_ignored_note := "; an admin override does not apply in production" if {
 	override_active
 	not env in {"development", "staging"}
 }
 
-override_ignored_note := "" if not override_active
-
-override_ignored_note := "" if {
+override_ignored_note := sprintf("; the admin override covers at most %s USD/month", [money(f.ctx.budget_override.max_delta_usd)]) if {
 	override_active
 	env in {"development", "staging"}
+	has_estimate
+	not override_effective
 }
+
+default missing_override_note := ""
+
+missing_override_note := "; an admin override cannot waive a missing estimate" if override_active
 
 blocked if {
 	hard
@@ -168,7 +195,7 @@ deny contains m if {
 			[money(estimate), team, month, money(projected), money(limit), money(used), override_ignored_note],
 		),
 		sprintf(
-			"reduce the stack's cost or destroy unused stacks, or ask a team admin to raise the budget (PUT /v1/teams/%s/budgets/%s) or, outside production, to grant an override",
+			"reduce the stack's cost or destroy unused stacks, or ask a team admin to raise the budget (PUT /v1/teams/%s/budgets/%s) or, outside production, to grant an override that covers it",
 			[team, month],
 		),
 	)
@@ -189,10 +216,49 @@ warn contains m if {
 
 waived_because := "the budget is advisory (hard_block is off)" if not hard
 
-waived_because := sprintf("an admin override granted by %s is in effect", [f.ctx.budget_override.granted_by]) if {
+waived_because := sprintf("an admin override granted by %s (up to %s USD/month) is in effect", [f.ctx.budget_override.granted_by, money(f.ctx.budget_override.max_delta_usd)]) if {
 	hard
 	override_effective
 }
+
+# --- The single-change cap ----------------------------------------------------------------
+
+over_cap if {
+	configured
+	adds_cost
+	estimate > cap
+}
+
+deny contains m if {
+	over_cap
+	not override_effective
+	m := f.msg(
+		"iacp.budget.single_change_cap", address,
+		sprintf(
+			"estimated cost %s USD/month is above the %s USD single-change cap of %s's budget, whatever its headroom%s",
+			[money(estimate), money(cap), team, override_ignored_note],
+		),
+		sprintf(
+			"reduce the stack's cost, or ask a team admin to raise single_change_cap_usd (PUT /v1/teams/%s/budgets/%s) or, outside production, to grant an override that covers it",
+			[team, month],
+		),
+	)
+}
+
+warn contains m if {
+	over_cap
+	override_effective
+	m := f.msg(
+		"iacp.budget.single_change_cap_waived", address,
+		sprintf(
+			"estimated cost %s USD/month is above the %s USD single-change cap of %s's budget; not blocked because an admin override granted by %s (up to %s USD/month) is in effect",
+			[money(estimate), money(cap), team, f.ctx.budget_override.granted_by, money(f.ctx.budget_override.max_delta_usd)],
+		),
+		"review the spend with the team admin",
+	)
+}
+
+# --- Near the limit -------------------------------------------------------------------------
 
 warn contains m if {
 	configured
@@ -226,6 +292,8 @@ no_estimate_reason := "no cost estimate is available (Infracost did not run or r
 	object.get(f.ctx, "estimated_monthly_cost_usd", null) == null
 }
 
+# An override needs an estimate to be bounded, so it never makes a missing one acceptable: blocked is
+# just hard here.
 no_estimate_denied if {
 	missing
 	env != "development"
@@ -236,8 +304,8 @@ deny contains m if {
 	no_estimate_denied
 	m := f.msg(
 		"iacp.budget.no_estimate", address,
-		sprintf("%s's budget for %s is a hard block but %s, so the change cannot be checked against it%s", [team, month, no_estimate_reason, override_ignored_note]),
-		"re-run the pipeline once the Infracost job succeeds, or ask a team admin to grant an override (not available in production)",
+		sprintf("%s's budget for %s is a hard block but %s, so the change cannot be checked against it%s", [team, month, no_estimate_reason, missing_override_note]),
+		"re-run the pipeline once the Infracost job succeeds (an override cannot waive a missing estimate)",
 	)
 }
 
