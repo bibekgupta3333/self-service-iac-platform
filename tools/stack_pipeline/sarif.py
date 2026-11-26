@@ -30,7 +30,7 @@ RUN_KEYS_SET_BY_UPLOAD = ("automationDetails", "versionControlProvenance")
 # The pinned tag is part of the download path; the repository path follows it.
 _MODULE_FILE_RE = re.compile(r"(?:^|/)modules/[a-z0-9_-]+/v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]*)?/(.+)$")
 _SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
-# A stack-relative path is plain POSIX text. Percent-escapes (``%2e%2e``), backslashes
+# A path is plain POSIX text. Percent-escapes (``%2e%2e``), backslashes
 # and a drive letter (``C:``) mean something else to a consumer that decodes or
 # normalises the uri, so such a path is never kept as literal text.
 _NOT_PLAIN_POSIX_RE = re.compile(r"[%\\]|^[a-zA-Z]:")
@@ -57,7 +57,7 @@ def rebase_uri(uri: str, stack_path: str, external_dirs: Iterable[str] = (), rep
     stack_path = stack_path.strip("/")
     fallback = f"{stack_path}/{FALLBACK_FILE}"
     path = _strip_scheme(uri.strip())
-    if not path or _SCHEME_RE.match(path):
+    if not path or _SCHEME_RE.match(path) or _NOT_PLAIN_POSIX_RE.search(path):
         return fallback
     for directory in external_dirs:
         rest = _inside(path, directory)
@@ -69,7 +69,7 @@ def rebase_uri(uri: str, stack_path: str, external_dirs: Iterable[str] = (), rep
         rest = _inside(path, repo_root)
         if rest is not None:
             return _contained(rest, fallback)
-    if path.startswith("/") or _NOT_PLAIN_POSIX_RE.search(path):
+    if path.startswith("/"):
         return fallback
     return _contained(posixpath.join(stack_path, path), fallback, under=stack_path)
 
