@@ -141,6 +141,38 @@ export class ApiClient {
     return (await this.send<RequestSummary>("GET", `/v1/requests/${seg(id)}`)).data;
   }
 
+  /**
+   * openRequestEvents opens GET /v1/requests/{id}/events and returns the response with its
+   * body unread, for the caller to stream. It throws ApiError for any non-2xx answer (429
+   * too_many_streams, 401, 404, ...) and for transport failures. lastEventId resumes the
+   * stream after that audit seq.
+   */
+  async openRequestEvents(id: string, opts: { lastEventId?: string; signal?: AbortSignal } = {}): Promise<Response> {
+    const headers: Record<string, string> = {
+      Accept: "text/event-stream",
+      ...(await this.auth.requestHeaders("GET")),
+      ...(opts.lastEventId !== undefined ? { "Last-Event-ID": opts.lastEventId } : {}),
+    };
+    const url = buildUrl(this.baseUrl, `/v1/requests/${seg(id)}/events`);
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, {
+        ...this.init,
+        method: "GET",
+        headers,
+        credentials: this.auth.credentials,
+        signal: opts.signal,
+      });
+    } catch (err) {
+      throw ApiError.network(err);
+    }
+    if (!response.ok) {
+      const decoded = await readJson(response);
+      throw new ApiError(parseProblem(response.status, decoded, response.headers.get("X-Request-Id") ?? undefined));
+    }
+    return response;
+  }
+
   // ---- transport ----
 
   private async send<T>(method: string, path: string, opts: SendOptions = {}): Promise<Sent<T>> {

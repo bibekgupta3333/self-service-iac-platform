@@ -176,3 +176,45 @@ describe("ApiClient errors", () => {
     expect(err.problem.detail).toBe("fetch failed");
   });
 });
+
+describe("ApiClient.openRequestEvents", () => {
+  const id = "0d7e3a52-6c11-4f0e-b9b6-5f2f3c8d1a90";
+
+  it("GETs the stream with Accept, Last-Event-ID and the abort signal, leaving the body unread", async () => {
+    const stream = new Response("event: end\ndata: {}\n\n", { status: 200, headers: { "content-type": "text/event-stream" } });
+    const f = fakeFetch(stream);
+    const ctl = new AbortController();
+    const res = await client(f.fetch, "/api/iacp").openRequestEvents(id, { lastEventId: "12", signal: ctl.signal });
+    expect(res).toBe(stream);
+    expect(res.bodyUsed).toBe(false);
+    expect(f.calls[0]?.url).toBe(`/api/iacp/v1/requests/${id}/events`);
+    expect(f.calls[0]?.init.method).toBe("GET");
+    expect(f.calls[0]?.init.signal).toBe(ctl.signal);
+    const h = headersOf(f.calls[0]);
+    expect(h.get("accept")).toBe("text/event-stream");
+    expect(h.get("last-event-id")).toBe("12");
+  });
+
+  it("omits Last-Event-ID on a first connection and sends 0 as given", async () => {
+    const f = fakeFetch(new Response("", { status: 200 }), new Response("", { status: 200 }));
+    await client(f.fetch).openRequestEvents(id);
+    await client(f.fetch).openRequestEvents(id, { lastEventId: "0" });
+    expect(headersOf(f.calls[0]).has("last-event-id")).toBe(false);
+    expect(headersOf(f.calls[1]).get("last-event-id")).toBe("0");
+  });
+
+  it("turns a 429 problem into an ApiError", async () => {
+    const f = fakeFetch(json(429, { title: "Too many open streams", status: 429, code: "too_many_streams" }, { "Retry-After": "5" }));
+    const err = (await client(f.fetch).openRequestEvents(id).catch((e: unknown) => e)) as ApiError;
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.status).toBe(429);
+    expect(err.code).toBe("too_many_streams");
+  });
+
+  it("wraps a transport failure and refuses a dot path segment", async () => {
+    const f = fakeFetch(new TypeError("fetch failed"));
+    const err = (await client(f.fetch).openRequestEvents(id).catch((e: unknown) => e)) as ApiError;
+    expect(err.code).toBe("network_error");
+    await expect(client(f.fetch).openRequestEvents("..")).rejects.toMatchObject({ status: 404 });
+  });
+});
