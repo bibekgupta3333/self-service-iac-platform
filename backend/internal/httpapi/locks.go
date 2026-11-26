@@ -61,9 +61,12 @@ type acquireDTO struct {
 	Current      lockDTO       `json:"current"`
 }
 
+// releaseDTO is the answer of DELETE …/lock. released is null when the lease was already
+// released because the request ended (already_released is then true): the call is a no-op.
 type releaseDTO struct {
-	Released lockDTO  `json:"released"`
-	Promoted *lockDTO `json:"promoted"`
+	Released        *lockDTO `json:"released"`
+	Promoted        *lockDTO `json:"promoted"`
+	AlreadyReleased bool     `json:"already_released,omitempty"`
 }
 
 type acquireBody struct {
@@ -173,7 +176,11 @@ func (h *LockHandler) release(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	out := releaseDTO{Released: toLockDTO(res.Released)}
+	out := releaseDTO{AlreadyReleased: res.AlreadyReleased}
+	if !res.AlreadyReleased {
+		released := toLockDTO(res.Released)
+		out.Released = &released
+	}
 	if res.Promoted != nil {
 		p := toLockDTO(*res.Promoted)
 		out.Promoted = &p

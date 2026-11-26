@@ -289,6 +289,11 @@ func TestApplyReportsDriveACreateToActive(t *testing.T) {
 		t.Fatalf("run %s stages %v", runStatus, stages)
 	}
 
+	// apply.yml's own release step runs after the API released the lease: still a success.
+	rel, err := e.svc.lock.Release(e.ctx, locks.TokenCommand{StackID: stackID, RequestID: reqID, FencingToken: run.token})
+	if err != nil || !rel.AlreadyReleased {
+		t.Fatalf("the workflow's release after the final transition must be an idempotent success: %+v %v", rel, err)
+	}
 	// The summary is replayed after the lock was released: still accepted (the token is the
 	// request's own), recorded, and changes nothing.
 	again, err := run.send("summary", runs.StagePassed)

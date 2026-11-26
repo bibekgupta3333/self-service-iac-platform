@@ -21,6 +21,9 @@ type RequestInfo struct {
 	ShortID   string
 	StackID   uuid.UUID
 	Completed bool // terminal status (completed_at is set)
+	// FencingToken is the token of the lease the request was last granted (it is kept after
+	// the lease is released).
+	FencingToken *int64
 	// QueuedBehind is the request this one currently waits for, if any.
 	QueuedBehind *uuid.UUID
 }
@@ -101,6 +104,10 @@ type Result struct {
 // ReleaseResult is the outcome of a release.
 type ReleaseResult struct {
 	Released Lock
+	// AlreadyReleased is set when the lease was already gone because the request reached a
+	// terminal status (the backend releases it in the same transaction): the explicit
+	// release is then a successful no-op and Released is empty.
+	AlreadyReleased bool
 	// Promoted is the lease given to the next queued request, if any.
 	Promoted *Lock
 }
@@ -254,14 +261,45 @@ func (s *Service) Heartbeat(ctx context.Context, cmd TokenCommand) (Lock, error)
 
 // Release frees the lock held by cmd.RequestID with its current token and promotes the
 // oldest queued request, in one transaction.
+//
+// Release is idempotent for a request that is already terminal: when the lease is gone
+// because the request ended (apply reports release it with the final transition) and the
+// caller presents the token the request was granted, the answer is success with
+// AlreadyReleased set, not stale_fencing_token. That keeps the always() release step of
+// apply.yml green after the API released the lease itself.
 func (s *Service) Release(ctx context.Context, cmd TokenCommand) (ReleaseResult, error) {
 	var res ReleaseResult
 	err := s.repo.InTx(ctx, func(st Store) error {
 		var err error
 		res, err = s.ReleaseIn(ctx, st, cmd)
+		if !apperr.IsKind(err, apperr.KindConflict) {
+			return err
+		}
+		// ReleaseIn failed before writing anything and holds the stacks row, so the lease and
+		// the request can be read consistently.
+		current, cerr := st.Current(ctx, cmd.StackID)
+		if cerr != nil {
+			return fmt.Errorf("read lock: %w", cerr)
+		}
+		req, rerr := st.Request(ctx, cmd.RequestID)
+		if rerr != nil {
+			return err // the original conflict is the better answer
+		}
+		if AlreadyReleased(req, current, cmd.StackID, cmd.FencingToken) {
+			res = ReleaseResult{AlreadyReleased: true}
+			return nil
+		}
 		return err
 	})
 	return res, err
+}
+
+// AlreadyReleased reports whether an explicit release of token for req finds nothing left
+// to do: req is terminal, belongs to the stack, was granted exactly this token, and no
+// longer holds the lease (current is nil or another request's). Pure.
+func AlreadyReleased(req RequestInfo, current *Lock, stackID uuid.UUID, token int64) bool {
+	return req.Completed && req.StackID == stackID && req.FencingToken != nil && *req.FencingToken == token &&
+		(current == nil || !current.HeldBy(req.ID))
 }
 
 // ReleaseIn is Release inside a caller's transaction (a request reaching a terminal status
