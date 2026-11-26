@@ -12,6 +12,7 @@ import pytest
 import yaml
 
 from tools.module_release import CatalogClient, CatalogError, build_index_payload, index_url
+from tools.module_release.catalog import MAX_NOTES_BYTES
 from tools.module_release.cli import main
 
 from .conftest import REPO_ROOT, manifest
@@ -57,6 +58,21 @@ class TestPayload:
         assert build_index_payload(m, SHA, "bot", section)["upgrade_notes"] == "Rename `a` to `b`."
         assert build_index_payload(m, SHA, "bot", "### Added\n- x")["upgrade_notes"] == "From module.yaml."
         assert build_index_payload(m, SHA, "bot")["upgrade_notes"] == "From module.yaml."
+
+    @pytest.mark.parametrize("field", ["changelog_md", "upgrade_notes"])
+    def test_rejects_notes_over_the_catalog_cap(self, field):
+        m = manifest("2.0.0", "sqs")
+        big = "é" * (MAX_NOTES_BYTES // 2 + 1)  # two bytes each in UTF-8
+        section = big
+        if field == "upgrade_notes":  # long notes from module.yaml, short CHANGELOG section
+            m["upgrade"] = {"notes": big}
+            section = "### Added\n- x"
+        with pytest.raises(ValueError, match=f"{field} of sqs 2.0.0 is .* bytes"):
+            build_index_payload(m, SHA, "bot", section)
+
+    def test_accepts_notes_at_the_cap(self):
+        payload = build_index_payload(manifest(), SHA, "bot", "x" * MAX_NOTES_BYTES)
+        assert len(payload["changelog_md"]) == MAX_NOTES_BYTES
 
     def test_rejects_invalid_version(self):
         m = manifest()
