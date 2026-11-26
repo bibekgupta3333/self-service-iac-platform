@@ -8,11 +8,13 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from .adapters import FileSystemStackRepository, GitDiff
 from .detection import DEFAULT_MAX_STACKS, DetectionError, DetectionPolicy, DetectionResult, StackDetector
 from .models import StackMetadataError
+from .plan_summary import render_markdown, summarize
+from .policy_context import build_context
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -38,7 +40,25 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("GITHUB_OUTPUT"),
         help="append matrix=, count= and full_run= here (default: $GITHUB_OUTPUT)",
     )
+
+    context = sub.add_parser("context", help="write the conftest --data context for a stack")
+    context.add_argument("stack_dir", type=Path)
+    context.add_argument("--allowed-region", action="append", default=[], help="override the policy default (repeatable)")
+
+    summary = sub.add_parser("summary", help="summarise a plan and policy result as Markdown and JSON")
+    summary.add_argument("stack_dir", type=Path)
+    summary.add_argument("--plan", type=Path, help="terraform show -json output (may be missing)")
+    summary.add_argument("--conftest", type=Path, help="conftest --output json result (may be missing)")
+    summary.add_argument("--plan-text", type=Path, help="terraform plan text output (may be missing)")
+    summary.add_argument("--step", action="append", default=[], metavar="NAME=OUTCOME", help="step outcome (repeatable)")
+    summary.add_argument("--commit", default="", help="head commit shown in the comment")
+    summary.add_argument("--run-url", default="", help="workflow run URL shown in the comment")
+    summary.add_argument("--markdown-out", type=Path, required=True)
+    summary.add_argument("--json-out", type=Path, required=True)
     return parser
+
+
+# ---- small I/O helpers (the CLI is the adapter layer) ------------------------------
 
 
 def _changed_files(args: argparse.Namespace) -> list[str]:
@@ -48,11 +68,39 @@ def _changed_files(args: argparse.Namespace) -> list[str]:
     return GitDiff(args.repo_root).changed_files(args.base, args.head)
 
 
+def _read_json(path: Path | None) -> Any | None:
+    """Parsed JSON, or None when the file is absent, empty or not JSON (the step failed)."""
+    if path is None or not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+
+
+def _read_text(path: Path | None) -> str | None:
+    return path.read_text(encoding="utf-8", errors="replace") if path is not None and path.is_file() else None
+
+
+def parse_steps(pairs: Sequence[str]) -> dict[str, str]:
+    """``["fmt=success", "plan=failure"]`` -> ordered mapping."""
+    steps: dict[str, str] = {}
+    for pair in pairs:
+        name, sep, outcome = pair.partition("=")
+        if not sep or not name:
+            raise ValueError(f"--step expects NAME=OUTCOME, got {pair!r}")
+        steps[name] = outcome or "skipped"
+    return steps
+
+
 def write_github_output(path: Path, result: DetectionResult) -> None:
     with path.open("a", encoding="utf-8") as fh:
         fh.write(f"matrix={json.dumps(result.matrix(), separators=(',', ':'))}\n")
         fh.write(f"count={result.count}\n")
         fh.write(f"full_run={str(result.full_run).lower()}\n")
+
+
+# ---- commands --------------------------------------------------------------------
 
 
 def run_detect(args: argparse.Namespace) -> int:
@@ -64,7 +112,31 @@ def run_detect(args: argparse.Namespace) -> int:
     return 0
 
 
-COMMANDS = {"detect": run_detect}
+def run_context(args: argparse.Namespace) -> int:
+    meta = FileSystemStackRepository(args.repo_root).load_dir(args.stack_dir)
+    print(json.dumps(build_context(meta, args.allowed_region), indent=2))
+    return 0
+
+
+def run_summary(args: argparse.Namespace) -> int:
+    meta = FileSystemStackRepository(args.repo_root).load_dir(args.stack_dir)
+    conftest_output = _read_json(args.conftest)
+    result = summarize(
+        stack_id=meta.ref.id,
+        stack_path=meta.ref.path,
+        plan=_read_json(args.plan),
+        conftest_output=conftest_output if isinstance(conftest_output, list) else None,
+        steps=parse_steps(args.step),
+    )
+    args.markdown_out.write_text(
+        render_markdown(result, _read_text(args.plan_text), commit=args.commit, run_url=args.run_url), encoding="utf-8"
+    )
+    args.json_out.write_text(json.dumps(result.to_dict(), indent=2) + "\n", encoding="utf-8")
+    print(f"{meta.ref.path}: {'ok' if result.ok else 'failed'} {result.counts}")
+    return 0
+
+
+COMMANDS = {"detect": run_detect, "context": run_context, "summary": run_summary}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
