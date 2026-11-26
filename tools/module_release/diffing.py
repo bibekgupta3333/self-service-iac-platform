@@ -75,8 +75,14 @@ def diff_interfaces(old: Interface, new: Interface) -> list[Change]:
     for name in sorted(set(new.outputs) - set(old.outputs)):
         changes.append(Change(Subject.OUTPUT, name, "added", Bump.MINOR))
     for name in sorted(set(old.outputs) & set(new.outputs)):
-        was, now = old.outputs[name].sensitive, new.outputs[name].sensitive
-        if not was and now:
+        before, after = old.outputs[name], new.outputs[name]
+        was, now = before.sensitive, after.sensitive
+        if before.sensitive_expression != after.sensitive_expression:
+            changes.append(Change(Subject.OUTPUT, name,
+                                  f"sensitive changed from {before.sensitive_expression or was!r} to "
+                                  f"{after.sensitive_expression or now!r}; a non-literal value cannot be "
+                                  "evaluated, so this is treated as breaking", Bump.MAJOR))
+        elif not was and now:
             changes.append(Change(Subject.OUTPUT, name,
                                   "marked sensitive: consumers that re-export it must mark theirs sensitive", Bump.MAJOR))
         elif was and not now:

@@ -100,6 +100,9 @@ class Output:
 
     name: str
     sensitive: bool = False
+    # Normalised expression when ``sensitive`` is not a literal (``sensitive = var.x``).
+    # Such an output is treated as sensitive, and any change to it as breaking.
+    sensitive_expression: str | None = None
 
 
 @dataclass(frozen=True)

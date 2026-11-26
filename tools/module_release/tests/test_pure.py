@@ -373,6 +373,27 @@ class TestOutputSensitivity:
         assert iface(self.SENSITIVE).outputs["id"].sensitive is True
         assert iface().outputs["id"].sensitive is False
 
+    @pytest.mark.parametrize(
+        "old,new",
+        [
+            ("false", "var.s"),
+            ("var.s", "true"),
+            ("var.s", "var.t"),
+            ("true", "var.s"),
+        ],
+    )
+    def test_non_literal_sensitive_changes_are_major(self, old, new):
+        def tf(value):
+            return BASE_TF.replace('output "id" {\n  value = "x"\n}',
+                                   f'output "id" {{\n  value     = "x"\n  sensitive = {value}\n}}')
+        assert labels(diff_interfaces(iface(tf(old)), iface(tf(new)))) == [("output", "id", Bump.MAJOR)]
+
+    def test_non_literal_sensitive_is_read_as_sensitive(self):
+        text = BASE_TF.replace('output "id" {\n  value = "x"\n}', 'output "id" {\n  value     = "x"\n  sensitive = var.s\n}')
+        output = iface(text).outputs["id"]
+        assert output.sensitive and output.sensitive_expression == "var.s"
+        assert diff_interfaces(iface(text), iface(text)) == []
+
     def test_turning_off_is_minor(self):
         changes = diff_interfaces(iface(self.SENSITIVE), iface())
         assert labels(changes) == [("output", "id", Bump.MINOR)]

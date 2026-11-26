@@ -69,8 +69,15 @@ def parse_variable(name: str, body: Mapping[str, Any]) -> Variable:
 
 
 def parse_output(name: str, body: Mapping[str, Any]) -> Output:
-    """Build an Output from one parsed ``output`` block body."""
-    return Output(name=name, sensitive=body.get("sensitive") is True)
+    """Build an Output from one parsed ``output`` block body.
+
+    A non-literal ``sensitive`` cannot be evaluated statically, so it is
+    recorded as sensitive (the conservative reading) with its expression.
+    """
+    raw = body.get("sensitive")
+    if raw is None or isinstance(raw, bool):
+        return Output(name=name, sensitive=raw is True)
+    return Output(name=name, sensitive=True, sensitive_expression=normalise_expression(raw))
 
 
 def _labelled_blocks(document: Mapping[str, Any], kind: str) -> Iterable[tuple[str, Mapping[str, Any]]]:
