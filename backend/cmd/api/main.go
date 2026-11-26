@@ -135,6 +135,7 @@ func run() error {
 		},
 		InternalHandlers: []httpapi.RouteRegistrar{
 			httpapi.NewLockHandler(lockSvc),
+			httpapi.NewRequestLookupHandler(requestSvc),
 			httpapi.NewBudgetContextHandler(budgets.NewService(budgets.NewPostgresRepository(pool), clock)),
 		},
 		Webhooks:         []httpapi.RouteRegistrar{webhookHandler},

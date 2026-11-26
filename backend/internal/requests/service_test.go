@@ -106,6 +106,10 @@ func (m *memRepo) Get(_ context.Context, id uuid.UUID) (*Request, error) {
 	return nil, apperr.NotFound("request %s not found", id)
 }
 
+func (m *memRepo) StackHolder(_ context.Context, path string) (StackHolder, error) {
+	return StackHolder{}, apperr.NotFound("no stack at %s", path)
+}
+
 func (m *memRepo) List(_ context.Context, f ListFilter) ([]*Request, error) {
 	rows := slices.Clone(m.state.requests)
 	slices.SortFunc(rows, func(a, b *Request) int { return b.CreatedAt.Compare(a.CreatedAt) })

@@ -128,6 +128,9 @@ type Repository interface {
 	InTx(ctx context.Context, fn func(Store) error) error
 	Get(ctx context.Context, id uuid.UUID) (*Request, error)
 	List(ctx context.Context, f ListFilter) ([]*Request, error)
+	// StackHolder returns the stack at a canonical path with its lock and the lock holder's
+	// request; apperr NotFound (stack_not_found) when no stack has that path.
+	StackHolder(ctx context.Context, path string) (StackHolder, error)
 }
 
 // VersionLookup resolves pinned module versions (implemented by catalog.Service).
