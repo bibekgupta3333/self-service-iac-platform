@@ -86,7 +86,7 @@ environments/development/payments/orders-store/
 }
 ```
 
-While local-first ([ADR-0009](adr/0009-local-first-localstack-and-local-backend.md)), the generator writes a smaller `iacp.stack.json` (`backend`, `depends_on`, `environment`, `fencing_token`, `lifecycle`, `modules` with each instance's release tag and resolved commit SHA, `region`, `request_id`, `stack`, `team`; see `environments/development/platform/smoke/iacp.stack.json`). Account, ephemeral and TTL fields arrive with multi-account support and WBS 8.4.
+While local-first ([ADR-0009](adr/0009-local-first-localstack-and-local-backend.md)), the generator writes a smaller `iacp.stack.json` (`backend`, `depends_on`, `environment`, `fencing_token`, `lifecycle`, `modules` with each instance's release tag and resolved commit SHA, `region`, `request_id`, `stack`, `team`; see `environments/development/platform/smoke/iacp.stack.json`). Account fields arrive with multi-account support. The TTL is not in the file: it lives in `stacks.expires_at` and is read through the API ([06 section 6](06-lifecycle-management.md#6-ttl-and-ephemeral-environments)).
 
 Detection algorithm (`python -m tools.stack_pipeline detect`, used by `pr-validate.yml` and `apply.yml`):
 
@@ -643,35 +643,27 @@ A second, non-refresh plan (`terraform plan -detailed-exitcode`) is run by the w
 
 ### 4.5 `ttl-reaper.yml`
 
-The primary TTL path is event-driven (EventBridge Scheduler → worker → destroy request). This workflow is the backstop: it finds expired stacks in Git that the platform has not yet acted on.
+The backstop and, while the platform is local-first ([ADR-0009](adr/0009-local-first-localstack-and-local-backend.md)), the only TTL driver: no EventBridge Scheduler exists yet, so this hourly workflow asks the API what is due. TTL state lives in the database (`stacks.expires_at`), not in `iacp.stack.json`, so the workflow does not scan the repository.
 
 ```yaml
 name: ttl-reaper
 on:
-  schedule: [{ cron: "0 * * * *" }]           # hourly
-  workflow_dispatch: {}
-permissions: { contents: read, id-token: write }
-jobs:
-  reconcile:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@<sha> # v4.2.2
-      - name: Find expired ephemeral stacks
-        run: |
-          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          find environments -name iacp.stack.json -print0 \
-            | xargs -0 jq -c --arg now "$NOW" \
-                'select(.ephemeral == true and .desired_state == "present" and .expires_at < $now) | {stack_id, expires_at}' \
-            | jq -s --arg run "$GITHUB_RUN_ID" '{event: "ttl_reconcile", run_id: $run, data: {expired: .}}' > expired.json
-          cat expired.json
-      - name: Ask platform to reconcile
-        run: |
-          curl -sSf -X POST -H "Authorization: Bearer $(.github/scripts/iacp-token.sh)" \
-            -H "Content-Type: application/json" --data-binary @expired.json \
-            "${{ vars.IACP_API_URL }}/v1/runs"   # event: ttl_reconcile
+  schedule: [{ cron: "17 * * * *" }]          # hourly
+  workflow_dispatch: { inputs: { dry_run: { type: boolean, default: false } } }
+permissions: { contents: read }               # default; the one job adds id-token: write
+concurrency: { group: iacp-ttl-reaper, cancel-in-progress: false }
 ```
 
-The API is idempotent: stacks already in `destroying`, or with an open destroy request, are ignored. Warnings go out 24 h before expiry (scheduler-driven). In non-production environments only, the platform bot auto-approves destroy PRs created by TTL expiry; production stacks cannot be ephemeral. This workflow never runs `terraform destroy` itself; destruction always flows through a destroy request and PR so it is reviewed, audited and policy-checked.
+The job refuses any ref but `main`, checks the repository out (no persisted credentials), sets up Python and runs `python -m tools.ttl_reaper --skip-if-unconfigured` (add `--dry-run` for a dispatch with `dry_run`). `IACP_API_URL` and `IACP_OIDC_AUDIENCE` come from repository variables; with `IACP_API_URL` empty the tool prints a `::notice::` and exits 0. The API is called with the job's GitHub OIDC token only (a fresh token per call; `IACP_INTERNAL_TOKEN` is never passed), and the backend accepts these routes from this workflow on `main` via `schedule` or `workflow_dispatch` and from nothing else (`auth.RouteTTL`).
+
+`tools/ttl_reaper` (pure planning in `models.py`, HTTP in `reaper.py`'s `TtlApiClient`):
+
+1. `GET /v1/internal/ttl/due` returns the stacks due for a warning and for teardown. A malformed list, or one naming a production stack, fails the run before anything is done.
+2. For each expired stack (soonest first, at most `--max-teardowns` per run, default 25; the rest wait for the next hour) `POST /v1/internal/ttl/{id}/teardown` opens a destroy request on behalf of the platform. Both calls are idempotent on the server: a stack that already has an open destroy is reported as `already`, one that was extended meanwhile or is busy with an apply (`ttl_not_due`, `stack_busy`) as `skipped`.
+3. For each stack inside its 24 h window `POST /v1/internal/ttl/{id}/warn` records the warning once (audit `ttl.warned`, plus a comment on the stack's pull request when the publisher is the GitHub App; the local publisher has no pull request API, so the warning is audit-only there).
+4. One failing stack never stops the pass. Failures are `::error::` annotations and a non-zero exit; every outcome goes to the step summary.
+
+The destroy request follows the normal path: a PR with the emptied stack root, `pr-validate.yml` runs `plan -destroy`, and `apply.yml` destroys. In non-production environments only, the platform bot auto-approves destroy PRs created by TTL expiry (`ttl_auto_approve.rego`, WBS 8.4 follow-up; the approval loop is part of the apply-to-status work, not of this workflow); production stacks cannot be ephemeral. This workflow never runs `terraform destroy` itself; destruction always flows through a destroy request and PR so it is reviewed, audited and policy-checked.
 
 ### 4.6 `module-release.yml`
 

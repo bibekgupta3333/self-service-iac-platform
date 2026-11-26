@@ -136,6 +136,8 @@ dependencies) arrive with their features.
 | `IACP_PORTAL_URL` | `http://localhost:3000` | portal base URL for the request link in PR bodies |
 | `IACP_LOCALSTACK_ENDPOINT` | `http://localhost:4566` | endpoint rendered into generated provider blocks |
 | `IACP_WORKER_POLL_INTERVAL` | `1s` | idle poll interval of the in-process outbox worker (50ms–1m) |
+| `IACP_TTL_MIN_HOURS`, `IACP_TTL_MAX_HOURS`, `IACP_TTL_DEFAULT_HOURS` | `1`, `720`, `72` | bounds of an ephemeral stack's TTL in hours (a request's `ephemeral.ttl_hours`, and each extension); omitted `ttl_hours` takes the default; the environment's `max_ttl_hours` is a further ceiling |
+| `IACP_TTL_MAX_EXTENSION_HOURS` | `168` | most hours extensions may add to one stack in total |
 
 The publisher settings fail closed: `github` with any App setting missing, App settings with
 another publisher, `local` without `IACP_LOCAL_GIT_REPO`, or an unknown value stop the API at startup.
@@ -194,6 +196,10 @@ docker run --rm -p 127.0.0.1:8080:8080 -e IACP_AUTH_MODE=dev \
 | GET | `/v1/requests?team=&status=&kind=&mine=true&limit=&cursor=` | keyset pagination, `next_cursor` |
 | GET | `/v1/requests/{id}` | includes the normalised `spec`, `allowed_events`, `github {branch, pr_number, pr_url}` once published and `failure_reason` |
 | GET | `/v1/requests/{id}/events` | Server-Sent Events: `snapshot`, then `status` per change (event id = audit seq, resume with `Last-Event-ID`), `: heartbeat` every 15 s, `end` when terminal (also on a resume at the terminal seq), closed after 5 min or on server shutdown; ended when its session is revoked; at most 5 streams per user and 500 in total (`429`); `404` for a caller with no role in the team |
+| GET | `/v1/internal/ttl/due` | machine auth (`ttl` class: `ttl-reaper.yml` on main, `schedule`/`workflow_dispatch`); `{"warnings":[…], "teardowns":[…]}` of stacks due now (never production) |
+| POST | `/v1/internal/ttl/{id}/warn` | machine auth (`ttl`); records the 24 h warning once (`200 {"warned":true}`, or `false` with a `reason` when not due) |
+| POST | `/v1/internal/ttl/{id}/teardown` | machine auth (`ttl`); opens a destroy request as the platform bot for an expired stack: `202 {"status":"created","request_id","short_id"}`, `200 {"status":"already_pending"}`, `409 ttl_not_due` / `not_ephemeral` / `production_not_ephemeral` / `stack_busy` |
+| POST | `/v1/stacks/{id}/ttl/extend` | `{"hours"}`; developer role in the stack's team (`stack.extend_ttl`); `200 {"stack_id","expires_at","extended_hours","remaining_extension_hours"}`; `409 ttl_extension_cap` / `ttl_environment_max` / `destroy_pending` / `not_ephemeral`; `404` for a stack in another team |
 | GET | `/v1/stacks?team=&env=&status=&limit=&cursor=` | stacks of the caller's teams (platform admins: all), newest first, keyset pagination |
 | GET | `/v1/stacks/{id}` | `status`, `outputs`, `latest_request` and links; `404` when the caller may not see it |
 | POST | `/v1/webhooks/github` | GitHub App webhook, authenticated by `X-Hub-Signature-256` only; `202 {"accepted","duplicate","enqueued"}`, `401 invalid_signature` / `webhook_not_configured`, `400` for a bad delivery id, event header or payload |
@@ -226,8 +232,9 @@ Authentication goes through `httpapi.Authenticator`, and it fails closed:
   `apply.yml` / `ttl-reaper.yml` on main via `push`, `workflow_dispatch` or `schedule`; catalog
   indexing only `module-release.yml` on main via `push` or `workflow_dispatch`; `/v1/runs` the four
   pipeline workflows; the budget context `pr-validate.yml` and `apply.yml` via `pull_request`,
-  `push` or `workflow_dispatch`. A pull-request token therefore only reaches `/v1/runs` and the
-  read-only budget context.
+  `push` or `workflow_dispatch`; the TTL routes (`/v1/internal/ttl/*`) only `ttl-reaper.yml` on
+  main via `schedule` or `workflow_dispatch`. A pull-request token therefore only reaches
+  `/v1/runs` and the read-only budget context.
 - `POST /v1/runs` then checks provenance per pipeline: the report's `run_id`/`run_attempt` and
   `head_sha` must be the token's run and `sha` (`403 run_mismatch`); `validate` must come from
   `pr-validate.yml` on `pull_request`, `apply` from `apply.yml` on main via `push` /
@@ -323,6 +330,30 @@ environment-specific row wins over a team-wide one; `null` when no budget is set
 `yanked_module_versions` (`module`, `version`, `tag`; every version of a yanked module too) and
 `now`. Everything is derived from the path, so it works for a stack a PR is about to create.
 `422 invalid_stack_path`, `404 environment_not_found`.
+
+## TTL and ephemeral stacks (docs/06 §6, WBS 8.4)
+
+`internal/ttl` holds the rules and the use cases; `requests` opens the destroy request.
+
+- **Model.** A create with `"ephemeral": {"ttl_hours": N}` (0 or omitted: `IACP_TTL_DEFAULT_HOURS`) on a
+  non-production environment stores `stacks.is_ephemeral`, `ttl_hours` and `expires_at`. Production never
+  allows it: `ttl.EnvRule.AllowsEphemeral` is false for it, and migration `0011` has a trigger and a CHECK
+  that keep `environments.allow_ephemeral` false there. The spec stored on the request records the TTL
+  actually applied, so a retried publish renders the same thing.
+- **Pure core** (`ttl.go`, no I/O): `Policy.Resolve`, `ExpiresAt`, `PhaseAt` (none, warn from 24 h before,
+  teardown from expiry), `Eligible`, `Policy.Extend`, `Classify`, `WarningComment`.
+- **Services** (`ttl.Service`, ports `Repository`/`Store`, PostgreSQL adapter): `Extend` (role check in
+  the stack's team, cap, audit `ttl.extended`, clears the warning), `Due`, `Warn` (audit `ttl.warned`,
+  `ttl_warned_at`, `ttl.warning` outbox job when comments are enabled), `Teardown`.
+- **Teardown** calls `requests.Service.OpenTTLDestroy` as the `iacp-bot` system user. In one transaction,
+  under the stack row lock, it re-checks ephemeral, not production and past `expires_at`, skips a stack with a
+  destroy already open, refuses a busy stack, then records the destroy request (justification `ttl expired`,
+  stack lock or queue, publish job) and the audit event `ttl.expired`.
+- **PR comment.** `publish.Commenter` is an optional publisher capability; the GitHub App implements it
+  (`POST /issues/{n}/comments`, sent once), the local publisher does not, and then warnings are audit-only
+  (logged at startup). `ttl.WarningNotifier` is the outbox handler for `ttl.warning`.
+- The caller is the hourly `.github/workflows/ttl-reaper.yml` through `tools/ttl_reaper`; there is no
+  in-process scheduler, so a stopped API simply catches up on the next run.
 
 ## Stack lock (docs/06 §3)
 
