@@ -17,13 +17,20 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/catalog"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/config"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/db"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/generator"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/httpapi"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/locks"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/observability"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/outbox"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/prflow"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/publish"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/publish/githubapp"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/publish/localgit"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/requests"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/runs"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/webhooks"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/migrations"
 )
 
@@ -74,6 +81,33 @@ func run() error {
 	lockSvc := locks.NewService(locks.NewPostgresRepository(pool, auditWriter), clock, locks.DefaultLease)
 	requestSvc := requests.NewService(requestRepo, catalogSvc, requestRepo, lockSvc, clock, ids)
 
+	handlers := map[string]outbox.Handler{outbox.TopicGitHubEvent: webhooks.NewApplier(requestSvc)}
+	pub, err := newPublisher(ctx, cfg, clock)
+	if err != nil {
+		return err
+	}
+	if pub != nil {
+		requestSvc.EnablePublishing()
+		render := generator.New(cfg.ModuleRepoURL, generator.LocalBackend{}, generator.LocalStackProvider{Endpoint: cfg.LocalStackEndpoint})
+		handlers[outbox.TopicRequestPublish] = prflow.NewService(requestSvc, catalogSvc, requestRepo, render, pub,
+			prflow.Options{PortalURL: cfg.PortalURL})
+		slog.Info("publisher enabled", "publisher", pub.Name(), "base_branch", cfg.Publisher.BaseBranch)
+	} else {
+		slog.Info("publisher disabled (IACP_PUBLISHER=none): requests stay in draft")
+	}
+	worker := outbox.NewWorker(outbox.NewPostgresStore(pool), handlers, clock,
+		outbox.Options{PollInterval: cfg.WorkerPollInterval, Logger: logger})
+	workerCtx, stopWorker := context.WithCancel(ctx)
+	workerDone := make(chan struct{})
+	go func() { defer close(workerDone); worker.Run(workerCtx) }()
+	defer func() { stopWorker(); <-workerDone }()
+	if cfg.WebhookSecret == "" {
+		slog.Warn("IACP_GITHUB_WEBHOOK_SECRET is not set: POST /v1/webhooks/github rejects every delivery")
+	}
+	webhookHandler := httpapi.NewWebhookHandler(
+		webhooks.NewIngester(webhooks.NewPostgresRepository(pool), clock, cfg.Publisher.GitHub.Repository()),
+		cfg.WebhookSecret, worker.Wake)
+
 	internalAuth, err := newMachineAuthenticator(cfg, clock)
 	if err != nil {
 		return err
@@ -90,10 +124,28 @@ func run() error {
 			httpapi.NewAuditHandler(audit.NewVerifier(pool)),
 		},
 		InternalHandlers: []httpapi.RouteRegistrar{httpapi.NewLockHandler(lockSvc)},
+		Webhooks:         []httpapi.RouteRegistrar{webhookHandler},
 		PipelineHandlers: []httpapi.RouteRegistrar{httpapi.NewRunHandler(runs.NewService(runs.NewPostgresRepository(pool), clock))},
 	})
 
 	return serve(ctx, newServer(cfg.HTTPAddr, handler), cfg.ShutdownTimeout)
+}
+
+// newPublisher builds the configured publish.Publisher; nil for IACP_PUBLISHER=none.
+func newPublisher(ctx context.Context, cfg config.Config, clock platform.Clock) (publish.Publisher, error) {
+	switch cfg.Publisher.Kind {
+	case config.PublisherLocal:
+		return localgit.New(ctx, localgit.Config{RepoPath: cfg.Publisher.LocalRepoPath, BaseBranch: cfg.Publisher.BaseBranch})
+	case config.PublisherGitHub:
+		g := cfg.Publisher.GitHub
+		key, err := os.ReadFile(g.PrivateKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("read GitHub App private key: %w", err)
+		}
+		return githubapp.New(githubapp.Config{AppID: g.AppID, InstallationID: g.InstallationID, PrivateKey: key,
+			Owner: g.Owner, Repo: g.Repo, BaseBranch: cfg.Publisher.BaseBranch, APIURL: g.APIURL}, clock)
+	}
+	return nil, nil
 }
 
 // newServer bounds every phase of a connection so slow or idle clients cannot pin
