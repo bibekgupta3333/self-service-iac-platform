@@ -246,8 +246,8 @@ func TestHeadCheck(t *testing.T) {
 	}{
 		{"untracked head accepts", "", GitHubEvent{Event: EventPRClosed}, true},
 		{"close at the known head", "h1", GitHubEvent{Event: EventPRClosed, HeadSHA: "h1"}, true},
-		{"close at an old head", "h2", GitHubEvent{Event: EventPRClosed, HeadSHA: "h1"}, false},
-		{"merge without a head", "h1", GitHubEvent{Event: EventPRMerged}, false},
+		{"close after a lost push is still applied", "h2", GitHubEvent{Event: EventPRClosed, HeadSHA: "h3"}, true},
+		{"merge without a head is still applied", "h1", GitHubEvent{Event: EventPRMerged}, true},
 		{"push continuing the head", "h1", GitHubEvent{Event: EventNewCommit, BeforeSHA: "h1", HeadSHA: "h2"}, true},
 		{"replayed push", "h2", GitHubEvent{Event: EventNewCommit, BeforeSHA: "h1", HeadSHA: "h2"}, false},
 	}

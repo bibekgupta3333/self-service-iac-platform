@@ -283,26 +283,28 @@ type GitHubEvent struct {
 // event raced RecordPublished). It is returned as an error so the outbox retries it.
 var ErrNotYetPublished = errors.New("pull request not recorded yet")
 
-// HeadCheck decides whether a webhook's head SHA continues the PR head the platform
-// knows: a synchronize must start from the known head (its before SHA), and any other
-// event must name it. ok is false for a replayed or out-of-order event. An unknown known
-// head (published before head tracking) accepts everything. Pure.
+// HeadCheck decides whether a push (new_commit) continues the PR head the platform knows:
+// its before SHA must be the known head. ok is false for a replayed or out-of-order push,
+// whose replay could otherwise clear an approval. Every other event passes: a close or a
+// merge is a real, status-guarded event (rejected is terminal), and dropping it because
+// an earlier push was lost would leave the request holding its stack lock forever. An
+// unknown known head (published before head tracking) accepts everything. Pure.
 func HeadCheck(known string, e GitHubEvent) (ok bool) {
-	if known == "" {
+	if known == "" || e.Event != EventNewCommit {
 		return true
 	}
-	if e.Event == EventNewCommit {
-		return e.BeforeSHA == known
-	}
-	return e.HeadSHA == known
+	return e.BeforeSHA == known
 }
 
 // EventOutcome reports what ApplyGitHubEvent did.
 type EventOutcome struct {
 	Applied bool
-	Reason  string // why it was ignored: unknown_request, pr_mismatch, or the transition error code
+	Reason  string // why it was ignored: unknown_request, pr_mismatch, stale_head, or the transition error code
 	From    Status
 	To      Status
+	// KnownHead is the PR head the platform had when the event was applied; with
+	// Reason stale_head the caller can re-read the real head and resync from it.
+	KnownHead string
 }
 
 var shaRe = regexp.MustCompile(`^[0-9a-f]{40}$`)
@@ -342,6 +344,7 @@ func (s *Service) ApplyGitHubEvent(ctx context.Context, e GitHubEvent) (EventOut
 		if r.PR == nil || r.PR.Number != e.PRNumber {
 			return ignore("pr_mismatch")
 		}
+		out.KnownHead = r.PR.HeadSHA
 		if !HeadCheck(r.PR.HeadSHA, e) {
 			return ignore("stale_head")
 		}
@@ -369,7 +372,7 @@ func (s *Service) ApplyGitHubEvent(ctx context.Context, e GitHubEvent) (EventOut
 		}); err != nil {
 			return err
 		}
-		out = EventOutcome{Applied: true, From: from, To: r.Status}
+		out = EventOutcome{Applied: true, From: from, To: r.Status, KnownHead: out.KnownHead}
 		return nil
 	})
 	if err != nil {

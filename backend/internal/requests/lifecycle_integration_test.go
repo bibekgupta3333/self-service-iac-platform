@@ -163,10 +163,9 @@ func TestPublishedRequestLifecycle(t *testing.T) {
 	if got, _ := f.svc.Get(ctx, req.ID); got.PR.HeadSHA != pushed {
 		t.Fatalf("head not tracked: %+v", got.PR)
 	}
-	// ...so a replay of that push, or a close naming the old head, is stale.
+	// ...so a replay of that push is stale.
 	for _, e := range []GitHubEvent{
 		{RequestShortID: req.ShortID, PRNumber: 812, Event: EventNewCommit, BeforeSHA: head, HeadSHA: pushed, DeliveryID: "d-2c"},
-		{RequestShortID: req.ShortID, PRNumber: 812, Event: EventPRClosed, HeadSHA: head, DeliveryID: "d-2d"},
 	} {
 		if out, err := f.svc.ApplyGitHubEvent(ctx, e); err != nil || out.Reason != "stale_head" {
 			t.Fatalf("stale %s: %+v, %v", e.Event, out, err)
@@ -195,13 +194,57 @@ func TestPublishedRequestLifecycle(t *testing.T) {
 	}
 
 	want := []string{"request.created", "request.publish_enqueued", "request.transitioned", "request.github_event_ignored",
-		"request.github_event_ignored", "request.github_event_ignored", "request.github_event_ignored", "request.github_event_ignored",
+		"request.github_event_ignored", "request.github_event_ignored", "request.github_event_ignored",
 		"request.workflow_run_completed", "request.transitioned", "request.github_event_ignored"}
 	if got := f.actions(t, req.ID); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("audit trail:\n got %v\nwant %v", got, want)
 	}
 	if v, err := audit.NewVerifier(f.pool).Verify(ctx, 1, 0); err != nil || !v.Valid {
 		t.Fatalf("audit chain: %+v, %v", v, err)
+	}
+}
+
+// TestCloseAfterOutOfOrderPushesReleasesTheLock is the reviewer's sequence: published at
+// head A, push B→C arrives first (stale, ignored), then A→B (accepted, head B), then the
+// PR is closed at C. The close must still reject the request and free the stack lock.
+func TestCloseAfterOutOfOrderPushesReleasesTheLock(t *testing.T) {
+	f := newLifecycleFixture(t)
+	ctx := context.Background()
+	res, err := f.svc.Create(ctx, f.user, createCmd(validInput(), "out-of-order-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := res.Request
+	target, err := f.svc.PublishTarget(ctx, req.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, b, c := strings.Repeat("a", 40), strings.Repeat("b", 40), strings.Repeat("c", 40)
+	if _, err := f.svc.RecordPublished(ctx, req.ID, PublishedPR{Publisher: "local", Branch: "iacp/" + req.ShortID, CommitSHA: a,
+		TreeSHA: strings.Repeat("e", 40), Number: 501, URL: "file:///x#pull/501", FencingToken: *target.FencingToken}, "c"); err != nil {
+		t.Fatal(err)
+	}
+	steps := []struct {
+		e          GitHubEvent
+		wantReason string
+		wantTo     Status
+	}{
+		{GitHubEvent{Event: EventNewCommit, BeforeSHA: b, HeadSHA: c, DeliveryID: "o-1"}, "stale_head", StatusPROpen},
+		{GitHubEvent{Event: EventNewCommit, BeforeSHA: a, HeadSHA: b, DeliveryID: "o-2"}, "invalid_transition", StatusPROpen},
+		{GitHubEvent{Event: EventPRClosed, HeadSHA: c, DeliveryID: "o-3"}, "", StatusRejected},
+	}
+	for i, st := range steps {
+		st.e.RequestShortID, st.e.PRNumber = req.ShortID, 501
+		out, err := f.svc.ApplyGitHubEvent(ctx, st.e)
+		if err != nil || out.Reason != st.wantReason || out.To != st.wantTo {
+			t.Fatalf("step %d: %+v, %v", i+1, out, err)
+		}
+	}
+	if got, _ := f.svc.Get(ctx, req.ID); got.Status != StatusRejected || got.PR.HeadSHA != b {
+		t.Fatalf("request = %+v", got)
+	}
+	if _, err := f.locks.Get(ctx, req.Stack.ID); err == nil {
+		t.Fatal("the close must release the stack lock")
 	}
 }
 
