@@ -16,7 +16,7 @@ cmd/api/                 HTTP API entrypoint: config, pool, migrations, wiring, 
 migrations/              goose SQL migrations, embedded into the binary (embed.FS)
 internal/
   config/                IACP_* environment config (pure Load over a lookup func)
-  observability/         slog JSON logger, request-scoped logger in context
+  observability/         slog JSON logger, request-scoped logger in context, Prometheus registry (Metrics)
   platform/              Clock and IDGenerator ports (+ system and fixed implementations)
   fp/                    small generic helpers: Map, Filter, Reduce, SortedKeys, Duplicates
   apperr/                transport-agnostic errors (kind + stable code + field errors)
@@ -26,7 +26,8 @@ internal/
   catalog/               modules, versions, SemVer, index validation, CatalogService, Postgres repo
   requests/              state machine, Request entity, spec validation, RequestService, Postgres repo
   locks/                 per-stack platform lock: pure Decide/NextInQueue/CheckToken, Service, Postgres repo
-  auth/                  GitHub Actions OIDC: claim allow-lists (pure), JWKSCache, Verifier
+  auth/                  GitHub Actions OIDC: claim allow-lists (pure), JWKSCache, Verifier, jti ReplayGuard
+  budgets/               policy context for conftest: pure ParseStackPath / BuildContext, Service, Postgres repo
   runs/                  POST /v1/runs reports: pure Validate/CheckProvenance/RunStatus, Service, Postgres repo
   generator/             pure Terraform renderer + BackendStrategy / ProviderStrategy, golden files
   audit/                 pure hash chain (CanonicalJSON, ChainHash, VerifyChain), Writer, Verifier
@@ -42,11 +43,13 @@ internal/
 - **Functions (logic):** the request transition table and `Transition`, SemVer parsing and ordering,
   `ValidateIndex`, `ValidateShape` / `ValidateResources` / `ValidateEnvironment`, reference masking,
   all generator renderers, `ChainHash` / `VerifyChain`, cursors and request hashes, the lock
-  decisions (`locks.Decide`, `NextInQueue`, `CheckToken`), OIDC `CheckClaims` / `ParseJWKS`, and run
-  `Validate` / `CheckProvenance` / `RunStatus`. They take values and return values with no I/O, so
+  decisions (`locks.Decide`, `NextInQueue`, `CheckToken`), OIDC `CheckClaims` / `ParseJWKS`, run
+  `Validate` / `CheckProvenance` / `RunStatus`, the jti window's eviction (`jtiWindow`, time passed in),
+  `budgets.ParseStackPath` / `BuildContext`, and `httpapi.IsDirectLoopback`. They take values and return values with no I/O, so
   their tests need no fakes.
 - **Boundary:** I/O lives only in adapters: `*PostgresRepository`, `audit.Writer` / `Verifier`,
-  `identity.UserStore`, `db.Migrator`, `auth.JWKSCache` and the HTTP handlers.
+  `identity.UserStore`, `db.Migrator`, `auth.JWKSCache`, `auth.MemoryReplayCache` (mutex around the pure
+  window), `auth.PostgresReplayStore`, `budgets.PostgresRepository` and the HTTP handlers.
 
 ### Migrations: why goose
 
@@ -65,6 +68,8 @@ together apply each migration once.
 | `0003_seed_local.sql` | `iacp-bot` system user and the `development` environment (LocalStack account `000000000000`) |
 | `0004_app_role_grants.sql` | runtime grants for `iacp_app`: DML on platform tables, INSERT/SELECT only on `audit_events`, nothing on `goose_db_version` |
 | `0005_pipeline_runs.sql` | `pipeline_kind`, `pipeline_status`, `pipeline_runs` (one row per run, attempt and stack, `stack_id NOT NULL`; one `stages` entry per stage name); `iacp_app` gets SELECT/INSERT/UPDATE only |
+| `0006_oidc_jti.sql` | `oidc_jti` (used GitHub OIDC token ids until `exp` + leeway, shared by replicas); `iacp_app` gets SELECT/INSERT/DELETE only, no UPDATE |
+| `0007_budgets.sql` | `budgets` (team monthly budget, optionally per environment; `spent_usd` 0 until cost data lands in WBS 8.5) |
 
 ### Database roles
 
@@ -79,7 +84,7 @@ The API never serves requests as the schema owner:
 In `IACP_AUTH_MODE=dev` the app password defaults to `iacp-app-local-only`, which matches the
 default runtime URL, so a local `go run` works against the compose Postgres with no extra setup.
 
-Tables for later milestones (plan summaries, costs, drift, budgets, policy exceptions, stack
+Tables for later milestones (plan summaries, costs, drift, budget overrides, policy exceptions, stack
 dependencies, webhook deliveries, outbox) arrive with their features.
 
 ## Configuration
@@ -97,6 +102,8 @@ dependencies, webhook deliveries, outbox) arrive with their features.
 | `IACP_OIDC_REPOSITORY_ID` | unset (startup warning) | numeric `repository_id` every token must carry; set it in any shared environment (owner/name can be re-registered after a rename or delete) |
 | `IACP_OIDC_ALLOWED_REFS` | `refs/heads/main,refs/pull/*/merge` | comma-separated `path.Match` patterns for the `ref` claim |
 | `IACP_OIDC_ALLOWED_WORKFLOWS` | `<repo>/.github/workflows/*@refs/heads/main,<repo>/.github/workflows/pr-validate.yml@refs/pull/*/merge` | patterns for `job_workflow_ref` |
+| `IACP_OIDC_REPLAY_STORE` | `postgres` | where used token ids (`jti`) are remembered: `postgres` (table `oidc_jti`, correct with any number of replicas) or `memory` (bounded per-process cache, 10,000 ids; single instance only, warns at startup) |
+| `IACP_METRICS_TOKEN` | unset | bearer token for non-loopback scrapers of `/metrics`, at least 32 characters, must differ from `IACP_INTERNAL_TOKEN`; unset means loopback only |
 | `IACP_OIDC_LEEWAY` | `30s` | clock skew allowed on `exp`/`nbf`/`iat` (max `5m`) |
 | `IACP_OIDC_ISSUER` | `https://token.actions.githubusercontent.com` | override for tests only (plain http allowed only on loopback) |
 | `IACP_OIDC_JWKS_URL` | `<issuer>/.well-known/jwks` | override for tests only; must be https (plain http only on loopback), or the API refuses to start |
@@ -114,6 +121,7 @@ cd backend && IACP_AUTH_MODE=dev go run ./cmd/api
 
 curl -s localhost:8080/healthz           # liveness
 curl -s localhost:8080/readyz            # database reachable
+curl -s localhost:8080/metrics           # Prometheus text format (loopback only without a token)
 ```
 
 Teams and memberships come from GitHub team sync (WBS 4.4). Creating a request needs the
@@ -142,6 +150,8 @@ docker run --rm -p 127.0.0.1:8080:8080 -e IACP_AUTH_MODE=dev \
 | Method | Path | Notes |
 |--------|------|-------|
 | GET | `/healthz`, `/readyz` | no auth |
+| GET | `/metrics` | Prometheus exposition; loopback peers without proxy headers, or `Authorization: Bearer $IACP_METRICS_TOKEN` (`403 metrics_forbidden` otherwise) |
+| GET | `/v1/internal/budget-context?stack_path=` | machine auth (`budget_context` class); conftest `--data` document for the stack (below) |
 | GET | `/v1/catalog/modules?category=&status=` | modules with `latest_version` |
 | GET | `/v1/catalog/modules/{name}` | module + latest version detail |
 | GET | `/v1/catalog/modules/{name}/versions` | SemVer descending |
@@ -181,16 +191,52 @@ Authentication goes through `httpapi.Authenticator`, and it fails closed:
 - Route classes (`auth.RoutePolicies`, enforced by middleware): lock routes accept only
   `apply.yml` / `ttl-reaper.yml` on main via `push`, `workflow_dispatch` or `schedule`; catalog
   indexing only `module-release.yml` on main via `push` or `workflow_dispatch`; `/v1/runs` the four
-  pipeline workflows. A pull-request token therefore only ever reaches `/v1/runs`.
+  pipeline workflows; the budget context `pr-validate.yml` and `apply.yml` via `pull_request`,
+  `push` or `workflow_dispatch`. A pull-request token therefore only reaches `/v1/runs` and the
+  read-only budget context.
 - `POST /v1/runs` then checks provenance per pipeline: the report's `run_id`/`run_attempt` and
   `head_sha` must be the token's run and `sha` (`403 run_mismatch`); `validate` must come from
   `pr-validate.yml` on `pull_request`, `apply` from `apply.yml` on main via `push` /
   `workflow_dispatch`, `drift` and `ttl_destroy` from `drift.yml` / `ttl-reaper.yml` on main via
   `schedule` / `workflow_dispatch`. `pull_request_target` and `workflow_run` never qualify.
+- Replay (`auth.ReplayGuard`, after every check above): a token's `jti` is claimed until `exp` plus
+  the leeway, and a second use in that window gets the generic 401. Workflows must request a
+  fresh OIDC token for every call. The default store is the `oidc_jti` table, whose primary key
+  makes the claim atomic across replicas; `IACP_OIDC_REPLAY_STORE=memory` keeps a bounded cache
+  in the process instead (expired ids dropped first, then the soonest-expiring id evicted when
+  full), which only protects one instance. Store errors fail closed (401).
 - Calls with the shared token are not workflow-scoped and skip these OIDC checks.
 - 401 bodies are generic; the reason is only logged.
 
 GitHub OAuth sessions (WBS 4.4) plug in at the same seam without handler changes.
+
+## Metrics
+
+`/metrics` is served on the API listener from a private registry (`observability.Metrics`):
+
+- `iacp_http_requests_total{method,route,status}` and `iacp_http_request_duration_seconds{method,route}`.
+  `route` is the chi route pattern read after routing (`/v1/requests/{id}`), never the raw path;
+  unmatched paths share `route="unmatched"`, so scanners cannot grow the series count.
+- `iacp_db_pool_connections{state=acquired|idle|total}` and `iacp_db_pool_max_connections`, read
+  from `pgxpool.Stat` at scrape time; plus the standard Go runtime and process collectors.
+
+Access: the endpoint shares the public listener, so it is closed by default. A direct loopback
+peer (a sidecar scraper in the same task or pod) is allowed; any request carrying `Forwarded`,
+`X-Forwarded-For` or `X-Real-Ip` is never treated as loopback, because a local reverse proxy would
+otherwise make every client look local. Other scrapers send `IACP_METRICS_TOKEN`, a separate secret
+from `IACP_INTERNAL_TOKEN` (which can take stack locks). A wrong token is refused even from loopback.
+
+## Budget context (docs/07 §6.1)
+
+`GET /v1/internal/budget-context?stack_path=environments/<env>/<team>/<stack>` (alias `stack=`)
+returns `{"iacp": {"context": {…}}}`, ready for `conftest --data`, where the policies read it as
+`data.iacp.context`: `environment`, `team`, `stack`, `stack_path`, `allowed_regions` (from
+`environments`), `budget` (`month`, `limit_usd`, `spent_usd`, `hard_block`, `scope`; the
+environment-specific row wins over a team-wide one; `null` when no budget is set), `budget_override`
+(always `null` until WBS 8.5), `exceptions` (always `[]` until policy exceptions are stored),
+`yanked_module_versions` (`module`, `version`, `tag`; every version of a yanked module too) and
+`now`. Everything is derived from the path, so it works for a stack a PR is about to create.
+`422 invalid_stack_path`, `404 environment_not_found`.
 
 ## Stack lock (docs/06 §3)
 
