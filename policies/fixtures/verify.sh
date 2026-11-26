@@ -2,7 +2,10 @@
 # Runs conftest against the plan fixtures with the stack context in context.json:
 #   - compliant.plan.json must produce no denies and no warnings;
 #   - noncompliant.plan.json must be denied by every deny rule ID and warned by
-#     every warn rule ID listed below (so each rule is exercised end to end).
+#     every warn rule ID listed below (so each rule is exercised end to end);
+#   - compliant.plan.json with context-yanked.json (its pinned modules/s3/v1.2.0
+#     listed as yanked, as GET /v1/internal/budget-context would) must be denied
+#     by iacp.modules.yanked and by nothing else.
 #
 # Usage: policies/fixtures/verify.sh   (needs conftest and jq)
 set -euo pipefail
@@ -65,4 +68,13 @@ check() {
 
 check failures "$(ids failures)" "${expected_denies[@]}"
 check warnings "$(ids warnings)" "${expected_warnings[@]}"
+
+echo "conftest: compliant.plan.json with its module version yanked (expect iacp.modules.yanked only)"
+result="$(conftest test "$here/compliant.plan.json" -p "$policy" --data "$here/context-yanked.json" --output json || true)"
+yanked="$(ids failures)"
+check failures "$yanked" iacp.modules.yanked
+if [ "$yanked" != "iacp.modules.yanked" ]; then
+  echo "  UNEXPECTED failures: $(tr '\n' ' ' <<<"$yanked")" >&2
+  status=1
+fi
 exit "$status"
