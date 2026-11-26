@@ -15,7 +15,8 @@ export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION AWS_ENDPOINT_U
 unexport AWS_PROFILE AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
 
 .PHONY: help up down ps fmt fmt-check validate tflint checkov policy-test lint \
-        module-test integration-test validate-manifests module-gate go-test go-integration generator-update api py-test test diagrams
+        module-test integration-test validate-manifests module-gate go-test go-integration generator-update api py-test test diagrams \
+        stack-detect stack-plan stack-apply stack-destroy stack-clean
 
 help: ## Show available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -58,6 +59,40 @@ policy-test: ## Unit-test OPA policies and verify conftest fixtures
 	policies/fixtures/verify.sh
 
 lint: fmt-check validate validate-manifests module-gate tflint checkov policy-test ## All static checks
+
+## ---- stacks (environments/, mirrors pr-validate.yml) ----
+STACK ?= environments/development/platform/smoke
+BASE  ?= origin/main
+# Same switch as the workflow's IACP_PIN_BOOTSTRAP: off, so unpublished module tags are refused.
+# IACP_PIN_BOOTSTRAP=true serves them from a local mirror (the pre-release ADR-0009 bootstrap).
+IACP_PIN_BOOTSTRAP ?= false
+PIN_BOOTSTRAP_FLAG := $(if $(filter true,$(IACP_PIN_BOOTSTRAP)),--allow-unpublished,)
+
+stack-detect: ## Stacks changed since BASE (default origin/main) as a JSON matrix
+	$(PYTHON) -m tools.stack_pipeline detect --base $(BASE) --head HEAD --github-output ''
+
+stack-plan: ## pr-validate checks + plan + conftest for STACK against LocalStack (needs `make up`)
+	@set -euo pipefail; tmp="$$(mktemp -d)"; trap 'rm -rf "$$tmp"' EXIT; \
+	exports="$$($(PYTHON) -m tools.stack_pipeline verify-pins $(STACK) --mirror "$$tmp/mirror.git" $(PIN_BOOTSTRAP_FLAG) --github-env '')"; \
+	eval "$$exports"; \
+	terraform -chdir=$(STACK) fmt -check -recursive; \
+	terraform -chdir=$(STACK) init -input=false -lockfile=readonly >/dev/null; \
+	$(PYTHON) -m tools.stack_pipeline verify-modules $(STACK); \
+	terraform -chdir=$(STACK) validate -no-color; \
+	terraform -chdir=$(STACK) plan -input=false -lock=false -out=tfplan; \
+	terraform -chdir=$(STACK) show -json tfplan > "$$tmp/plan.json"; \
+	$(PYTHON) -m tools.stack_pipeline context $(STACK) > "$$tmp/context.json"; \
+	conftest test "$$tmp/plan.json" -p policies/opa --data "$$tmp/context.json"
+
+stack-apply: ## Apply the saved STACK plan to LocalStack (run stack-plan first)
+	terraform -chdir=$(STACK) apply -input=false tfplan
+
+stack-destroy: ## Destroy STACK on LocalStack
+	terraform -chdir=$(STACK) destroy -input=false -auto-approve
+
+stack-clean: ## Remove local state, plan and .terraform from STACK
+	@test -f "$(STACK)/iacp.stack.json" || { echo "STACK=$(STACK) is not a stack root"; exit 1; }
+	rm -rf $(STACK)/.terraform $(STACK)/tfplan $(STACK)/terraform.tfstate $(STACK)/terraform.tfstate.backup
 
 ## ---- tests ----
 module-test: ## terraform test every module against LocalStack (needs `make up`)

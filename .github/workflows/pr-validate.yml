@@ -1,0 +1,395 @@
+# Validates every stack root a pull request changes (docs/05-automation-pipeline.md
+# section 4.2). Local-first (ADR-0009): plans run against a LocalStack service
+# container with the dummy test/test credentials and the Terraform local backend.
+# No cloud credentials or OIDC roles are used until ADR-0009 ends.
+#
+#   detect    -> changed stacks as a JSON matrix (tools/stack_pipeline); fails on
+#                any environments/ path outside a valid stack root
+#   validate  -> per stack: fmt, module pins, init, installed-module check,
+#                validate, TFLint, Checkov,
+#                plan, show -json, conftest, hermetic LocalStack apply round
+#                trip; uploads the plan summary
+#   comment   -> sticky PR comment per stack (the only job that can write to the PR)
+#   result    -> single required status check, independent of matrix size
+#
+# The workflow runs on every PR (no paths filter) so pr-validate-result always
+# reports; detect returns zero stacks quickly when nothing under environments/
+# changed.
+name: pr-validate
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-validate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  TF_IN_AUTOMATION: "1"
+  TF_INPUT: "0"
+  PYTHON_VERSION: "3.12"
+  TFLINT_VERSION: v0.59.1
+  CONFTEST_VERSION: 0.71.1
+  CONFTEST_SHA256: c3f6b2a753bd56e377a1e51a95ae3e057f926f2e9139f7d5b5dfbbaf810f7985
+  # Dummy credentials for LocalStack only; never real keys.
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  AWS_DEFAULT_REGION: us-east-1
+  # Off: every pinned module tag must be published by module-release, and
+  # verify-pins refuses an unpublished one. "true" serves unpublished tags from a
+  # local mirror of a commit on main (the ADR-0009 bootstrap used before the
+  # first releases); keep it off. See docs/05 section 4.2, "Module pins".
+  IACP_PIN_BOOTSTRAP: "false"
+
+jobs:
+  detect:
+    name: detect changed stacks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.detect.outputs.matrix }}
+      count: ${{ steps.detect.outputs.count }}
+      terraform_version: ${{ steps.versions.outputs.terraform_version }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install tool dependencies
+        run: python -m pip install --quiet "$(grep -E '^pyyaml==' tools/requirements.txt)"
+
+      - id: versions
+        name: Read tool versions
+        run: echo "terraform_version=$(cat .terraform-version)" >> "$GITHUB_OUTPUT"
+
+      - id: detect
+        name: Map changed files to stack roots
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # A change to the pipeline, its policies or its tool versions re-validates every stack.
+          python -m tools.stack_pipeline detect --base "$BASE_SHA" --head "$HEAD_SHA" \
+            --full-run-prefix .github/workflows/pr-validate.yml \
+            --full-run-prefix tools/stack_pipeline/ \
+            --full-run-prefix policies/ \
+            --full-run-prefix .tflint.hcl \
+            --full-run-prefix .terraform-version | tee "$RUNNER_TEMP/detect.json"
+          {
+            echo "### Changed stacks"
+            jq -r 'if .count == 0 then "No stack roots changed." else (.stacks[] | "- `\(.path)`") end' "$RUNNER_TEMP/detect.json"
+            jq -r 'if .full_run then "\nThe pipeline changed, so every stack is validated." else empty end' "$RUNNER_TEMP/detect.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  validate:
+    name: validate (${{ matrix.stack.path }})
+    needs: detect
+    if: needs.detect.outputs.count != '0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        stack: ${{ fromJSON(needs.detect.outputs.matrix) }}
+    # One plan per stack per PR: a new push cancels the stale plan of the same stack.
+    # apply.yml (WBS 5.3) will use the non-cancelling group iacp-stack-<id>.
+    concurrency:
+      group: iacp-stack-${{ matrix.stack.id }}-plan-pr${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    services:
+      localstack:
+        image: localstack/localstack:4.4@sha256:b52c16663c70b7234f217cb993a339b46686e30a1a5d9279cb5feeb2202f837c
+        ports:
+          - 4566:4566
+        env:
+          SERVICES: s3,sqs,sns,lambda,iam,sts,kms,logs,cloudwatch,secretsmanager,events
+          AWS_DEFAULT_REGION: us-east-1
+        options: >-
+          --health-cmd "curl -sf http://localhost:4566/_localstack/health"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      AWS_ENDPOINT_URL: http://localhost:4566
+      STACK_ID: ${{ matrix.stack.id }}
+      STACK_PATH: ${{ matrix.stack.path }}
+      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform.d/plugin-cache
+      TFLINT_PLUGIN_DIR: ${{ github.workspace }}/.tflint.d/plugins
+      # Steps run inside the stack root; keep `python -m tools.stack_pipeline` importable.
+      PYTHONPATH: ${{ github.workspace }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ matrix.stack.path }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Full history: module pins are checked against origin/main.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: ${{ needs.detect.outputs.terraform_version }}
+          terraform_wrapper: false
+
+      - uses: terraform-linters/setup-tflint@90f302c255ef959cbfb4bd10581afecdb7ece3e6 # v4.1.1
+        with:
+          tflint_version: ${{ env.TFLINT_VERSION }}
+          github_token: ${{ github.token }}
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: policies/checkov/requirements.txt
+
+      - name: Install Checkov and tool dependencies
+        working-directory: .
+        run: |
+          python -m pip install --quiet -r policies/checkov/requirements.txt
+          python -m pip install --quiet "$(grep -E '^pyyaml==' tools/requirements.txt)"
+
+      - name: Install conftest (checksum verified)
+        working-directory: .
+        run: |
+          tarball="conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSLo "$RUNNER_TEMP/$tarball" \
+            "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/${tarball}"
+          echo "${CONFTEST_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/bin" conftest
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # Provider and TFLint plugin caches (WBS 5.4). Provider downloads are still
+      # verified against the committed .terraform.lock.hcl on init.
+      - name: Cache Terraform providers
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ env.TF_PLUGIN_CACHE_DIR }}
+          key: tf-providers-${{ runner.os }}-${{ hashFiles(format('{0}/.terraform.lock.hcl', matrix.stack.path)) }}
+          restore-keys: tf-providers-${{ runner.os }}-
+
+      - name: Cache TFLint plugins
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ env.TFLINT_PLUGIN_DIR }}
+          key: tflint-${{ runner.os }}-${{ env.TFLINT_VERSION }}-${{ hashFiles('.tflint.hcl') }}
+
+      - id: fmt
+        name: terraform fmt
+        run: terraform fmt -check -recursive -diff
+
+      - id: pins
+        name: Verify module pins
+        # Published tags must resolve to the commit in iacp.stack.json. Unpublished tags
+        # are refused unless IACP_PIN_BOOTSTRAP is "true" (ADR-0009); then they are served
+        # from a local mirror of a commit already on main. The source string, and so the
+        # policy input, is unchanged.
+        run: |
+          args=(--mirror "$RUNNER_TEMP/module-mirror.git")
+          if [ "${IACP_PIN_BOOTSTRAP:-false}" = "true" ]; then args+=(--allow-unpublished); fi
+          python -m tools.stack_pipeline --repo-root "$GITHUB_WORKSPACE" verify-pins . "${args[@]}"
+
+      - id: init
+        name: terraform init (local backend)
+        run: |
+          mkdir -p "$TF_PLUGIN_CACHE_DIR"
+          terraform init -input=false -lockfile=readonly -no-color
+
+      - id: modules
+        name: Verify installed modules
+        # One-to-one match between the module calls init installed and the pins,
+        # exact pinned sources, and each fetched checkout at its recorded commit.
+        run: python -m tools.stack_pipeline --repo-root "$GITHUB_WORKSPACE" verify-modules .
+
+      - id: validate
+        name: terraform validate
+        run: terraform validate -no-color
+
+      - id: tflint
+        name: TFLint
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$TFLINT_PLUGIN_DIR"
+          tflint --init --config "$GITHUB_WORKSPACE/.tflint.hcl"
+          tflint --config "$GITHUB_WORKSPACE/.tflint.hcl" --format compact
+
+      - id: checkov
+        name: Checkov (stack and downloaded modules)
+        # CKV_TF_1 wants a commit hash in the source string. Stacks pin exact release
+        # tags (enforced by OPA iacp.forbidden.module_source), and the tag-to-commit
+        # binding is verified twice above: "Verify module pins" against the remote and
+        # "Verify installed modules" against what init actually fetched.
+        run: |
+          checkov --directory . --framework terraform \
+            --download-external-modules true \
+            --external-modules-download-path "$RUNNER_TEMP/checkov-modules" \
+            --external-checks-dir "$GITHUB_WORKSPACE/policies/checkov" \
+            --skip-check CKV_TF_1 \
+            --quiet --compact
+
+      - id: plan
+        name: terraform plan
+        run: |
+          terraform plan -input=false -lock=false -no-color -out=tfplan 2>&1 | tee "$RUNNER_TEMP/plan.txt"
+
+      - id: show
+        name: terraform show -json
+        run: terraform show -json tfplan > "$RUNNER_TEMP/plan.json"
+
+      - id: conftest
+        name: OPA policies (conftest)
+        # The context comes from iacp.stack.json until GET /v1/internal/budget-context
+        # (WBS 6.4) exists. Warnings are reported in the PR comment, not blocking.
+        run: |
+          python -m tools.stack_pipeline --repo-root "$GITHUB_WORKSPACE" context . > "$RUNNER_TEMP/policy-context.json"
+          status=0
+          conftest test "$RUNNER_TEMP/plan.json" \
+            --policy "$GITHUB_WORKSPACE/policies/opa" \
+            --data "$RUNNER_TEMP/policy-context.json" \
+            --output json > "$RUNNER_TEMP/conftest.json" || status=$?
+          jq -r '.[] | (.failures[]? | "deny: \(.msg)"), (.warnings[]? | "warn: \(.msg)")' "$RUNNER_TEMP/conftest.json" || true
+          exit "$status"
+
+      - id: roundtrip
+        name: Apply round trip on LocalStack (ADR-0009)
+        # Hermetic check while local-first: apply the reviewed plan to this job's
+        # throwaway LocalStack container, require an empty re-plan (exit code 2
+        # means the stack is not idempotent), then destroy. No state or resources
+        # outside the job are touched; real accounts change only through apply.yml.
+        run: |
+          terraform apply -input=false -lock=false -no-color tfplan
+          terraform plan -input=false -lock=false -no-color -detailed-exitcode
+          terraform destroy -input=false -lock=false -no-color -auto-approve
+
+      # TODO(WBS 5.6): report plan_ready / plan_failed with the summary JSON to
+      # POST /v1/runs through the OIDC-authenticated iacp-report action. The API's
+      # OIDC verifier (WBS 4.10) exists; this step is not wired yet. The API requires
+      # the report's head_sha to equal the token's sha claim, which for pull_request
+      # events is the merge commit github.sha, NOT github.event.pull_request.head.sha
+      # (the PR head shown in the comment); send github.sha or the API answers
+      # 403 run_mismatch.
+
+      - name: Build plan summary
+        if: always()
+        env:
+          OUT_FMT: ${{ steps.fmt.outcome }}
+          OUT_PINS: ${{ steps.pins.outcome }}
+          OUT_INIT: ${{ steps.init.outcome }}
+          OUT_MODULES: ${{ steps.modules.outcome }}
+          OUT_VALIDATE: ${{ steps.validate.outcome }}
+          OUT_TFLINT: ${{ steps.tflint.outcome }}
+          OUT_CHECKOV: ${{ steps.checkov.outcome }}
+          OUT_PLAN: ${{ steps.plan.outcome }}
+          OUT_SHOW: ${{ steps.show.outcome }}
+          OUT_ROUNDTRIP: ${{ steps.roundtrip.outcome }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          out="$RUNNER_TEMP/summary"
+          mkdir -p "$out"
+          python -m tools.stack_pipeline --repo-root "$GITHUB_WORKSPACE" summary . \
+            --plan "$RUNNER_TEMP/plan.json" \
+            --conftest "$RUNNER_TEMP/conftest.json" \
+            --plan-text "$RUNNER_TEMP/plan.txt" \
+            --step "fmt=$OUT_FMT" --step "module pins=$OUT_PINS" --step "init=$OUT_INIT" \
+            --step "installed modules=$OUT_MODULES" \
+            --step "validate=$OUT_VALIDATE" --step "tflint=$OUT_TFLINT" --step "checkov=$OUT_CHECKOV" \
+            --step "plan=$OUT_PLAN" --step "show -json=$OUT_SHOW" --step "LocalStack apply round trip=$OUT_ROUNDTRIP" \
+            --commit "$HEAD_SHA" --run-url "$RUN_URL" \
+            --markdown-out "$out/comment.md" --json-out "$out/summary.json"
+          cat "$out/comment.md" >> "$GITHUB_STEP_SUMMARY"
+
+      # Only the rendered summary leaves the job: tfplan and plan.json can hold
+      # sensitive values and are never uploaded or committed.
+      - name: Upload plan summary
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pr-validate-${{ matrix.stack.id }}
+          path: |
+            ${{ runner.temp }}/summary/comment.md
+            ${{ runner.temp }}/summary/summary.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  comment:
+    name: sticky PR comments
+    needs: [detect, validate]
+    # Fork PRs get a read-only token; their summaries stay in the job summary.
+    if: >-
+      always() && needs.detect.outputs.count != '0'
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: pr-validate-*
+          path: summaries
+
+      # Create or update one comment per stack, found by its hidden marker. The
+      # marker is built here from the artifact name; any marker-looking line in the
+      # artifact body is dropped, so a body can never claim another stack's comment.
+      - name: Upsert comments
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          shopt -s nullglob
+          for dir in summaries/pr-validate-*/; do
+            id="$(basename "$dir")"
+            id="${id#pr-validate-}"
+            if [[ ! "$id" =~ ^[a-z0-9_-]+$ ]] || [ ! -f "${dir}comment.md" ]; then
+              echo "::warning::skipping malformed summary $dir"
+              continue
+            fi
+            marker="<!-- iacp-plan:${id} -->"
+            body="$RUNNER_TEMP/comment-${id}.md"
+            { echo "$marker"; grep -v -F '<!-- iacp-plan:' "${dir}comment.md" || true; } > "$body"
+            existing="$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
+              --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id" | head -n1)"
+            if [ -n "$existing" ]; then
+              gh api --method PATCH "repos/$REPO/issues/comments/$existing" -F "body=@$body" --silent
+              echo "updated comment $existing for $id"
+            else
+              gh api --method POST "repos/$REPO/issues/$PR_NUMBER/comments" -F "body=@$body" --silent
+              echo "created comment for $id"
+            fi
+          done
+
+  result:
+    name: pr-validate-result
+    needs: [detect, validate]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require detect to succeed and validate to succeed or skip
+        env:
+          DETECT: ${{ needs.detect.result }}
+          VALIDATE: ${{ needs.validate.result }}
+        run: |
+          echo "detect=$DETECT validate=$VALIDATE"
+          [ "$DETECT" = "success" ] || exit 1
+          [ "$VALIDATE" = "success" ] || [ "$VALIDATE" = "skipped" ] || exit 1

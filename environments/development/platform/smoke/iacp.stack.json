@@ -1,0 +1,17 @@
+{
+  "backend": "local",
+  "depends_on": [],
+  "environment": "development",
+  "fencing_token": 1,
+  "lifecycle": "active",
+  "modules": {
+    "smoke_bucket": {
+      "ref": "modules/s3/v1.0.0",
+      "sha": "681144aafe3b9b0f00601aa921ab681905ab9edb"
+    }
+  },
+  "region": "us-east-1",
+  "request_id": "req-smoke1",
+  "stack": "smoke",
+  "team": "platform"
+}

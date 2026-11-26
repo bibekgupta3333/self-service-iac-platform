@@ -10,6 +10,7 @@ Python developer tooling. Each tool is a small, self-contained package with test
 |------|---------|-------------|
 | `manifest_validator` | Validates `modules/*/module.yaml` against the schema and checks parity with `variables.tf`/`outputs.tf`, and `compatibility` with `required_version`/`required_providers`. | `make validate-manifests` |
 | `module_release` | SemVer interface-diff gate, release notes and catalog indexing for `modules/<name>` (used by `.github/workflows/module-release.yml`). | `make module-gate` |
+| `stack_pipeline` | CI helpers for stack roots under `environments/` (used by `.github/workflows/pr-validate.yml`): `detect` (changed stacks as a JSON matrix, fail-closed), `context` (conftest `--data`), `summary` (sticky PR comment and JSON payload), `verify-pins` (published tag-to-commit check before init; serves unpublished tags from a local mirror only with `--allow-unpublished`), `verify-modules` (installed modules match the pins one to one after init). Pure logic, git and filesystem access in adapters. | `make stack-detect`, `make stack-plan` |
 
 ## module_release
 
