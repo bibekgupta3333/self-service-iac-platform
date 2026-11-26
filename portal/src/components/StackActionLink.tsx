@@ -32,7 +32,6 @@ export function StackActionLink({
       type="button"
       aria-disabled="true"
       aria-describedby={describedBy}
-      onClick={(e) => e.preventDefault()}
       className={`${BASE} cursor-not-allowed bg-slate-200 text-slate-600`}
     >
       {label}
