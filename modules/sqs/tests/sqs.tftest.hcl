@@ -69,11 +69,24 @@ run "secure_defaults" {
   }
 
   assert {
-    condition = alltrue([
-      for k in ["iacp:team", "iacp:environment", "iacp:stack", "iacp:managed-by"] :
-      contains(keys(aws_sqs_queue.this.tags_all), k) && contains(keys(aws_sqs_queue.dlq.tags_all), k)
-    ])
-    error_message = "Both queues must carry every mandatory iacp:* tag."
+    condition     = { for k, v in aws_sqs_queue.this.tags_all : k => v if startswith(k, "iacp:") } == { "iacp:team" = "platform", "iacp:environment" = "development", "iacp:stack" = "tftest", "iacp:managed-by" = "iacp", "iacp:module" = "sqs" }
+    error_message = "The main queue must carry exactly the platform tags with the stack's values."
+  }
+
+  assert {
+    condition     = { for k, v in aws_sqs_queue.dlq.tags_all : k => v if startswith(k, "iacp:") } == { "iacp:team" = "platform", "iacp:environment" = "development", "iacp:stack" = "tftest", "iacp:managed-by" = "iacp", "iacp:module" = "sqs", "iacp:role" = "dlq" }
+    error_message = "The DLQ must carry the platform tags with the stack's values plus iacp:role=dlq."
+  }
+
+  assert {
+    condition     = { for k, v in aws_kms_key.this[0].tags_all : k => v if startswith(k, "iacp:") } == { "iacp:team" = "platform", "iacp:environment" = "development", "iacp:stack" = "tftest", "iacp:managed-by" = "iacp", "iacp:module" = "sqs" }
+    error_message = "The KMS key must carry the platform tags with the stack's values."
+  }
+
+
+  assert {
+    condition     = length(jsondecode(aws_kms_key.this[0].policy).Statement) == 1
+    error_message = "Without key_service_principals the key policy must only trust the account."
   }
 
   assert {
@@ -126,6 +139,50 @@ run "fifo_queues" {
     condition     = jsondecode(aws_sqs_queue.this.redrive_policy).maxReceiveCount == 3
     error_message = "max_receive_count must flow into the redrive policy."
   }
+}
+
+# LocalStack 4.4 does not persist CloudWatch alarm tags, so alarm tags are
+# asserted on planned values (what the policy gate sees) instead of state.
+run "planned_alarm_tags" {
+  command = plan
+
+  variables {
+    name = "tftest-sqs-alarms"
+  }
+
+  assert {
+    condition = alltrue([
+      for tags in [aws_cloudwatch_metric_alarm.dlq_not_empty.tags, aws_cloudwatch_metric_alarm.oldest_message_age.tags] :
+      { for k, v in tags : k => v if startswith(k, "iacp:") } == { "iacp:team" = "platform", "iacp:environment" = "development", "iacp:stack" = "tftest", "iacp:managed-by" = "iacp", "iacp:module" = "sqs" }
+    ])
+    error_message = "Both alarms must be configured with the platform tags and the stack's values."
+  }
+}
+
+run "key_service_principals" {
+  command = plan
+
+  variables {
+    key_service_principals = ["sns.amazonaws.com", "events.amazonaws.com"]
+  }
+
+  assert {
+    condition = anytrue([
+      for s in jsondecode(data.aws_iam_policy_document.kms[0].json).Statement :
+      s.Sid == "ServicePrincipalsForThisAccount" && toset(flatten([s.Principal.Service])) == toset(["sns.amazonaws.com", "events.amazonaws.com"])
+    ])
+    error_message = "key_service_principals must be granted in a dedicated key policy statement."
+  }
+}
+
+run "rejects_invalid_service_principal" {
+  command = plan
+
+  variables {
+    key_service_principals = ["*"]
+  }
+
+  expect_failures = [var.key_service_principals]
 }
 
 run "rejects_invalid_name" {
