@@ -25,6 +25,9 @@ type Principal struct {
 	UserID uuid.UUID // users.id; uuid.Nil for non-user callers
 	Login  string    // GitHub login, or workflow ref for Actions callers
 	Type   ActorType
+	// PlatformAdmin is true for platform-wide admins (users.is_platform_admin) and for the
+	// fixed user of dev auth mode. It gates platform-scoped routes (rbac.ActionAuditViewAll).
+	PlatformAdmin bool
 	// Workflow is set when the caller proved a GitHub Actions OIDC identity. Callers
 	// using the shared internal token have none.
 	Workflow *Workflow
