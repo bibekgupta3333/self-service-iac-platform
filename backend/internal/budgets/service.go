@@ -15,6 +15,10 @@ type Repository interface {
 	// MonthlyBudget returns the team's budget for month, preferring a row for env over a
 	// team-wide row; nil when the team has none (or the team is unknown).
 	MonthlyBudget(ctx context.Context, team, env string, month time.Time) (*Budget, error)
+	// CommittedUSD sums the committed monthly cost of the team's active (not destroyed) stacks,
+	// leaving out the stack at excludePath (the one being changed). env limits it to one
+	// environment ("" counts every environment, for a team-wide budget).
+	CommittedUSD(ctx context.Context, team, env, excludePath string) (float64, error)
 	// YankedVersions lists every yanked module version, including all versions of a
 	// yanked module.
 	YankedVersions(ctx context.Context) ([]YankedVersion, error)
@@ -47,6 +51,15 @@ func (s *Service) Context(ctx context.Context, path string) (Document, error) {
 	budget, err := s.repo.MonthlyBudget(ctx, ref.Team, ref.Environment, MonthOf(now))
 	if err != nil {
 		return Document{}, fmt.Errorf("budget context: %w", err)
+	}
+	if budget != nil {
+		scope := ""
+		if budget.Scope == ScopeEnvironment {
+			scope = ref.Environment
+		}
+		if budget.CommittedUSD, err = s.repo.CommittedUSD(ctx, ref.Team, scope, ref.Path()); err != nil {
+			return Document{}, fmt.Errorf("budget context: %w", err)
+		}
 	}
 	yanked, err := s.repo.YankedVersions(ctx)
 	if err != nil {

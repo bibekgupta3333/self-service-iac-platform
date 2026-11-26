@@ -83,14 +83,20 @@ type Budget struct {
 	HardBlock bool
 	Scope     Scope
 	Override  *Override // an admin override, nil when none was granted
+	// SingleChangeCapUSD is the monthly cost above which one stack is denied whatever the headroom.
+	SingleChangeCapUSD float64
+	// CommittedUSD is the committed monthly cost of the team's other active stacks in the budget's
+	// scope (see Repository.CommittedUSD); set by Service.Context, not by MonthlyBudget.
+	CommittedUSD float64
 }
 
-// Override is an admin's waiver of the budget's hard limit until ExpiresAt. The policy
-// ignores it in production (docs/07 section 6.7).
+// Override is an admin's waiver of the budget's hard limit until ExpiresAt, for a change that
+// adds at most MaxDeltaUSD per month. The policy ignores it in production (docs/07 section 6.7).
 type Override struct {
-	GrantedBy string // GitHub login of the admin
-	Reason    string
-	ExpiresAt time.Time
+	GrantedBy   string // GitHub login of the admin
+	Reason      string
+	ExpiresAt   time.Time
+	MaxDeltaUSD float64
 }
 
 // YankedVersion is a module version that must not be newly deployed.
@@ -111,13 +117,16 @@ type Document struct {
 
 // Context is data.iacp.context (docs/07 §6.1).
 type Context struct {
-	Environment          string             `json:"environment"`
-	Team                 string             `json:"team"`
-	Stack                string             `json:"stack"`
-	StackPath            string             `json:"stack_path"`
-	AllowedRegions       []string           `json:"allowed_regions"`
-	Budget               *BudgetDTO         `json:"budget"`
-	BudgetOverride       *OverrideDTO       `json:"budget_override"` // null unless an admin granted one
+	Environment    string       `json:"environment"`
+	Team           string       `json:"team"`
+	Stack          string       `json:"stack"`
+	StackPath      string       `json:"stack_path"`
+	AllowedRegions []string     `json:"allowed_regions"`
+	Budget         *BudgetDTO   `json:"budget"`
+	BudgetOverride *OverrideDTO `json:"budget_override"` // null unless an admin granted one
+	// CurrentCommittedUSD is the committed monthly cost of the team's other active stacks in the
+	// budget's scope; present only with a budget. budget.rego counts it as already used.
+	CurrentCommittedUSD  *float64           `json:"current_committed_usd,omitempty"`
 	Exceptions           []ExceptionDTO     `json:"exceptions"`
 	YankedModuleVersions []YankedVersionDTO `json:"yanked_module_versions"`
 	Now                  string             `json:"now"`
@@ -133,13 +142,16 @@ type BudgetDTO struct {
 	ActualUSD *float64 `json:"actual_usd"`
 	HardBlock bool     `json:"hard_block"`
 	Scope     Scope    `json:"scope"`
+	// SingleChangeCapUSD denies one stack costing more per month than this, whatever the headroom.
+	SingleChangeCapUSD float64 `json:"single_change_cap_usd"`
 }
 
 // OverrideDTO is the budget override as the policies see it.
 type OverrideDTO struct {
-	GrantedBy string `json:"granted_by"`
-	Reason    string `json:"reason"`
-	ExpiresAt string `json:"expires_at"` // RFC 3339, UTC
+	GrantedBy   string  `json:"granted_by"`
+	Reason      string  `json:"reason"`
+	ExpiresAt   string  `json:"expires_at"` // RFC 3339, UTC
+	MaxDeltaUSD float64 `json:"max_delta_usd"`
 }
 
 // ExceptionDTO is an approved policy exception (none are served until policy
@@ -173,10 +185,13 @@ func BuildContext(ref StackRef, env Environment, budget *Budget, yanked []Yanked
 	}
 	if budget != nil {
 		c.Budget = &BudgetDTO{Month: budget.Month.Format("2006-01"), LimitUSD: budget.LimitUSD,
-			SpentUSD: budget.SpentUSD, ActualUSD: budget.ActualUSD, HardBlock: budget.HardBlock, Scope: budget.Scope}
+			SpentUSD: budget.SpentUSD, ActualUSD: budget.ActualUSD, HardBlock: budget.HardBlock, Scope: budget.Scope,
+			SingleChangeCapUSD: budget.SingleChangeCapUSD}
+		committed := budget.CommittedUSD
+		c.CurrentCommittedUSD = &committed
 		if o := budget.Override; o != nil {
 			c.BudgetOverride = &OverrideDTO{GrantedBy: o.GrantedBy, Reason: o.Reason,
-				ExpiresAt: o.ExpiresAt.UTC().Format(time.RFC3339)}
+				ExpiresAt: o.ExpiresAt.UTC().Format(time.RFC3339), MaxDeltaUSD: o.MaxDeltaUSD}
 		}
 	}
 	d.IACP.Context = c

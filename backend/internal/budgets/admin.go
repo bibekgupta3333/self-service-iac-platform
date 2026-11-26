@@ -38,6 +38,9 @@ const (
 	MaxOverrideTTL = 31 * 24 * time.Hour
 	// MaxThresholds bounds the alert threshold list.
 	MaxThresholds = 10
+	// DefaultSingleChangeCapUSD is the monthly cost above which one stack is denied whatever
+	// the headroom, unless the budget sets another cap.
+	DefaultSingleChangeCapUSD = 5000
 )
 
 // DefaultThresholds are the alert thresholds (percent of the limit) used when none are given.
@@ -53,7 +56,11 @@ type SetInput struct {
 	// HardBlock defaults to true: exceeding the limit denies the change.
 	HardBlock       *bool `json:"hard_block"`
 	AlertThresholds []int `json:"alert_thresholds"`
+	// SingleChangeCapUSD denies one stack whose monthly cost exceeds it, whatever the headroom
+	// (budget.rego); default 5000, 0 to 1,000,000.
+	SingleChangeCapUSD *float64 `json:"single_change_cap_usd"`
 	// Override grants the admin override (see Override); omitting it clears any granted one.
+	// It is refused on a production-scoped budget, where it would never apply.
 	Override *OverrideInput `json:"override"`
 }
 
@@ -61,6 +68,9 @@ type SetInput struct {
 type OverrideInput struct {
 	Reason    string    `json:"reason"`
 	ExpiresAt time.Time `json:"expires_at"`
+	// MaxDeltaUSD bounds the override: it waives the hard limit only for a stack whose monthly
+	// cost is at most this (required, above 0 and at most MaxLimitUSD).
+	MaxDeltaUSD *float64 `json:"max_delta_usd"`
 }
 
 // Write is a validated SetInput: what the repository stores.
@@ -71,13 +81,15 @@ type Write struct {
 	LimitCents  int64
 	HardBlock   bool
 	Thresholds  []int
+	CapCents    int64 // single-change cap
 	Override    *OverrideWrite
 }
 
 // OverrideWrite is a validated override.
 type OverrideWrite struct {
-	Reason    string
-	ExpiresAt time.Time
+	Reason        string
+	ExpiresAt     time.Time
+	MaxDeltaCents int64
 }
 
 // Setting is a stored budget as the admin API shows it.
@@ -91,9 +103,11 @@ type Setting struct {
 	ActualUSD       *float64
 	HardBlock       bool
 	AlertThresholds []int
-	Override        *Override
-	UpdatedBy       string // login, "" when never set through the API
-	UpdatedAt       time.Time
+	// SingleChangeCapUSD is the per-stack monthly ceiling budget.rego applies.
+	SingleChangeCapUSD float64
+	Override           *Override
+	UpdatedBy          string // login, "" when never set through the API
+	UpdatedAt          time.Time
 }
 
 // UsedUSD is what counts as already spent: the larger of the committed estimate and the
@@ -171,7 +185,8 @@ func NewWrite(team, month string, in SetInput, now time.Time) (Write, error) {
 	if err := checkMonth(m, now); err != nil {
 		return Write{}, err
 	}
-	w := Write{Team: team, Month: m, HardBlock: true, Thresholds: slices.Clone(DefaultThresholds)}
+	w := Write{Team: team, Month: m, HardBlock: true, Thresholds: slices.Clone(DefaultThresholds),
+		CapCents: DefaultSingleChangeCapUSD * 100}
 	var bad []apperr.FieldError
 
 	switch {
@@ -207,7 +222,19 @@ func NewWrite(team, month string, in SetInput, now time.Time) (Write, error) {
 			w.Thresholds = t
 		}
 	}
+	if in.SingleChangeCapUSD != nil {
+		if c, ok := Cents(*in.SingleChangeCapUSD, MaxLimitUSD); ok {
+			w.CapCents = c
+		} else {
+			bad = append(bad, fieldErr("/single_change_cap_usd", "out_of_range", fmt.Sprintf(
+				"single_change_cap_usd must be between 0 and %d with at most two decimals", MaxLimitUSD)))
+		}
+	}
 	if in.Override != nil {
+		if w.Environment == "production" {
+			bad = append(bad, fieldErr("/override", "override_not_allowed",
+				"an override never applies in production: raise limit_usd instead (audited), or omit the override"))
+		}
 		o, fe := newOverride(*in.Override, now)
 		bad = append(bad, fe...)
 		w.Override = o
@@ -243,10 +270,19 @@ func newOverride(in OverrideInput, now time.Time) (*OverrideWrite, []apperr.Fiel
 		bad = append(bad, fieldErr("/override/expires_at", "invalid_expiry",
 			"expires_at must be in the future and no more than 31 days away"))
 	}
+	var delta int64
+	if in.MaxDeltaUSD == nil {
+		bad = append(bad, fieldErr("/override/max_delta_usd", "required", "max_delta_usd bounds the override and is required"))
+	} else if c, ok := Cents(*in.MaxDeltaUSD, MaxLimitUSD); !ok || c == 0 {
+		bad = append(bad, fieldErr("/override/max_delta_usd", "out_of_range", fmt.Sprintf(
+			"max_delta_usd must be above 0 and at most %d with at most two decimals", MaxLimitUSD)))
+	} else {
+		delta = c
+	}
 	if len(bad) > 0 {
 		return nil, bad
 	}
-	return &OverrideWrite{Reason: reason, ExpiresAt: exp}, nil
+	return &OverrideWrite{Reason: reason, ExpiresAt: exp, MaxDeltaCents: delta}, nil
 }
 
 // ActualInput is the POST /v1/internal/budget-actuals body.
@@ -298,12 +334,50 @@ func NewActualWrite(in ActualInput, now time.Time) (ActualWrite, error) {
 	return ActualWrite{Team: in.Team, Environment: in.Environment, Month: m, ActualCents: cents}, nil
 }
 
+// CommittedInput is the POST /v1/internal/budget-committed body: the committed monthly cost of one
+// stack, which the team-wide total in the budget context is summed from.
+type CommittedInput struct {
+	StackPath  string   `json:"stack_path"`
+	MonthlyUSD *float64 `json:"monthly_usd"`
+}
+
+// CommittedWrite is a validated CommittedInput.
+type CommittedWrite struct {
+	Stack        StackRef
+	MonthlyCents int64
+}
+
+// MaxCommittedUSD bounds one stack's committed monthly cost.
+const MaxCommittedUSD = 10 * MaxLimitUSD
+
+// NewCommittedWrite validates a CommittedInput. Pure.
+func NewCommittedWrite(in CommittedInput) (CommittedWrite, error) {
+	var bad []apperr.FieldError
+	ref, err := ParseStackPath(in.StackPath)
+	if err != nil {
+		bad = append(bad, fieldErr("/stack_path", "invalid_stack_path", "stack_path must be environments/<environment>/<team>/<stack>"))
+	}
+	var cents int64
+	if in.MonthlyUSD == nil {
+		bad = append(bad, fieldErr("/monthly_usd", "required", "monthly_usd is required"))
+	} else if c, ok := Cents(*in.MonthlyUSD, MaxCommittedUSD); !ok {
+		bad = append(bad, fieldErr("/monthly_usd", "out_of_range", "monthly_usd must be a non-negative amount with at most two decimals"))
+	} else {
+		cents = c
+	}
+	if len(bad) > 0 {
+		return CommittedWrite{}, apperr.Invalid("validation_failed", "the committed cost is invalid", bad...)
+	}
+	return CommittedWrite{Stack: ref, MonthlyCents: cents}, nil
+}
+
 // Audit actions.
 const (
 	ActionSet             = "budget.set"
 	ActionOverrideGranted = "budget.override.granted"
 	ActionOverrideRevoked = "budget.override.revoked"
 	ActionActualRecorded  = "budget.actual.recorded"
+	ActionCommittedSet    = "stack.cost.committed"
 )
 
 func scopeName(env string) string {
@@ -326,22 +400,35 @@ func AuditEvents(w Write, ch Change, by identity.Principal, correlationID string
 	}
 	set := map[string]any{"team": w.Team, "month": w.Month.Format("2006-01"), "environment": scopeName(w.Environment),
 		"limit_usd": FormatCents(w.LimitCents), "hard_block": w.HardBlock, "alert_thresholds": w.Thresholds,
-		"created": ch.Before == nil}
+		"single_change_cap_usd": FormatCents(w.CapCents), "created": ch.Before == nil}
 	if ch.Before != nil {
 		set["previous_limit_usd"] = FormatCents(int64(math.Round(ch.Before.LimitUSD * 100)))
 		set["previous_hard_block"] = ch.Before.HardBlock
 	}
 	events := []audit.Event{mk(ActionSet, set)}
 	switch {
-	case w.Override != nil:
+	case w.Override != nil && !sameOverride(ch.Before, w.Override):
 		events = append(events, mk(ActionOverrideGranted, map[string]any{"team": w.Team,
 			"month": w.Month.Format("2006-01"), "environment": scopeName(w.Environment),
-			"reason": w.Override.Reason, "expires_at": w.Override.ExpiresAt.Format(time.RFC3339)}))
+			"reason": w.Override.Reason, "expires_at": w.Override.ExpiresAt.Format(time.RFC3339),
+			"max_delta_usd": FormatCents(w.Override.MaxDeltaCents)}))
+	case w.Override != nil:
+		// The same override sent again: nothing was granted, so nothing is audited as granted.
 	case ch.Before != nil && ch.Before.Override != nil:
 		events = append(events, mk(ActionOverrideRevoked, map[string]any{"team": w.Team,
 			"month": w.Month.Format("2006-01"), "environment": scopeName(w.Environment)}))
 	}
 	return events
+}
+
+// sameOverride reports whether the stored budget already carries exactly override o (the repository
+// then keeps the original grantor). Pure.
+func sameOverride(before *Setting, o *OverrideWrite) bool {
+	if before == nil || before.Override == nil || o == nil {
+		return false
+	}
+	b := before.Override
+	return b.Reason == o.Reason && b.ExpiresAt.Equal(o.ExpiresAt) && int64(math.Round(b.MaxDeltaUSD*100)) == o.MaxDeltaCents
 }
 
 // ActualAuditEvent is the audit event for a recorded actual. The repository adds TeamID. Pure.
@@ -350,6 +437,13 @@ func ActualAuditEvent(a ActualWrite, s Setting, by identity.Principal, correlati
 		"environment": scopeName(a.Environment), "actual_usd": FormatCents(a.ActualCents)})
 	return audit.Event{OccurredAt: at, ActorType: string(by.Type), ActorID: by.AuditActorID(), Action: ActionActualRecorded,
 		SubjectType: "budget", SubjectID: s.ID.String(), CorrelationID: correlationID, Payload: payload}
+}
+
+// CommittedAuditEvent is the audit event for a recorded committed cost. The repository adds TeamID. Pure.
+func CommittedAuditEvent(c CommittedWrite, stackID uuid.UUID, by identity.Principal, correlationID string, at time.Time) audit.Event {
+	payload, _ := json.Marshal(map[string]any{"stack_path": c.Stack.Path(), "monthly_usd": FormatCents(c.MonthlyCents)})
+	return audit.Event{OccurredAt: at, ActorType: string(by.Type), ActorID: by.AuditActorID(), Action: ActionCommittedSet,
+		SubjectType: "stack", SubjectID: stackID.String(), CorrelationID: correlationID, Payload: payload}
 }
 
 // AdminRepository is the persistence port of the admin API. Set and RecordActual change the
@@ -363,6 +457,9 @@ type AdminRepository interface {
 	List(ctx context.Context, team string, month *time.Time) ([]Setting, error)
 	// RecordActual sets actual_usd of an existing budget (apperr NotFound when there is none).
 	RecordActual(ctx context.Context, a ActualWrite, by identity.Principal, correlationID string) (Setting, error)
+	// RecordCommitted sets the committed monthly cost of an existing, not destroyed stack (apperr
+	// NotFound when there is none) and returns its id.
+	RecordCommitted(ctx context.Context, c CommittedWrite, by identity.Principal, correlationID string) (uuid.UUID, error)
 }
 
 // AdminService is the budget administration use case.
@@ -419,6 +516,19 @@ func (s *AdminService) List(ctx context.Context, by identity.Principal, team, mo
 		m = &t
 	}
 	return s.repo.List(ctx, team, m)
+}
+
+// RecordCommitted stores one stack's committed monthly cost. Like RecordActual its caller is a machine
+// holding the shared token, so no team role applies.
+func (s *AdminService) RecordCommitted(ctx context.Context, by identity.Principal, in CommittedInput, correlationID string) (CommittedWrite, error) {
+	c, err := NewCommittedWrite(in)
+	if err != nil {
+		return CommittedWrite{}, err
+	}
+	if _, err := s.repo.RecordCommitted(ctx, c, by, correlationID); err != nil {
+		return CommittedWrite{}, err
+	}
+	return c, nil
 }
 
 // RecordActual stores the actual spend of an existing budget. The caller is a machine

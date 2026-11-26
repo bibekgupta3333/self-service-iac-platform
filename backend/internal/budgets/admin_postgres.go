@@ -57,7 +57,7 @@ func (r *PostgresAdminRepository) RoleInTeam(ctx context.Context, team string, u
 const settingSelect = `
 	SELECT b.id, t.slug, coalesce(e.name::text, ''), b.month, b.limit_usd::float8, b.spent_usd::float8, b.actual_usd::float8,
 	       b.hard_block, b.alert_thresholds, o.github_login::text, b.override_reason, b.override_expires_at,
-	       u.github_login::text, b.updated_at
+	       b.override_max_delta_usd::float8, u.github_login::text, b.updated_at, b.single_change_cap_usd::float8
 	FROM budgets b
 	JOIN teams t ON t.id = b.team_id
 	LEFT JOIN environments e ON e.id = b.environment_id
@@ -71,10 +71,11 @@ func scanSetting(row pgx.Row) (Setting, error) {
 		ovBy   *string
 		ovWhy  *string
 		ovExp  *time.Time
+		ovMax  *float64
 		byName *string
 	)
 	err := row.Scan(&s.ID, &s.Team, &s.Environment, &s.Month, &s.LimitUSD, &s.SpentUSD, &s.ActualUSD, &s.HardBlock,
-		&thr, &ovBy, &ovWhy, &ovExp, &byName, &s.UpdatedAt)
+		&thr, &ovBy, &ovWhy, &ovExp, &ovMax, &byName, &s.UpdatedAt, &s.SingleChangeCapUSD)
 	if err != nil {
 		return Setting{}, err
 	}
@@ -82,8 +83,8 @@ func scanSetting(row pgx.Row) (Setting, error) {
 	for _, t := range thr {
 		s.AlertThresholds = append(s.AlertThresholds, int(t))
 	}
-	if ovBy != nil && ovWhy != nil && ovExp != nil {
-		s.Override = &Override{GrantedBy: *ovBy, Reason: *ovWhy, ExpiresAt: ovExp.UTC()}
+	if ovBy != nil && ovWhy != nil && ovExp != nil && ovMax != nil {
+		s.Override = &Override{GrantedBy: *ovBy, Reason: *ovWhy, ExpiresAt: ovExp.UTC(), MaxDeltaUSD: *ovMax}
 	}
 	if byName != nil {
 		s.UpdatedBy = *byName
@@ -152,22 +153,33 @@ func (r *PostgresAdminRepository) Set(ctx context.Context, w Write, by identity.
 		var ovBy *uuid.UUID
 		var ovWhy *string
 		var ovExp *time.Time
+		var ovMax *int64
 		if w.Override != nil {
-			ovBy, ovWhy, ovExp = &by.UserID, &w.Override.Reason, &w.Override.ExpiresAt
+			ovBy, ovWhy, ovExp, ovMax = &by.UserID, &w.Override.Reason, &w.Override.ExpiresAt, &w.Override.MaxDeltaCents
 		}
 		now := r.clock.Now()
 		if id == uuid.Nil {
 			err = tx.QueryRow(ctx, `
 				INSERT INTO budgets (team_id, environment_id, month, limit_usd, alert_thresholds, hard_block,
-				                     override_by, override_reason, override_expires_at, created_by, updated_by, updated_at)
-				VALUES ($1, $2, $3::date, $4::numeric / 100, $5, $6, $7, $8, $9, $10, $10, $11)
+				                     override_by, override_reason, override_expires_at, override_max_delta_usd,
+				                     single_change_cap_usd, created_by, updated_by, updated_at)
+				VALUES ($1, $2, $3::date, $4::numeric / 100, $5, $6, $7, $8, $9, $10::numeric / 100, $11::numeric / 100,
+				        $12, $12, $13)
 				RETURNING id`, teamID, envID, w.Month, w.LimitCents, w.Thresholds, w.HardBlock,
-				ovBy, ovWhy, ovExp, by.UserID, now).Scan(&id)
+				ovBy, ovWhy, ovExp, ovMax, w.CapCents, by.UserID, now).Scan(&id)
 		} else {
+			// The same override sent again keeps its original grantor; clearing it clears the grantor.
 			_, err = tx.Exec(ctx, `
 				UPDATE budgets SET limit_usd = $2::numeric / 100, alert_thresholds = $3, hard_block = $4,
-				       override_by = $5, override_reason = $6, override_expires_at = $7, updated_by = $8, updated_at = $9
-				WHERE id = $1`, id, w.LimitCents, w.Thresholds, w.HardBlock, ovBy, ovWhy, ovExp, by.UserID, now)
+				       override_by = CASE WHEN $5::uuid IS NULL THEN NULL
+				                          WHEN override_reason IS NOT DISTINCT FROM $6
+				                           AND override_expires_at IS NOT DISTINCT FROM $7::timestamptz
+				                           AND override_max_delta_usd IS NOT DISTINCT FROM $8::numeric / 100 THEN override_by
+				                          ELSE $5 END,
+				       override_reason = $6, override_expires_at = $7, override_max_delta_usd = $8::numeric / 100,
+				       single_change_cap_usd = $9::numeric / 100, updated_by = $10, updated_at = $11
+				WHERE id = $1`, id, w.LimitCents, w.Thresholds, w.HardBlock, ovBy, ovWhy, ovExp, ovMax, w.CapCents,
+				by.UserID, now)
 		}
 		if err != nil {
 			return fmt.Errorf("store budget: %w", err)
@@ -203,6 +215,30 @@ func (r *PostgresAdminRepository) List(ctx context.Context, team string, month *
 		return nil, fmt.Errorf("list budgets: %w", err)
 	}
 	return out, nil
+}
+
+// RecordCommitted implements AdminRepository.
+func (r *PostgresAdminRepository) RecordCommitted(ctx context.Context, c CommittedWrite, by identity.Principal, correlationID string) (uuid.UUID, error) {
+	var stackID uuid.UUID
+	err := r.tx.InTx(ctx, func(tx pgx.Tx) error {
+		now := r.clock.Now()
+		var teamID uuid.UUID
+		err := tx.QueryRow(ctx, `
+			UPDATE stacks SET committed_monthly_usd = $2::numeric / 100, committed_at = $3
+			WHERE path = $1 AND status <> 'destroyed'
+			RETURNING id, team_id`, c.Stack.Path(), c.MonthlyCents, now).Scan(&stackID, &teamID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apperr.NotFound("no active stack at %s", c.Stack.Path())
+		}
+		if err != nil {
+			return fmt.Errorf("record committed cost: %w", err)
+		}
+		return r.appendAll(ctx, tx, teamID, []audit.Event{CommittedAuditEvent(c, stackID, by, correlationID, now)})
+	})
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return stackID, nil
 }
 
 // RecordActual implements AdminRepository.

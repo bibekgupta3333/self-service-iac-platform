@@ -67,7 +67,7 @@ func TestNewWriteDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w.LimitCents != 200000 || !w.HardBlock || w.Environment != "" || w.Override != nil ||
+	if w.LimitCents != 200000 || !w.HardBlock || w.Environment != "" || w.Override != nil || w.CapCents != 500000 ||
 		len(w.Thresholds) != 3 || w.Thresholds[1] != 80 {
 		t.Fatalf("write = %+v", w)
 	}
@@ -80,16 +80,16 @@ func TestNewWriteDefaults(t *testing.T) {
 func TestNewWriteFull(t *testing.T) {
 	exp := now.Add(48 * time.Hour)
 	w, err := NewWrite("payments", "2026-12", SetInput{
-		Environment: ptr("production"), LimitUSD: ptr(1234.56), Currency: "USD", HardBlock: ptr(false),
+		Environment: ptr("staging"), LimitUSD: ptr(1234.56), Currency: "USD", HardBlock: ptr(false), SingleChangeCapUSD: ptr(800.25),
 		AlertThresholds: []int{100, 50, 50, 120},
-		Override:        &OverrideInput{Reason: "  launch week capacity ok  ", ExpiresAt: exp},
+		Override:        &OverrideInput{MaxDeltaUSD: ptr(750.0), Reason: "  launch week capacity ok  ", ExpiresAt: exp},
 	}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w.Environment != "production" || w.LimitCents != 123456 || w.HardBlock ||
+	if w.Environment != "staging" || w.LimitCents != 123456 || w.HardBlock || w.CapCents != 80025 ||
 		len(w.Thresholds) != 3 || w.Thresholds[0] != 50 || w.Thresholds[2] != 120 ||
-		w.Override == nil || w.Override.Reason != "launch week capacity ok" || !w.Override.ExpiresAt.Equal(exp) {
+		w.Override == nil || w.Override.Reason != "launch week capacity ok" || !w.Override.ExpiresAt.Equal(exp) || w.Override.MaxDeltaCents != 75000 {
 		t.Fatalf("write = %+v", w)
 	}
 }
@@ -111,17 +111,34 @@ func TestNewWriteRejects(t *testing.T) {
 		"threshold huge":     {func(i *SetInput) { i.AlertThresholds = []int{201} }, "/alert_thresholds"},
 		"too many":           {func(i *SetInput) { i.AlertThresholds = []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11} }, "/alert_thresholds"},
 		"short reason": {func(i *SetInput) {
-			i.Override = &OverrideInput{Reason: "because", ExpiresAt: now.Add(time.Hour)}
+			i.Override = &OverrideInput{MaxDeltaUSD: ptr(750.0), Reason: "because", ExpiresAt: now.Add(time.Hour)}
 		}, "/override/reason"},
 		"long reason": {func(i *SetInput) {
-			i.Override = &OverrideInput{Reason: strings.Repeat("x", 501), ExpiresAt: now.Add(time.Hour)}
+			i.Override = &OverrideInput{MaxDeltaUSD: ptr(750.0), Reason: strings.Repeat("x", 501), ExpiresAt: now.Add(time.Hour)}
 		}, "/override/reason"},
 		"expired override": {func(i *SetInput) {
-			i.Override = &OverrideInput{Reason: strings.Repeat("x", 20), ExpiresAt: now.Add(-time.Hour)}
+			i.Override = &OverrideInput{MaxDeltaUSD: ptr(750.0), Reason: strings.Repeat("x", 20), ExpiresAt: now.Add(-time.Hour)}
 		}, "/override/expires_at"},
-		"no expiry": {func(i *SetInput) { i.Override = &OverrideInput{Reason: strings.Repeat("x", 20)} }, "/override/expires_at"},
+		"cap negative":  {func(i *SetInput) { i.SingleChangeCapUSD = ptr(-1.0) }, "/single_change_cap_usd"},
+		"cap too large": {func(i *SetInput) { i.SingleChangeCapUSD = ptr(1000000.01) }, "/single_change_cap_usd"},
+		"override on a production budget": {func(i *SetInput) {
+			i.Environment = ptr("production")
+			i.Override = &OverrideInput{MaxDeltaUSD: ptr(750.0), Reason: strings.Repeat("x", 20), ExpiresAt: now.Add(time.Hour)}
+		}, "/override"},
+		"override without a bound": {func(i *SetInput) {
+			i.Override = &OverrideInput{Reason: strings.Repeat("x", 20), ExpiresAt: now.Add(time.Hour)}
+		}, "/override/max_delta_usd"},
+		"override bound zero": {func(i *SetInput) {
+			i.Override = &OverrideInput{MaxDeltaUSD: ptr(0.0), Reason: strings.Repeat("x", 20), ExpiresAt: now.Add(time.Hour)}
+		}, "/override/max_delta_usd"},
+		"override bound too large": {func(i *SetInput) {
+			i.Override = &OverrideInput{MaxDeltaUSD: ptr(1000000.01), Reason: strings.Repeat("x", 20), ExpiresAt: now.Add(time.Hour)}
+		}, "/override/max_delta_usd"},
+		"no expiry": {func(i *SetInput) {
+			i.Override = &OverrideInput{MaxDeltaUSD: ptr(750.0), Reason: strings.Repeat("x", 20)}
+		}, "/override/expires_at"},
 		"override too long": {func(i *SetInput) {
-			i.Override = &OverrideInput{Reason: strings.Repeat("x", 20), ExpiresAt: now.Add(MaxOverrideTTL + time.Hour)}
+			i.Override = &OverrideInput{MaxDeltaUSD: ptr(750.0), Reason: strings.Repeat("x", 20), ExpiresAt: now.Add(MaxOverrideTTL + time.Hour)}
 		}, "/override/expires_at"},
 	} {
 		in := valid()
@@ -210,13 +227,29 @@ func TestAuditEvents(t *testing.T) {
 	}
 
 	grant := create
-	grant.Override = &OverrideWrite{Reason: "launch week capacity ok", ExpiresAt: exp}
+	grant.Override = &OverrideWrite{Reason: "launch week capacity ok", ExpiresAt: exp, MaxDeltaCents: 75000}
 	evs = AuditEvents(grant, Change{Before: &Setting{LimitUSD: 1000, HardBlock: false}, After: Setting{ID: id}}, by, "", now)
 	if len(evs) != 2 || evs[1].Action != ActionOverrideGranted || !strings.Contains(string(evs[1].Payload), "launch week capacity ok") {
 		t.Fatalf("grant events = %+v", evs)
 	}
 	if err := json.Unmarshal(evs[0].Payload, &p); err != nil || p["previous_limit_usd"] != "1000.00" || p["created"] != false {
 		t.Fatalf("update payload = %s", evs[0].Payload)
+	}
+
+	if !strings.Contains(string(evs[1].Payload), `"max_delta_usd":"750.00"`) {
+		t.Fatalf("grant payload lacks the bound: %s", evs[1].Payload)
+	}
+	// The same override sent again grants nothing new: one event only.
+	same := Change{Before: &Setting{LimitUSD: 1000, Override: &Override{GrantedBy: "ada", Reason: "launch week capacity ok",
+		ExpiresAt: exp, MaxDeltaUSD: 750}}, After: Setting{ID: id}}
+	if evs = AuditEvents(grant, same, by, "", now); len(evs) != 1 || evs[0].Action != ActionSet {
+		t.Fatalf("re-sent override events = %+v", evs)
+	}
+	// Any change to it is a new grant.
+	changed := grant
+	changed.Override = &OverrideWrite{Reason: "launch week capacity ok", ExpiresAt: exp, MaxDeltaCents: 80000}
+	if evs = AuditEvents(changed, same, by, "", now); len(evs) != 2 || evs[1].Action != ActionOverrideGranted {
+		t.Fatalf("changed override events = %+v", evs)
 	}
 
 	evs = AuditEvents(create, Change{Before: &Setting{Override: &Override{GrantedBy: "x"}}, After: Setting{ID: id}}, by, "", now)
@@ -237,6 +270,9 @@ type fakeAdminRepo struct {
 	roleEr error
 	set    []Write
 	listed []string
+
+	committed []CommittedWrite
+	commitErr error
 }
 
 func (f *fakeAdminRepo) RoleInTeam(context.Context, string, uuid.UUID) (rbac.Role, error) {
@@ -251,6 +287,11 @@ func (f *fakeAdminRepo) Set(_ context.Context, w Write, _ identity.Principal, _ 
 func (f *fakeAdminRepo) List(_ context.Context, team string, _ *time.Time) ([]Setting, error) {
 	f.listed = append(f.listed, team)
 	return []Setting{{Team: team}}, nil
+}
+
+func (f *fakeAdminRepo) RecordCommitted(_ context.Context, c CommittedWrite, _ identity.Principal, _ string) (uuid.UUID, error) {
+	f.committed = append(f.committed, c)
+	return uuid.New(), f.commitErr
 }
 
 func (f *fakeAdminRepo) RecordActual(_ context.Context, a ActualWrite, _ identity.Principal, _ string) (Setting, error) {
@@ -302,5 +343,48 @@ func TestAdminServiceRecordActualNeedsNoRole(t *testing.T) {
 		Team: "payments", Month: "2026-11", ActualUSD: ptr(12.34)}, "")
 	if err != nil || s.ActualUSD == nil || *s.ActualUSD != 12.34 {
 		t.Fatalf("actual = %+v, %v", s, err)
+	}
+}
+
+func TestNewCommittedWrite(t *testing.T) {
+	c, err := NewCommittedWrite(CommittedInput{StackPath: "environments/staging/payments/orders", MonthlyUSD: ptr(1200.5)})
+	if err != nil || c.MonthlyCents != 120050 || c.Stack.Team != "payments" || c.Stack.Environment != "staging" {
+		t.Fatalf("committed = %+v, %v", c, err)
+	}
+	if c, err := NewCommittedWrite(CommittedInput{StackPath: "environments/staging/payments/orders", MonthlyUSD: ptr(0.0)}); err != nil || c.MonthlyCents != 0 {
+		t.Fatalf("zero is a valid committed cost: %+v, %v", c, err)
+	}
+	for name, in := range map[string]CommittedInput{
+		"path":     {StackPath: "environments/staging/payments", MonthlyUSD: ptr(1.0)},
+		"missing":  {StackPath: "environments/staging/payments/orders"},
+		"negative": {StackPath: "environments/staging/payments/orders", MonthlyUSD: ptr(-1.0)},
+		"huge":     {StackPath: "environments/staging/payments/orders", MonthlyUSD: ptr(10000000.01)},
+		"cents":    {StackPath: "environments/staging/payments/orders", MonthlyUSD: ptr(1.005)},
+	} {
+		if _, err := NewCommittedWrite(in); !apperr.IsKind(err, apperr.KindInvalid) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	ev := CommittedAuditEvent(c, uuid.MustParse("00000000-0000-0000-0000-0000000000cc"),
+		identity.Principal{Type: identity.ActorSystem, Login: "iacp-bot"}, "", now)
+	if ev.Action != ActionCommittedSet || ev.SubjectType != "stack" || !strings.Contains(string(ev.Payload), `"monthly_usd":"1200.50"`) {
+		t.Fatalf("event = %+v", ev)
+	}
+}
+
+func TestAdminServiceRecordCommitted(t *testing.T) {
+	repo := &fakeAdminRepo{}
+	svc := NewAdminService(repo, platform.FixedClock{T: now})
+	sys := identity.Principal{Type: identity.ActorSystem}
+	c, err := svc.RecordCommitted(context.Background(), sys, CommittedInput{StackPath: "environments/staging/payments/orders", MonthlyUSD: ptr(10.0)}, "")
+	if err != nil || c.MonthlyCents != 1000 || len(repo.committed) != 1 {
+		t.Fatalf("committed = %+v, %v", c, err)
+	}
+	if _, err := svc.RecordCommitted(context.Background(), sys, CommittedInput{}, ""); !apperr.IsKind(err, apperr.KindInvalid) || len(repo.committed) != 1 {
+		t.Fatalf("invalid input reached the repository: %v", err)
+	}
+	repo.commitErr = apperr.NotFound("no stack")
+	if _, err := svc.RecordCommitted(context.Background(), sys, CommittedInput{StackPath: "environments/staging/payments/orders", MonthlyUSD: ptr(1.0)}, ""); !apperr.IsKind(err, apperr.KindNotFound) {
+		t.Fatalf("unknown stack: %v", err)
 	}
 }
