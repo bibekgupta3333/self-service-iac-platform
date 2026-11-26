@@ -16,6 +16,10 @@ describe("proxyTarget", () => {
   it.each([
     [["v1", "catalog", "modules"], "", "http://127.0.0.1:8080/v1/catalog/modules"],
     [["v1", "requests"], "?mine=true", "http://127.0.0.1:8080/v1/requests?mine=true"],
+    [["v1", "me"], "", "http://127.0.0.1:8080/v1/me"],
+    [["v1", "auth", "login"], "?return_to=%2Frequests", "http://127.0.0.1:8080/v1/auth/login?return_to=%2Frequests"],
+    [["v1", "auth", "callback"], "?code=a&state=b", "http://127.0.0.1:8080/v1/auth/callback?code=a&state=b"],
+    [["v1", "auth", "logout"], "", "http://127.0.0.1:8080/v1/auth/logout"],
     [["v1", "requests"], "mine=true", "http://127.0.0.1:8080/v1/requests?mine=true"],
     [["v1", "catalog", "modules", "sqs", "versions", "1.0.0"], "?", "http://127.0.0.1:8080/v1/catalog/modules/sqs/versions/1.0.0"],
   ])("forwards %o%s", (segments, search, want) => {
@@ -37,7 +41,13 @@ describe("proxyTarget", () => {
     [["v1", "%2569nternal"]],
     [["v1", "Catalog", "modules"]],
     [["v1", "audit", "verify"]],
-    [["v1", "auth", "login"]],
+    [["v1", "auth"]],
+    [["v1", "auth", "refresh"]],
+    [["v1", "auth", "login", "x"]],
+    [["v1", "auth", "Login"]],
+    [["v1", "me", "x"]],
+    [["v1", "Me"]],
+    [["v1", "tokens"]],
     [["v1", "webhooks"]],
     [["v1", "requests", ".."]],
     [["v1", "requests", "."]],
@@ -87,6 +97,7 @@ describe("decideProxy", () => {
       url: "http://api.test/v1/requests",
       upstreamMethod: "GET",
       head: false,
+      authFlow: false,
     });
     expect(decideProxy(base, info({ method: "HEAD" }))).toMatchObject({ kind: "forward", upstreamMethod: "GET", head: true });
   });
