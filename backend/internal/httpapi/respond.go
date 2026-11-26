@@ -67,6 +67,8 @@ func problemFor(err error) Problem {
 		p.Status, p.Title = http.StatusMethodNotAllowed, "Method not allowed"
 	case apperr.KindUnavailable:
 		p.Status, p.Title = http.StatusServiceUnavailable, "Service unavailable"
+	case apperr.KindRateLimited:
+		p.Status, p.Title = http.StatusTooManyRequests, "Too many requests"
 	default:
 		p.Status, p.Title, p.Code, p.Detail = http.StatusInternalServerError, "Internal server error", "internal", ""
 	}

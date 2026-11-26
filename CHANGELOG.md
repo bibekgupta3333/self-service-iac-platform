@@ -7,6 +7,13 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 ## [Unreleased]
 
 ### Added
+- GitHub OAuth login, sessions and RBAC (WBS 4.4, core of 8.6):
+  - `IACP_AUTH_MODE=github`: authorization-code flow with `state` and S256 PKCE (`/v1/auth/login`, `/v1/auth/callback`), a `GitHubIdentity` port with an `httptest`-tested adapter (fixed hosts, no cross-host redirects, timeouts, size caps), org-membership gate, fail-closed config
+  - server-side sessions (`iacp_session`, hashed in the new `sessions` table, absolute and sliding idle expiry, logout and disablement revoke, fresh id on every login), per-session `X-CSRF-Token` on unsafe methods, `GET /v1/me` (also in dev mode), `POST /v1/auth/logout`
+  - team sync at login (`iacp-<team>-viewers` / `<team>` / `<team>-maintainers` / admin team), manual memberships preserved, the last platform admin never downgraded
+  - pure `rbac` permission matrix with exhaustive tests, route policies, `rbac.denied`, `auth.login`, `auth.login_denied`, `auth.logout` and `rbac.*` audit events; request creation now uses the matrix
+  - review fixes: request list and get are scoped to the caller's teams (404 outside them) with a shared `identity.Visibility` helper; routes without an access policy are refused and a `chi.Walk` test enforces coverage; sessions migration is `0009`; platform teams with colliding GitHub role slugs get no synced roles; login starts and `rbac.denied` audit volume are rate limited; a login whose audit fails revokes its session; logout works with a dead session; `__Host-` cookie names over https
+  - portal `GithubAuthProvider`, sign-in and sign-out controls, server-side cookie forwarding, a controlled `Set-Cookie` pass-through on the login routes only, and a stricter proxy CSRF check for requests that carry a cookie
 - PR publishing and GitHub webhooks (WBS 4.8, 4.9):
   - `publish.Publisher` port with pure branch naming (`iacp/<short id>`), path checks and a deterministic PR title, body (plan placeholder, request link), labels and commit message.
   - `githubapp` adapter: App JWT → cached, repository-scoped installation token; atomic commits with the git data API; idempotent PR, labels, `workflow_dispatch`; timeouts, same-host redirects only, retries on 5xx/429 honouring `Retry-After`.

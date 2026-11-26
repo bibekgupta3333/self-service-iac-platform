@@ -6,7 +6,7 @@ import type { ReactNode } from "react";
 import { AutoRefresh } from "@/components/AutoRefresh";
 import { ErrorPanel } from "@/components/ErrorPanel";
 import { StatusBadge, StatusTimeline } from "@/components/StatusTimeline";
-import { serverApi } from "@/lib/api/factory";
+import { serverApi } from "@/lib/api/server";
 import { attempt, isNotFound } from "@/lib/api/result";
 import { formatDateTime, isTerminal, requestStatusLabel } from "@/lib/format";
 

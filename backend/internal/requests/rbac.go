@@ -1,33 +1,32 @@
 package requests
 
-import "slices"
+import "github.com/bibekgupta3333/self-service-iac-platform/backend/internal/rbac"
 
-// Role is a team role (enum team_role), ordered from least to most privileged.
-type Role string
+// Role is a team role. The matrix lives in package rbac; these aliases keep the request
+// service's vocabulary.
+type Role = rbac.Role
 
 // Team roles (docs/07 RBAC matrix).
 const (
-	RoleNone       Role = ""
-	RoleViewer     Role = "viewer"
-	RoleDeveloper  Role = "developer"
-	RoleMaintainer Role = "maintainer"
-	RoleAdmin      Role = "admin"
+	RoleNone       = rbac.RoleNone
+	RoleViewer     = rbac.RoleViewer
+	RoleDeveloper  = rbac.RoleDeveloper
+	RoleMaintainer = rbac.RoleMaintainer
+	RoleAdmin      = rbac.RoleAdmin
 )
 
-var roleOrder = []Role{RoleNone, RoleViewer, RoleDeveloper, RoleMaintainer, RoleAdmin}
-
-// AtLeast reports whether r grants at least the privileges of min. Unknown roles grant nothing.
-func (r Role) AtLeast(min Role) bool {
-	ri, mi := slices.Index(roleOrder, r), slices.Index(roleOrder, min)
-	return ri >= 0 && mi >= 0 && ri >= mi
+// ActionFor maps a request kind to the RBAC action needed to create it. Pure.
+func ActionFor(k Kind) rbac.Action {
+	if k == KindDestroy {
+		return rbac.ActionRequestDestroy
+	}
+	return rbac.ActionRequestCreate
 }
 
 // RequiredRole returns the minimum team role needed to create a request of kind k
-// in environment env. Pure. (docs/03 §6.4: developer for any environment; maintainer
-// for production destroys.)
+// in environment env, from the rbac matrix. Pure. (docs/03 §6.4: developer for any
+// environment; maintainer for production destroys.)
 func RequiredRole(k Kind, env string) Role {
-	if k == KindDestroy && env == "production" {
-		return RoleMaintainer
-	}
-	return RoleDeveloper
+	need, _ := rbac.MinRole(ActionFor(k), env)
+	return need
 }

@@ -1,28 +1,19 @@
-// Wiring: one place that reads the environment and builds an ApiClient per side.
+// Browser wiring: builds the ApiClient used by client components. The server-side
+// counterpart lives in ./server.ts, which reads the incoming cookies (next/headers) and so
+// must not be imported from client code.
 
 import { authEnv, createAuthProvider } from "@/lib/auth/provider";
 
 import { ApiClient } from "./client";
-import { browserApiBaseUrl, serverApiBaseUrl } from "./config";
-
-/** serverApi is for server components and route handlers (never cached: data is live). */
-export function serverApi(): ApiClient {
-  return new ApiClient({
-    baseUrl: serverApiBaseUrl({
-      IACP_API_URL: process.env.IACP_API_URL,
-      NEXT_PUBLIC_IACP_API_URL: process.env.NEXT_PUBLIC_IACP_API_URL,
-    }),
-    fetch: (input, init) => fetch(input, init),
-    auth: createAuthProvider(authEnv()),
-    init: { cache: "no-store" },
-  });
-}
+import { browserApiBaseUrl } from "./config";
 
 /** browserApi is for client components; it goes through the same-origin proxy by default. */
 export function browserApi(): ApiClient {
+  const baseUrl = browserApiBaseUrl({ NEXT_PUBLIC_IACP_API_URL: process.env.NEXT_PUBLIC_IACP_API_URL });
+  const fetchImpl = (input: string, init?: RequestInit) => fetch(input, init);
   return new ApiClient({
-    baseUrl: browserApiBaseUrl({ NEXT_PUBLIC_IACP_API_URL: process.env.NEXT_PUBLIC_IACP_API_URL }),
-    fetch: (input, init) => fetch(input, init),
-    auth: createAuthProvider(authEnv()),
+    baseUrl,
+    fetch: fetchImpl,
+    auth: createAuthProvider(authEnv(), { baseUrl, fetch: fetchImpl }),
   });
 }

@@ -3,7 +3,7 @@ import Link from "next/link";
 
 import { ErrorPanel } from "@/components/ErrorPanel";
 import { StatusBadge } from "@/components/StatusTimeline";
-import { serverApi } from "@/lib/api/factory";
+import { serverApi } from "@/lib/api/server";
 import { attempt } from "@/lib/api/result";
 import { formatDateTime, requestStatusLabel } from "@/lib/format";
 

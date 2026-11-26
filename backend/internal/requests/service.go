@@ -17,6 +17,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/locks"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/outbox"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/rbac"
 )
 
 // Team is the subset of a team the request service needs.
@@ -118,8 +119,12 @@ type ListFilter struct {
 	Status    Status
 	Kind      Kind
 	CreatedBy *uuid.UUID
-	Limit     int
-	After     *Cursor
+	// AllTeams and TeamIDs scope the list to the caller's visible teams (identity.Visibility).
+	// The zero value matches no team, so a caller that forgets to set them sees nothing.
+	AllTeams bool
+	TeamIDs  []uuid.UUID
+	Limit    int
+	After    *Cursor
 }
 
 // Repository is the persistence port of the request service.
@@ -259,8 +264,8 @@ func (s *Service) precheck(ctx context.Context, by identity.Principal, in Create
 	if err != nil {
 		return fieldLookupError(err, "/team", fmt.Sprintf("unknown team %q", in.Team))
 	}
-	if need := RequiredRole(in.Kind, in.Environment); !role.AtLeast(need) {
-		return apperr.Forbidden(fmt.Sprintf("creating a %s request for team %s needs the %s role or higher", in.Kind, in.Team, need))
+	if d := rbac.Decide(role, ActionFor(in.Kind), rbac.Resource{Environment: in.Environment}); !d.Allowed {
+		return apperr.Forbidden(fmt.Sprintf("creating a %s request for team %s needs the %s role or higher", in.Kind, in.Team, d.Need))
 	}
 	resolved, err := s.resolve(ctx, in.Resources)
 	if err != nil {
