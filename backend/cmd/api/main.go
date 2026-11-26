@@ -23,6 +23,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/observability"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/requests"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/runs"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/migrations"
 )
 
@@ -89,6 +90,7 @@ func run() error {
 			httpapi.NewAuditHandler(audit.NewVerifier(pool)),
 		},
 		InternalHandlers: []httpapi.RouteRegistrar{httpapi.NewLockHandler(lockSvc)},
+		PipelineHandlers: []httpapi.RouteRegistrar{httpapi.NewRunHandler(runs.NewService(runs.NewPostgresRepository(pool), clock))},
 	})
 
 	return serve(ctx, newServer(cfg.HTTPAddr, handler), cfg.ShutdownTimeout)
