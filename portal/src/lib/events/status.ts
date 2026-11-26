@@ -142,6 +142,7 @@ const EVENT_LABELS: Record<string, string> = {
 export function describeEntry(e: Pick<TimelineEntry, "event" | "status" | "from">): string {
   const label = e.event ? EVENT_LABELS[e.event] : undefined;
   if (label) return label;
+  if (!e.event && !e.from && e.status === "draft") return "Request created";
   return e.from ? `${e.from} to ${e.status}` : e.status;
 }
 

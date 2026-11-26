@@ -95,7 +95,8 @@ describe("describeEntry and liveAnnouncement", () => {
   it("names known events and falls back to the transition", () => {
     expect(describeEntry({ event: "pr_merged", status: "applying" })).toBe("Pull request merged");
     expect(describeEntry({ event: "something_new", status: "applying", from: "approved" })).toBe("approved to applying");
-    expect(describeEntry({ status: "draft" })).toBe("draft");
+    expect(describeEntry({ status: "draft" })).toBe("Request created");
+    expect(describeEntry({ status: "applying" })).toBe("applying");
   });
 
   it("phrases the live region", () => {
