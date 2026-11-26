@@ -61,6 +61,11 @@ class GitCli:
         result = self._git("show", f"{sha}:{path}", check=False)
         return result.stdout if result.returncode == 0 else None
 
+    def head_commit(self, git_dir: Path) -> str | None:
+        """HEAD of the repository at git_dir (an explicit --git-dir, so git never walks up)."""
+        result = self._git("--git-dir", str(git_dir), "rev-parse", "--verify", "HEAD^{commit}", check=False)
+        return result.stdout.strip() if result.returncode == 0 else None
+
     def publish_tag(self, mirror: Path, sha: str, tag: str) -> None:
         """Push one commit as a tag into a bare mirror (created on first use)."""
         mirror = Path(mirror)

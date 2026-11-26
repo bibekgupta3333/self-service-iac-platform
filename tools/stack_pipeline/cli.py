@@ -14,6 +14,7 @@ from typing import Any, Sequence
 from .adapters import FileSystemStackRepository, GitCli, GitDiff
 from .detection import DEFAULT_MAX_STACKS, DetectionError, DetectionPolicy, DetectionResult, StackDetector
 from .models import StackMetadataError
+from .module_install import MANIFEST, ModuleInstallVerifier, parse_manifest
 from .module_pins import DEFAULT_REPO_URL, DEFAULT_TRUSTED_REF, ModulePinVerifier, PinError, Resolution, insteadof_config
 from .plan_summary import render_markdown, summarize
 from .policy_context import build_context
@@ -70,6 +71,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("GITHUB_ENV"),
         help="append GIT_CONFIG_* here; otherwise print export lines (default: $GITHUB_ENV)",
     )
+
+    installed = sub.add_parser("verify-modules", help="after init: match installed modules to the pins one to one")
+    installed.add_argument("stack_dir", type=Path)
+    installed.add_argument("--repo-url", default=DEFAULT_REPO_URL, help="module repository URL used in stack sources")
     return parser
 
 
@@ -168,7 +173,19 @@ def run_verify_pins(args: argparse.Namespace) -> int:
     return 0
 
 
-COMMANDS = {"detect": run_detect, "context": run_context, "summary": run_summary, "verify-pins": run_verify_pins}
+def run_verify_modules(args: argparse.Namespace) -> int:
+    meta = FileSystemStackRepository(args.repo_root).load_dir(args.stack_dir)
+    manifest = Path(args.stack_dir) / MANIFEST
+    data = _read_json(manifest)
+    if data is None:
+        raise PinError(f"{manifest} is missing or unreadable; run terraform init first")
+    verifier = ModuleInstallVerifier(GitCli(args.repo_root), args.repo_url)
+    for line in verifier.verify(Path(args.stack_dir), meta, parse_manifest(data)):
+        print(line)
+    return 0
+
+
+COMMANDS = {"detect": run_detect, "context": run_context, "summary": run_summary, "verify-pins": run_verify_pins, "verify-modules": run_verify_modules}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
