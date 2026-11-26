@@ -16,6 +16,7 @@ import (
 
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/audit"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/auth"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/budgets"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/catalog"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/config"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/db"
@@ -91,7 +92,10 @@ func run() error {
 			httpapi.NewRequestHandler(requestSvc),
 			httpapi.NewAuditHandler(audit.NewVerifier(pool)),
 		},
-		InternalHandlers: []httpapi.RouteRegistrar{httpapi.NewLockHandler(lockSvc)},
+		InternalHandlers: []httpapi.RouteRegistrar{
+			httpapi.NewLockHandler(lockSvc),
+			httpapi.NewBudgetContextHandler(budgets.NewService(budgets.NewPostgresRepository(pool), clock)),
+		},
 		PipelineHandlers: []httpapi.RouteRegistrar{httpapi.NewRunHandler(runs.NewService(runs.NewPostgresRepository(pool), clock))},
 		Metrics:          newMetrics(pool),
 		MetricsAccess:    httpapi.NewMetricsAccess(cfg.MetricsToken),
