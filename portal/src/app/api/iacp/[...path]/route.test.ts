@@ -102,6 +102,38 @@ describe("proxy route", () => {
     expect(calls).toHaveLength(0);
   });
 
+  it.each([
+    [{ Origin: "https://evil.test" }],
+    [{ "Sec-Fetch-Site": "cross-site" }],
+  ])("refuses a cross-site POST %o with 403", async (headers) => {
+    const res = await POST(req("v1/requests", { method: "POST", body: "{}", headers }), ctx(["v1", "requests"]));
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ code: "cross_site_request" });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("accepts a same-origin POST", async () => {
+    const res = await POST(
+      req("v1/requests", {
+        method: "POST",
+        body: "{}",
+        headers: { Origin: "http://portal.test", "Sec-Fetch-Site": "same-origin" },
+      }),
+      ctx(["v1", "requests"]),
+    );
+    expect(res.status).toBe(200);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("accepts the configured public origin", async () => {
+    vi.stubEnv("IACP_PORTAL_ORIGIN", "https://portal.example");
+    const res = await POST(
+      req("v1/requests", { method: "POST", body: "{}", headers: { Origin: "https://portal.example" } }),
+      ctx(["v1", "requests"]),
+    );
+    expect(res.status).toBe(200);
+  });
+
   it("refuses POST on read-only paths with 405 and Allow", async () => {
     const res = await POST(req("v1/catalog/modules", { method: "POST", body: "{}" }), ctx(["v1", "catalog", "modules"]));
     expect(res.status).toBe(405);

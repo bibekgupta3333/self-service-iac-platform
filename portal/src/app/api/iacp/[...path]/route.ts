@@ -17,6 +17,7 @@ type Context = { params: Promise<{ path: string[] }> };
 
 const TITLES: Record<number, string> = {
   400: "Malformed request",
+  403: "Not allowed",
   404: "Resource not found",
   405: "Method not allowed",
   413: "Request body too large",
@@ -57,6 +58,8 @@ async function readCapped(req: Request, max: number): Promise<Uint8Array | null>
 
 async function forward(req: Request, ctx: Context): Promise<Response> {
   const { path } = await ctx.params;
+  const url = new URL(req.url);
+  const allowedOrigins = [url.origin, process.env.IACP_PORTAL_ORIGIN?.trim()].filter((o): o is string => !!o);
   const decision = decideProxy(
     serverApiBaseUrl({
       IACP_API_URL: process.env.IACP_API_URL,
@@ -65,8 +68,11 @@ async function forward(req: Request, ctx: Context): Promise<Response> {
     {
       method: req.method,
       segments: path,
-      search: new URL(req.url).search,
+      search: url.search,
       contentLength: req.headers.get("content-length"),
+      origin: req.headers.get("origin"),
+      secFetchSite: req.headers.get("sec-fetch-site"),
+      allowedOrigins,
     },
   );
   if (decision.kind === "reject") {

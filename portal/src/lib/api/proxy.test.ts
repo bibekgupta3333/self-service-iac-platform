@@ -66,6 +66,9 @@ describe("decideProxy", () => {
     segments: ["v1", "requests"],
     search: "",
     contentLength: null,
+    origin: null,
+    secFetchSite: null,
+    allowedOrigins: ["https://portal.test"],
     ...over,
   });
 
@@ -106,6 +109,26 @@ describe("decideProxy", () => {
 
   it("refuses paths outside the allow-list with 404", () => {
     expect(decideProxy(base, info({ method: "POST", segments: ["v1", "RUNS"] }))).toMatchObject({ status: 404 });
+  });
+
+  it.each([
+    [{ secFetchSite: "same-origin" }, "forward"],
+    [{ secFetchSite: "same-origin", origin: "https://evil.test" }, "forward"],
+    [{ secFetchSite: "same-site" }, 403],
+    [{ secFetchSite: "cross-site" }, 403],
+    [{ secFetchSite: "none" }, 403],
+    [{ origin: "https://portal.test" }, "forward"],
+    [{ origin: "https://evil.test" }, 403],
+    [{ origin: "null" }, 403],
+    [{}, "forward"],
+  ])("POST with %o -> %s", (headers, want) => {
+    const d = decideProxy(base, info({ method: "POST", ...headers }));
+    if (want === "forward") expect(d.kind).toBe("forward");
+    else expect(d).toMatchObject({ kind: "reject", status: want, code: "cross_site_request" });
+  });
+
+  it("does not apply the origin check to GET", () => {
+    expect(decideProxy(base, info({ secFetchSite: "cross-site", origin: "https://evil.test" })).kind).toBe("forward");
   });
 
   it.each([

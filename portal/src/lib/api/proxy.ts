@@ -87,6 +87,26 @@ export interface ProxyRequestInfo {
   segments: readonly string[];
   search: string;
   contentLength: string | null;
+  /** Origin request header. */
+  origin: string | null;
+  /** Sec-Fetch-Site request header. */
+  secFetchSite: string | null;
+  /** Origins the portal is served from (its own request origin, plus IACP_PORTAL_ORIGIN). */
+  allowedOrigins: readonly string[];
+}
+
+/**
+ * isSameOriginRequest is the CSRF check for unsafe methods. Browsers send Sec-Fetch-Site on
+ * every request, and Origin on every cross-origin POST, so a cross-site form or fetch is
+ * always identified. A request with neither header comes from a non-browser client (curl, a
+ * script), which carries no ambient browser credentials, and is allowed. Pure.
+ */
+export function isSameOriginRequest(
+  req: Pick<ProxyRequestInfo, "origin" | "secFetchSite" | "allowedOrigins">,
+): boolean {
+  if (req.secFetchSite !== null) return req.secFetchSite === "same-origin";
+  if (req.origin !== null) return req.allowedOrigins.includes(req.origin);
+  return true;
 }
 
 export type ProxyDecision =
@@ -114,6 +134,9 @@ export function decideProxy(apiBase: string, req: ProxyRequestInfo): ProxyDecisi
 
   if (!POST_PATHS.has(req.segments.join("/"))) {
     return reject(405, "method_not_allowed", "POST is not supported on this path", "GET, HEAD");
+  }
+  if (!isSameOriginRequest(req)) {
+    return reject(403, "cross_site_request", "cross-site requests are not accepted by the portal proxy");
   }
   if (req.contentLength !== null) {
     const n = Number(req.contentLength);
