@@ -79,9 +79,11 @@ variable "publisher_service_principals" {
 variable "subscriptions" {
   description = <<-EOT
     Topic subscriptions keyed by a stable name (1-40 lowercase letters, digits and hyphens).
-    protocol: email, email-json, https, sqs or lambda (plain http is not allowed).
-    endpoint: an email address, an https:// URL, or an SQS queue / Lambda function ARN to match the protocol.
-    raw_message_delivery: deliver the raw message (https and sqs only).
+    protocol: email, email-json, https or lambda. Plain http is not allowed, and sqs is not supported because the
+    queue would also need a queue policy, which belongs to the queue's own stack.
+    endpoint: an email address, an https:// URL, or a Lambda function ARN to match the protocol. The module grants
+    SNS permission to invoke the function for this topic.
+    raw_message_delivery: deliver the raw message (https only).
     Email subscriptions stay pending until the recipient confirms them.
   EOT
   type = map(object({
@@ -102,18 +104,17 @@ variable "subscriptions" {
       for s in values(var.subscriptions) : try(
         s.protocol == "email" || s.protocol == "email-json" ? can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", s.endpoint)) :
         s.protocol == "https" ? can(regex("^https://[^\\s]+$", s.endpoint)) :
-        s.protocol == "sqs" ? can(regex("^arn:aws[a-z-]*:sqs:[a-z0-9-]+:[0-9]{12}:.+$", s.endpoint)) :
         s.protocol == "lambda" ? can(regex("^arn:aws[a-z-]*:lambda:[a-z0-9-]+:[0-9]{12}:function:.+$", s.endpoint)) :
         false,
         false,
       )
     ])
-    error_message = "Each subscription needs protocol email, email-json, https, sqs or lambda, with a matching endpoint (email address, https:// URL, SQS queue ARN or Lambda function ARN)."
+    error_message = "Each subscription needs protocol email, email-json, https or lambda (sqs is not supported: the queue would need a queue policy owned by its stack), with a matching endpoint (email address, https:// URL or Lambda function ARN)."
   }
 
   validation {
-    condition     = alltrue([for s in values(var.subscriptions) : !s.raw_message_delivery || contains(["https", "sqs"], s.protocol)])
-    error_message = "raw_message_delivery is only supported for https and sqs subscriptions."
+    condition     = alltrue([for s in values(var.subscriptions) : !s.raw_message_delivery || s.protocol == "https"])
+    error_message = "raw_message_delivery is only supported for https subscriptions."
   }
 }
 

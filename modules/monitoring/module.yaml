@@ -47,14 +47,14 @@ inputs:
       maxProperties: 20
       propertyNames: { pattern: "^[a-z0-9][a-z0-9-]{0,39}$" }
       default: {}
-      description: Topic subscriptions keyed by a stable name. Email subscriptions stay pending until confirmed.
+      description: Topic subscriptions keyed by a stable name (email, email-json, https or lambda; Lambda invoke permission is granted). Email subscriptions stay pending until confirmed.
       x-iacp-group: Notifications
       additionalProperties:
         type: object
         additionalProperties: false
         required: [protocol, endpoint]
         properties:
-          protocol: { type: string, enum: [email, email-json, https, sqs, lambda] }
+          protocol: { type: string, enum: [email, email-json, https, lambda] }
           endpoint: { type: string, minLength: 1 }
           raw_message_delivery: { type: boolean, default: false }
         allOf:
@@ -62,14 +62,12 @@ inputs:
             then: { properties: { endpoint: { pattern: "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$" } } }
           - if: { properties: { protocol: { const: https } } }
             then: { properties: { endpoint: { pattern: "^https://[^\\s]+$" } } }
-          - if: { properties: { protocol: { const: sqs } } }
-            then: { properties: { endpoint: { pattern: "^arn:aws[a-z-]*:sqs:[a-z0-9-]+:[0-9]{12}:.+$" } } }
           - if: { properties: { protocol: { const: lambda } } }
             then: { properties: { endpoint: { pattern: "^arn:aws[a-z-]*:lambda:[a-z0-9-]+:[0-9]{12}:function:.+$" } } }
           - if:
               required: [raw_message_delivery]
               properties: { raw_message_delivery: { const: true } }
-            then: { properties: { protocol: { enum: [https, sqs] } } }
+            then: { properties: { protocol: { const: https } } }
     dashboard_widgets:
       type: array
       maxItems: 100

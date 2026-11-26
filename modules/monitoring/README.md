@@ -52,6 +52,20 @@ shows a LocalStack configuration.
 | Observability | Each alarm notifies the topic when it fires and when it recovers. Missing data does not breach. The dashboard ends with an alarm status widget listing every alarm. |
 | Tagging | `iacp:team`, `iacp:environment`, `iacp:stack`, `iacp:module`, `iacp:managed-by` are merged last on the topic, the key and every alarm. Dashboards cannot be tagged, so the dashboard carries the `<team>-<environment>-<name>` name instead. |
 
+## Subscriptions
+
+| Protocol | Endpoint | Notes |
+|---|---|---|
+| `email`, `email-json` | Email address | Pending until the recipient confirms. |
+| `https` | `https://` URL | The endpoint must confirm the subscription. Plain `http` is rejected. |
+| `lambda` | Function ARN | The module adds an `aws_lambda_permission` that lets `sns.amazonaws.com` invoke the function, only from this topic (`source_arn`) and this account. |
+
+`sqs` is not supported in v1.0.0. SNS can only deliver to a queue whose queue
+policy allows this topic, and a queue has a single policy document owned by
+the queue's own stack (the sqs module writes a TLS-only policy), so this
+module cannot add the grant without overwriting it. Subscribe queues from the
+queue's stack instead.
+
 ## Alarm helpers
 
 Each helper is a map keyed by a stable name. Every entry creates the alarms
@@ -84,7 +98,7 @@ is at least one widget or alarm.
 | `tags` | Additional tags. Keys starting with `iacp:` are reserved. At most 30. | `map(string)` | `{}` | no |
 | `kms_key_arn` | Existing KMS key ARN whose policy lets CloudWatch use it. If null, a dedicated key is created. | `string` | `null` | no |
 | `publisher_service_principals` | AWS services besides CloudWatch allowed to publish and use the key for this account (at most 10). | `list(string)` | `[]` | no |
-| `subscriptions` | Up to 20 subscriptions keyed by a stable name: `protocol` (`email`, `email-json`, `https`, `sqs`, `lambda`), a matching `endpoint`, and `raw_message_delivery` (`https` and `sqs` only). | `map(object)` | `{}` | no |
+| `subscriptions` | Up to 20 subscriptions keyed by a stable name: `protocol` (`email`, `email-json`, `https`, `lambda`), a matching `endpoint`, and `raw_message_delivery` (`https` only). | `map(object)` | `{}` | no |
 | `dashboard_widgets` | Up to 100 widgets: `title`, then `metrics` (`namespace`, `metric_name`, `dimensions`, `stat`, `label`) or `markdown`, and optional `view`, `stacked`, `period`, `width`, `height`. | `list(object)` | `[]` | no |
 | `sqs_queue_alarms` | Up to 25 queues: `queue_name`, `oldest_message_age_seconds` (>= 60), optional `visible_messages_threshold`. | `map(object)` | `{}` | no |
 | `lambda_function_alarms` | Up to 25 functions: `function_name`, `errors_threshold`, `throttles_threshold` (>= 1). | `map(object)` | `{}` | no |
@@ -108,7 +122,7 @@ is at least one widget or alarm.
 ## Resources
 
 `aws_sns_topic`, `aws_sns_topic_policy`, `aws_sns_topic_subscription` (per
-subscription), `aws_cloudwatch_metric_alarm` (per alarm),
+subscription), `aws_lambda_permission` (per `lambda` subscription), `aws_cloudwatch_metric_alarm` (per alarm),
 `aws_cloudwatch_dashboard` (optional), and optional `aws_kms_key` +
 `aws_kms_alias`.
 

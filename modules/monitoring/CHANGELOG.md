@@ -12,7 +12,8 @@ as git tags `modules/monitoring/vX.Y.Z`.
 - Topic policy that lets only CloudWatch and `publisher_service_principals`
   publish for this account, and denies publishing without TLS.
 - Optional subscriptions keyed by stable names (`email`, `email-json`,
-  `https`, `sqs`, `lambda`; plain `http` is rejected).
+  `https`, `lambda`; plain `http` and `sqs` are rejected). Lambda
+  subscriptions get an invoke permission limited to this topic and account.
 - CloudWatch dashboard built from typed metric and text widgets, with an alarm
   status widget appended for every alarm the module creates.
 - Alarm helpers: SQS age of oldest message and optional depth, Lambda errors
