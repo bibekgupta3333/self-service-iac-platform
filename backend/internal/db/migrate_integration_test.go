@@ -101,7 +101,7 @@ func TestRuntimeRoleIsLeastPrivileged(t *testing.T) {
 		"UPDATE oidc_jti SET expires_at = now()",    // replay ids are insert/purge only (0006)
 		"DELETE FROM outbox",                        // jobs are completed, never deleted (0008)
 		"UPDATE webhook_deliveries SET event = 'x'", // deliveries are insert-only, purged by DELETE (0008)
-		"DELETE FROM apply_failures",                // classified failures are insert/update only (0014)
+		"DELETE FROM apply_failures",                // classified failures are insert/update only (0015)
 		"TRUNCATE locks",
 	} {
 		if _, err := app.Exec(ctx, stmt); err == nil {
