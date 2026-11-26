@@ -173,16 +173,29 @@ hides the HTTP status and cannot tell a 429 from a dropped connection:
 
 - the first connection sends `Last-Event-ID: 0`, which replays every status change of the
   request (the history list), then follows live; a reconnect sends the id of the last frame;
-- `end` stops the stream for good; a stream that closes without it (the server's lifetime cap)
-  is resumed;
+- `end` stops the stream for good; a stream that closes without it (the server's 5-minute
+  lifetime cap) is resumed;
+- an idle watchdog cuts a connection after 45 seconds without a frame or heartbeat comment (the
+  backend heartbeats every 15 seconds) and reconnects;
+- a closed connection counts as failed only if nothing at all arrived (not even a heartbeat)
+  and it either closed within 10 seconds or was cut by the watchdog, so a healthy idle stream
+  is followed indefinitely;
+- after a healthy connection the next one starts at least 3 seconds after the previous one
+  did, so a stream that delivers one event per connection cannot reconnect in a tight loop;
 - 401, 403, 404 and 429 `too_many_streams` stop with a message instead of retrying;
 - other failures back off exponentially with equal jitter (1 s base, 30 s cap); after 5 failed
-  attempts in a row, or when the answer is not `text/event-stream`, the page falls back to
-  polling `GET /v1/requests/{id}` every 5 seconds;
+  attempts in a row, or when the answer is not `text/event-stream` (its body is cancelled), the
+  page falls back to polling `GET /v1/requests/{id}` every 5 seconds (`RequestPoller`), which
+  stops on 401, 403 and 404 with a message and pauses while the tab is hidden;
+- a request that was already terminal when the page loaded opens no stream and does not poll;
 - unmounting aborts the request and releases the reader.
 
-The pure parts are tested without a network: `sse.ts` (framing), `status.ts` (frame decoding and
-the reducer that folds events into the timeline state, ignoring repeated seqs). Each status
+`SseParser` scans each chunk once (linear in the input, however the frames are split), caps a
+frame at 256 KiB and drops a larger one, resynchronising at the next blank line. The pure parts
+are tested without a network: `sse.ts` (line and frame helpers), `stream.ts` (`connectionFailed`,
+`reconnectDelay`, `backoffDelay`), `status.ts` (frame decoding and the reducer that folds events
+into the timeline state, ignoring repeated seqs). Pull request links are rendered only for
+`https://github.com/` URLs (`httpsUrl`). Each status
 change also calls `router.refresh()` so the server-rendered details, queue note and pull request
 link follow. The status text sits in a polite live region and announces only status changes.
 The API returns a pull request link (`github`) but no plan summary, cost or workflow run links
@@ -205,14 +218,16 @@ pull request; nothing changes until it is merged.
   API has no spec, so the form is prefilled from the spec of the request that carries the
   current one (the stack's latest request if it is a create, update or upgrade that did not
   fail, get rejected or get cancelled, otherwise the newest such request of the team). If none
-  is found the page asks for a module and the form says it starts from module defaults. A
+  is found the page says the stack's real resources are unknown, asks for a module, and the
+  form says it starts from module defaults. A
   stack with several resources edits one at a time (`?resource=name`) and sends the others
   unchanged. `resources_removed` shows a checkbox that sends `allow_removals`; the body change
   mints a new Idempotency-Key.
 - **Destroy** is a modal `<dialog>` on the stack page: a plain warning that merging the destroy
   PR removes the infrastructure, the exact stack name to type (the submit button stays disabled
   until it matches) and a required justification. The Idempotency-Key is bound to the payload
-  as in the create form.
+  as in the create form. Cancel and Escape clear both fields; a second submit while one is in
+  flight is ignored, and so is Escape (Cancel is disabled).
 - **Errors**: `stack_busy`, `destroy_pending`, `stack_destroyed`, `resources_removed`, 404 and
   403 get a title and a next step (`explainLifecycleError`); validation pointers map onto the
   form fields; the error summary takes focus.
@@ -246,7 +261,7 @@ src/lib/api/              ApiClient (I/O), types, errors, config, proxy rules, f
 src/lib/auth/             AuthProvider, DevAuthProvider, GithubAuthProvider
 src/lib/schema/           pure schema -> field model, form values <-> inputs, SchemaAdapter
 src/lib/request/          pure stack-field checks, payload builders (create, update, destroy), pointer -> field mapping, Idempotency-Key rules, lifecycle error wording
-src/lib/events/           SSE parser and status reducer (pure), StatusStream (injected I/O)
+src/lib/events/           SSE parser and status reducer (pure), StatusStream, IdleWatchdog, RequestPoller (injected I/O)
 src/lib/stacks.ts         pure stack filters, health wording, output rows, available actions
 src/lib/format.ts         pure dates, labels, tones, categories, status timeline
 src/lib/security/         pure Content-Security-Policy builder

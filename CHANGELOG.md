@@ -226,6 +226,18 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 - `security-events: write` is granted only to the `code-scanning` upload jobs, which run no PR code; fork and Dependabot PRs skip the upload. Stack SARIF paths always stay inside the repository, and a run's own `automationDetails` is dropped so a PR cannot pick its category. `INFRACOST_API_KEY` is passed only to the `cost` job, which runs no PR code.
 
 ### Fixed
+- Portal live status and lifecycle review follow-ups:
+  - the status stream gave up after about 25 minutes on a healthy idle stream, because heartbeats did not count and the backend ends every stream at 5 minutes. A connection now counts as failed only if nothing arrived (not even a heartbeat) and it closed within 10 seconds or went silent;
+  - an idle watchdog cuts a connection after 45 seconds without a frame or heartbeat and resumes with `Last-Event-ID`;
+  - after a healthy connection, reconnects start at least 3 seconds apart, so a stream that sends one event per connection cannot loop tightly;
+  - the SSE parser scans each chunk once instead of re-parsing the whole buffer (which was quadratic), caps a frame at 256 KiB, and drops an oversized frame and resynchronises;
+  - a `200` that is not an event stream has its body cancelled;
+  - the polling fallback (`RequestPoller`) stops on 401, 403 and 404 with a message and pauses while the tab is hidden;
+  - a request that was already terminal when the page loaded opens no stream;
+  - pull request links are rendered only for `https://github.com/` URLs;
+  - the destroy dialog clears the typed name and justification on Cancel and Escape, ignores a second submit while one is in flight, and stays open on Escape while it is;
+  - without a spec-carrying request, the update page says plainly that the stack's real resources are unknown;
+  - new tests for the role mirror with an unknown environment and for a resumed stream that replays a seq. The stream and resume behaviour is documented in docs/06 §8.1.
 - Portal request form: focus moved to the error summary in a microtask that could run before the first error's summary existed, so the first failed submit left focus on the button. It now moves in an effect.
 - The catalog index accepted the category `data`, which `module.yaml` cannot carry, and rejected `database` and `cache`, which it can. It now accepts exactly the categories in `modules/_shared/module.schema.json`, so the `dynamodb` manifest indexes.
 

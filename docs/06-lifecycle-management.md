@@ -413,6 +413,31 @@ A single writer (`audit.Writer`, serialised with `pg_advisory_xact_lock`) comput
 
 **Runbook — "who changed this resource?"** Search portal audit by ARN → resolves `iacp:stack-id` tag → stack timeline (requests, approvers, runs) → CloudTrail query filtered on session name `apply-<run_id>-*`. If CloudTrail shows a principal other than `iacp-apply`, it is out-of-band drift (§4).
 
+### 8.1 Following a request live (status stream and resume)
+
+The request page follows a request's lifecycle through `GET /v1/requests/{id}/events`, a Server-Sent Events feed of its status changes taken from `audit_events`. Every `status` frame's id is the audit seq, so it is also a resume point.
+
+**Server** (`backend/internal/httpapi/events.go`):
+- A first connection starts with a `snapshot` of the current status. With `Last-Event-ID: <seq>` the stream replays every change after that seq instead (`0` replays the whole history).
+- It reads the audit log every 2 s and sends a `: heartbeat` comment every 15 s.
+- It ends with an `end` frame once the request is terminal, also on a resume at the terminal seq. Without `end` it closes after a 5-minute lifetime, on server shutdown, or when the caller's session is revoked, expires or is disabled.
+- Access is checked on every poll. Each user may hold 5 open streams and the server 500 (`429 too_many_streams`).
+
+**Portal** (`StatusStream` and `RequestPoller` in `portal/src/lib/events/`):
+
+| Situation | Behaviour |
+|---|---|
+| First connection | Sends `Last-Event-ID: 0`, builds the history from the replay, then follows live. |
+| Stream closes without `end` (lifetime cap, dropped connection) | Reconnects with the id of the last frame received. A connection that delivered something starts the next attempt at least 3 s after it started, so a stream that sends one event per connection cannot loop tightly. |
+| Nothing (frame or heartbeat) for 45 s | The idle watchdog aborts the connection and reconnects the same way. |
+| Counting failures | A connection is a failure only if nothing at all arrived (not even a heartbeat) and it closed within 10 s or was cut by the watchdog. Failed attempts back off exponentially with equal jitter (1 s base, 30 s cap). A healthy idle stream is followed for as long as the page is open. |
+| 5 failures in a row, or a `200` that is not `text/event-stream` (its body is cancelled) | Falls back to polling `GET /v1/requests/{id}` every 5 s. Polling pauses while the tab is hidden, reads at once when it is shown, and stops at a terminal status. |
+| `401`, `403`, `404` (stream or poll), `429` (stream) | Stops and says why; retrying cannot help. |
+| Oversized frame (over 256 KiB) | Dropped; the parser resynchronises at the next blank line. |
+| Repeated frame after a resume | Ignored: changes at or below the highest seq seen are duplicates. |
+| Request already terminal when the page loads | No stream and no polling; the page shows the outcome. The audit log keeps the full history. |
+| `end` | The stream stops for good. |
+
 ---
 
 ## 9. RBAC
