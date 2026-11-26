@@ -15,7 +15,7 @@ export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION AWS_ENDPOINT_U
 unexport AWS_PROFILE AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
 
 .PHONY: help up down ps fmt fmt-check validate tflint checkov policy-test lint \
-        module-test go-test py-test test diagrams
+        module-test go-test go-integration generator-update api py-test test diagrams
 
 help: ## Show available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -73,6 +73,15 @@ go-test: ## Go unit tests (backend)
 	else \
 	  echo "backend not initialised yet"; \
 	fi
+
+go-integration: ## Go integration tests against local Postgres (needs `make up`)
+	cd backend && IACP_INTEGRATION=1 go test -race -count=1 ./...
+
+generator-update: ## Regenerate generator golden files after an intended template change
+	cd backend && go test ./internal/generator -update
+
+api: ## Run the API locally in dev auth mode (needs `make up`)
+	cd backend && IACP_AUTH_MODE=dev IACP_INTERNAL_TOKEN=local-dev-internal-token-0123456789abcdef go run ./cmd/api
 
 py-test: ## Python tooling tests (exit code 5 = no tests collected is OK)
 	@$(PYTHON) -m pytest -q tools policies; rc=$$?; \
