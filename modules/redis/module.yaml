@@ -1,0 +1,176 @@
+apiVersion: iacp.dev/v1
+kind: Module
+metadata:
+  name: redis
+  version: 1.0.0
+  displayName: Redis (ElastiCache)
+  description: Private ElastiCache Redis replication group with CMK encryption at rest, required TLS, an AUTH token in Secrets Manager or RBAC, and failover in production.
+  category: cache
+  maturity: beta
+  owners:
+    - "@bibekgupta3333/platform"
+  documentation: https://github.com/bibekgupta3333/self-service-iac-platform/tree/modules/redis/v1.0.0/modules/redis
+
+compatibility:
+  terraform: ">= 1.10, < 2.0"
+  providers:
+    hashicorp/aws: ">= 5.70, < 6.0"
+    hashicorp/random: ">= 3.6, < 4.0"
+  environments: [development, staging, production]
+
+inputs:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  required: [name, vpc_id, subnet_ids]
+  additionalProperties: false
+  properties:
+    name:
+      type: string
+      pattern: "^[a-z][a-z0-9-]{1,39}[a-z0-9]$"
+      description: Logical cache name without consecutive hyphens. The replication group ID is <team>-<environment>-<name> (at most 40 characters).
+      x-iacp-immutable: true
+    vpc_id:
+      type: string
+      pattern: "^vpc-[0-9a-f]{8,17}$"
+      description: VPC that holds the cache.
+      x-iacp-group: Network
+      x-iacp-ui: stack-output
+      x-iacp-immutable: true
+    subnet_ids:
+      type: array
+      items: { type: string, pattern: "^subnet-[0-9a-f]{8,17}$" }
+      minItems: 2
+      maxItems: 16
+      uniqueItems: true
+      description: Private subnets in at least two Availability Zones.
+      x-iacp-group: Network
+      x-iacp-ui: stack-output
+    allowed_security_group_ids:
+      type: array
+      items: { type: string, pattern: "^sg-[0-9a-f]{8,17}$" }
+      maxItems: 20
+      default: []
+      description: Security groups allowed to connect on the cache port. Nothing else can reach the cache.
+      x-iacp-group: Network
+      x-iacp-ui: stack-output
+    port:
+      type: integer
+      minimum: 1024
+      maximum: 65535
+      default: 6379
+      description: TCP port the cache listens on.
+      x-iacp-group: Network
+      x-iacp-immutable: true
+    engine_version:
+      type: string
+      enum: ["7.0", "7.1"]
+      default: "7.1"
+      description: Redis OSS engine version.
+      x-iacp-ui: select
+    node_type:
+      type: string
+      pattern: "^cache\\.[a-z0-9]+\\.[a-z0-9]+$"
+      default: cache.t4g.micro
+      description: Cache node type, for example cache.t4g.micro or cache.r7g.large.
+    num_cache_clusters:
+      type: [integer, "null"]
+      minimum: 1
+      maximum: 6
+      default: null
+      description: Nodes (primary plus replicas). Null means 2 in production and 1 elsewhere; 2 or more enable automatic failover. Production needs at least 2.
+    maxmemory_policy:
+      type: string
+      enum: [volatile-lru, allkeys-lru, volatile-lfu, allkeys-lfu, volatile-random, allkeys-random, volatile-ttl, noeviction]
+      default: volatile-lru
+      description: Eviction policy when memory is full.
+      x-iacp-ui: select
+    auth_mode:
+      type: string
+      enum: [token, rbac]
+      default: token
+      description: token generates an AUTH token stored in Secrets Manager; rbac uses the ElastiCache user group in user_group_ids.
+      x-iacp-group: Security
+      x-iacp-ui: select
+    user_group_ids:
+      type: array
+      items: { type: string, pattern: "^[a-zA-Z][a-zA-Z0-9-]{0,39}$" }
+      maxItems: 1
+      default: []
+      description: ElastiCache RBAC user group ID. Exactly one with auth_mode rbac, none with token.
+      x-iacp-group: Security
+    snapshot_retention_days:
+      type: integer
+      minimum: 0
+      maximum: 35
+      default: 7
+      description: Days of daily snapshots. Production needs at least 1.
+      x-iacp-group: Recovery
+    log_retention_days:
+      type: integer
+      enum: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653]
+      default: 30
+      description: CloudWatch Logs retention in days for slow and engine logs.
+      x-iacp-group: Observability
+    kms_key_arn:
+      type: [string, "null"]
+      default: null
+      pattern: "^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/.+$"
+      description: Existing customer-managed KMS key ARN. If null, a dedicated key is created.
+      x-iacp-group: Encryption
+      x-iacp-immutable: true
+    tags:
+      type: object
+      additionalProperties: { type: string }
+      propertyNames: { not: { pattern: "^iacp:" } }
+      maxProperties: 30
+      description: Extra tags. The iacp:* prefix is reserved.
+      x-iacp-ui: key-value
+  allOf:
+    - if:
+        required: [auth_mode]
+        properties: { auth_mode: { const: rbac } }
+      then:
+        required: [user_group_ids]
+        properties: { user_group_ids: { minItems: 1 } }
+      else:
+        properties: { user_group_ids: { maxItems: 0 } }
+
+outputs:
+  - { name: id, description: Replication group ID, wireable: true }
+  - { name: arn, description: Replication group ARN, wireable: true }
+  - { name: name, description: Computed replication group ID, wireable: false }
+  - { name: primary_endpoint, description: Primary endpoint host name (TLS), wireable: true }
+  - { name: reader_endpoint, description: Reader endpoint host name (TLS), wireable: true }
+  - { name: port, description: TCP port, wireable: true }
+  - { name: secret_arn, description: ARN of the AUTH token secret (null with RBAC), wireable: true }
+  - { name: connection, description: "Object with host, port and secret_arn", wireable: true }
+  - { name: security_group_id, description: Security group attached to the cache, wireable: true }
+  - { name: kms_key_arn, description: KMS key ARN, wireable: true }
+  - { name: iacp_metadata, description: Module name and version, wireable: false }
+
+dependencies:
+  - input: vpc_id
+    description: VPC that holds the cache.
+    accepts:
+      - { module: vpc, output: id }
+  - input: subnet_ids
+    description: Private subnets for the cache subnet group.
+    accepts:
+      - { module: vpc, output: private_subnet_ids }
+  - input: allowed_security_group_ids
+    description: Clients allowed to connect.
+    accepts:
+      - { module: ecs-service, output: security_group_id }
+
+cost:
+  baseline_monthly_usd: 12.00
+  drivers:
+    - node_hours
+    - num_cache_clusters
+    - snapshot_storage_gb
+
+upgrade:
+  from: ">= 1.0.0, < 2.0.0"
+  requires_migration: false
+  notes: |
+    Initial release.
