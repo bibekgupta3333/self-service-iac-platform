@@ -43,9 +43,33 @@ type Store interface {
 	// StackLock returns the stack's lock row, locked FOR SHARE so it cannot be released
 	// while the report commits; nil when the stack is not locked.
 	StackLock(ctx context.Context, stackID uuid.UUID) (*locks.Lock, error)
-	// UpsertRun inserts the run or appends the stage to the existing one (same run id,
-	// attempt and stack). A finished run keeps its status.
-	UpsertRun(ctx context.Context, r Run) (id uuid.UUID, status Status, err error)
+	// InsertRun inserts a new run with r.Stage as its only stage. inserted is false when a
+	// run with the same run id, attempt and stack exists (ON CONFLICT DO NOTHING).
+	InsertRun(ctx context.Context, r Run) (id uuid.UUID, inserted bool, err error)
+	// LockRun loads the existing run FOR UPDATE.
+	LockRun(ctx context.Context, stackID uuid.UUID, gh GitHubRun) (StoredRun, error)
+	// UpdateRun writes the merged state of an existing run.
+	UpdateRun(ctx context.Context, u RunUpdate) error
+}
+
+// StoredRun is an existing pipeline_runs row.
+type StoredRun struct {
+	ID     uuid.UUID
+	Kind   Kind
+	Status Status
+	Stages []json.RawMessage
+}
+
+// RunUpdate is the new state of an existing run. FinishedAt is set only when the run
+// finishes with this report; LogURL, JobID and RequestID only fill in missing values.
+type RunUpdate struct {
+	ID         uuid.UUID
+	Status     Status
+	Stages     []json.RawMessage
+	FinishedAt *time.Time
+	JobID      int64
+	LogURL     string
+	RequestID  *uuid.UUID
 }
 
 // Repository is the persistence port of the run service.
@@ -116,14 +140,45 @@ func (s *Service) Record(ctx context.Context, by identity.Principal, r Report) (
 		if run.Stage, err = StageEntry(r, run.At); err != nil {
 			return err
 		}
-		out.RunID, out.RunStatus, err = st.UpsertRun(ctx, run)
-		if err != nil {
-			return fmt.Errorf("record run: %w", err)
-		}
-		return nil
+		out.RunID, out.RunStatus, err = s.store(ctx, st, run, r.Stage)
+		return err
 	})
 	if err != nil {
 		return Recorded{}, err
 	}
 	return out, nil
+}
+
+// store inserts the run, or merges the report into the existing run: the stage replaces
+// any earlier entry of the same name (replays are idempotent), and a finished run keeps
+// its status.
+func (s *Service) store(ctx context.Context, st Store, run Run, stage string) (uuid.UUID, Status, error) {
+	id, inserted, err := st.InsertRun(ctx, run)
+	if err != nil {
+		return uuid.Nil, "", fmt.Errorf("insert run: %w", err)
+	}
+	if inserted {
+		return id, run.Status, nil
+	}
+	cur, err := st.LockRun(ctx, run.StackID, run.GitHub)
+	if err != nil {
+		return uuid.Nil, "", fmt.Errorf("load run: %w", err)
+	}
+	if cur.Kind != run.Kind {
+		return uuid.Nil, "", apperr.Conflict("run_kind_mismatch",
+			fmt.Sprintf("run %d/%d was already reported as %s", run.GitHub.RunID, run.GitHub.RunAttempt, cur.Kind))
+	}
+	stages, err := MergeStages(cur.Stages, stage, run.Stage)
+	if err != nil {
+		return uuid.Nil, "", err
+	}
+	u := RunUpdate{ID: cur.ID, Status: NextRunStatus(cur.Status, run.Status), Stages: stages, JobID: run.GitHub.JobID,
+		LogURL: run.LogURL, RequestID: run.RequestID}
+	if !cur.Status.Finished() && u.Status.Finished() {
+		u.FinishedAt = &run.At
+	}
+	if err := st.UpdateRun(ctx, u); err != nil {
+		return uuid.Nil, "", fmt.Errorf("update run: %w", err)
+	}
+	return cur.ID, u.Status, nil
 }

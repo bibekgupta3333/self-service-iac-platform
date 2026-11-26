@@ -79,6 +79,12 @@ func TestPostgresRecordRun(t *testing.T) {
 	if err != nil || late.RunID != first.RunID || late.RunStatus != runs.StatusSucceeded {
 		t.Fatalf("late report = %+v, %v", late, err)
 	}
+	// Replays (job retried the HTTP call) do not duplicate stages.
+	for range 3 {
+		if _, err := svc.Record(ctx, bot, report("summary", runs.StagePassed, token)); err != nil {
+			t.Fatalf("replayed summary: %v", err)
+		}
+	}
 	var (
 		stages     []map[string]any
 		jobID      int64

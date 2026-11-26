@@ -217,6 +217,46 @@ type stageEntry struct {
 	Error             json.RawMessage `json:"error,omitempty"`
 }
 
+// MaxStages bounds the distinct stages one run may record.
+const MaxStages = 32
+
+// MergeStages puts entry (a StageEntry for stage name) into stages: it replaces the
+// existing entry of the same stage, so a replayed or updated report never duplicates it,
+// and appends otherwise, up to MaxStages. The input is not modified. Pure.
+func MergeStages(stages []json.RawMessage, name string, entry json.RawMessage) ([]json.RawMessage, error) {
+	out := make([]json.RawMessage, 0, len(stages)+1)
+	replaced := false
+	for _, s := range stages {
+		var head struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(s, &head); err != nil {
+			return nil, fmt.Errorf("decode stored stage: %w", err)
+		}
+		if head.Name == name {
+			out, replaced = append(out, entry), true
+			continue
+		}
+		out = append(out, s)
+	}
+	if !replaced {
+		if len(out) >= MaxStages {
+			return nil, apperr.Invalid("too_many_stages", fmt.Sprintf("a run may record at most %d stages", MaxStages),
+				apperr.FieldError{Pointer: "/stage", Code: "maxItems", Message: "too many distinct stages for this run"})
+		}
+		out = append(out, entry)
+	}
+	return out, nil
+}
+
+// NextRunStatus is the run status after a report: a finished run keeps its status. Pure.
+func NextRunStatus(current, reported Status) Status {
+	if current.Finished() {
+		return current
+	}
+	return reported
+}
+
 // StageEntry is the stage record appended to the run for report r at time at. Pure.
 func StageEntry(r Report, at time.Time) (json.RawMessage, error) {
 	b, err := json.Marshal(stageEntry{Name: r.Stage, Status: r.Status, ReportedAt: at.UTC(), JobID: r.GitHub.JobID,

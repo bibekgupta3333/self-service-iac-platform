@@ -2,6 +2,7 @@ package runs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -73,35 +74,57 @@ func (s *pgStore) StackLock(ctx context.Context, stackID uuid.UUID) (*locks.Lock
 	return &l, nil
 }
 
-func (s *pgStore) UpsertRun(ctx context.Context, r Run) (uuid.UUID, Status, error) {
+// InsertRun inserts the run unless one with the same key exists. A concurrent insert of
+// the same key waits for the first transaction and then reports a conflict.
+func (s *pgStore) InsertRun(ctx context.Context, r Run) (uuid.UUID, bool, error) {
 	var finished any
 	if r.Status.Finished() {
 		finished = r.At
 	}
-	var (
-		id     uuid.UUID
-		status Status
-	)
+	var id uuid.UUID
 	err := s.tx.QueryRow(ctx, `INSERT INTO pipeline_runs (request_id, stack_id, kind, status, github_run_id, github_run_attempt,
 			github_job_id, workflow_ref, head_sha, stages, log_url, started_at, finished_at, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, nullif($7::bigint, 0), $8, $9, jsonb_build_array($10::jsonb), nullif($11, ''), $12, $13, $12)
-		ON CONFLICT (github_run_id, github_run_attempt, stack_id) DO UPDATE
-		   SET status        = CASE WHEN pipeline_runs.finished_at IS NULL THEN EXCLUDED.status ELSE pipeline_runs.status END,
-		       finished_at   = coalesce(pipeline_runs.finished_at, EXCLUDED.finished_at),
-		       stages        = pipeline_runs.stages || EXCLUDED.stages,
-		       request_id    = coalesce(pipeline_runs.request_id, EXCLUDED.request_id),
-		       github_job_id = coalesce(EXCLUDED.github_job_id, pipeline_runs.github_job_id),
-		       log_url       = coalesce(EXCLUDED.log_url, pipeline_runs.log_url)
-		 WHERE pipeline_runs.kind = EXCLUDED.kind
-		RETURNING id, status::text`,
+		ON CONFLICT (github_run_id, github_run_attempt, stack_id) DO NOTHING
+		RETURNING id`,
 		r.RequestID, r.StackID, string(r.Kind), string(r.Status), r.GitHub.RunID, r.GitHub.RunAttempt, r.GitHub.JobID,
-		r.WorkflowRef, r.GitHub.HeadSHA, []byte(r.Stage), r.LogURL, r.At, finished).Scan(&id, &status)
+		r.WorkflowRef, r.GitHub.HeadSHA, []byte(r.Stage), r.LogURL, r.At, finished).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return uuid.Nil, "", apperr.Conflict("run_kind_mismatch", fmt.Sprintf("run %d/%d was already reported as another pipeline",
-			r.GitHub.RunID, r.GitHub.RunAttempt))
+		return uuid.Nil, false, nil
 	}
 	if err != nil {
-		return uuid.Nil, "", fmt.Errorf("upsert run: %w", err)
+		return uuid.Nil, false, err
 	}
-	return id, status, nil
+	return id, true, nil
+}
+
+func (s *pgStore) LockRun(ctx context.Context, stackID uuid.UUID, gh GitHubRun) (StoredRun, error) {
+	var (
+		r      StoredRun
+		stages []json.RawMessage
+	)
+	err := s.tx.QueryRow(ctx, `SELECT id, kind::text, status::text, stages FROM pipeline_runs
+		WHERE github_run_id = $1 AND github_run_attempt = $2 AND stack_id = $3 FOR UPDATE`,
+		gh.RunID, gh.RunAttempt, stackID).Scan(&r.ID, &r.Kind, &r.Status, &stages)
+	if err != nil {
+		return StoredRun{}, err
+	}
+	r.Stages = stages
+	return r, nil
+}
+
+func (s *pgStore) UpdateRun(ctx context.Context, u RunUpdate) error {
+	stages, err := json.Marshal(u.Stages)
+	if err != nil {
+		return fmt.Errorf("encode stages: %w", err)
+	}
+	_, err = s.tx.Exec(ctx, `UPDATE pipeline_runs
+		   SET status        = $2,
+		       stages        = $3::jsonb,
+		       finished_at   = coalesce(finished_at, $4),
+		       github_job_id = coalesce(github_job_id, nullif($5::bigint, 0)),
+		       log_url       = coalesce(log_url, nullif($6, '')),
+		       request_id    = coalesce(request_id, $7)
+		 WHERE id = $1`, u.ID, string(u.Status), stages, u.FinishedAt, u.JobID, u.LogURL, u.RequestID)
+	return err
 }

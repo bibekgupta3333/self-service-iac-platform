@@ -2,6 +2,7 @@ package runs
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -142,6 +143,70 @@ func TestRunStatus(t *testing.T) {
 		got := RunStatus(tt.stage, tt.status)
 		if got != tt.want || got.Finished() != (tt.want != StatusInProgress) {
 			t.Errorf("RunStatus(%s, %s) = %s", tt.stage, tt.status, got)
+		}
+	}
+}
+
+func TestMergeStages(t *testing.T) {
+	stage := func(name, status string) json.RawMessage {
+		return json.RawMessage(`{"name":"` + name + `","status":"` + status + `"}`)
+	}
+	names := func(ss []json.RawMessage) string {
+		var out []string
+		for _, s := range ss {
+			out = append(out, string(s))
+		}
+		return strings.Join(out, ",")
+	}
+	base := []json.RawMessage{stage("plan", "in_progress"), stage("checkov", "passed")}
+
+	got, err := MergeStages(base, "summary", stage("summary", "passed"))
+	if err != nil || names(got) != names(append(append([]json.RawMessage(nil), base...), stage("summary", "passed"))) {
+		t.Fatalf("append = %s, %v", names(got), err)
+	}
+	got, err = MergeStages(base, "plan", stage("plan", "passed"))
+	if err != nil || names(got) != names([]json.RawMessage{stage("plan", "passed"), stage("checkov", "passed")}) {
+		t.Fatalf("replace = %s, %v", names(got), err)
+	}
+	if string(base[0]) != string(stage("plan", "in_progress")) {
+		t.Fatal("MergeStages must not modify its input")
+	}
+	// Replaying the same stage any number of times keeps one entry.
+	again, _ := MergeStages(got, "plan", stage("plan", "passed"))
+	if len(again) != 2 {
+		t.Fatalf("replay = %d entries", len(again))
+	}
+
+	full := make([]json.RawMessage, MaxStages)
+	for i := range full {
+		full[i] = stage(fmt.Sprintf("s%d", i), "passed")
+	}
+	if _, err := MergeStages(full, "one-more", stage("one-more", "passed")); !hasCode(err, "too_many_stages") {
+		t.Fatalf("cap: %v", err)
+	}
+	if got, err := MergeStages(full, "s3", stage("s3", "failed")); err != nil || len(got) != MaxStages {
+		t.Fatalf("replace at the cap = %d, %v", len(got), err)
+	}
+	if _, err := MergeStages([]json.RawMessage{json.RawMessage(`[`)}, "x", stage("x", "passed")); err == nil {
+		t.Fatal("a corrupt stored stage must fail")
+	}
+}
+
+func hasCode(err error, code string) bool {
+	e, ok := apperr.As(err)
+	return ok && e.Code == code
+}
+
+func TestNextRunStatus(t *testing.T) {
+	tests := []struct{ cur, reported, want Status }{
+		{StatusInProgress, StatusSucceeded, StatusSucceeded},
+		{StatusInProgress, StatusInProgress, StatusInProgress},
+		{StatusSucceeded, StatusInProgress, StatusSucceeded},
+		{StatusFailed, StatusSucceeded, StatusFailed},
+	}
+	for _, tt := range tests {
+		if got := NextRunStatus(tt.cur, tt.reported); got != tt.want {
+			t.Errorf("NextRunStatus(%s, %s) = %s", tt.cur, tt.reported, got)
 		}
 	}
 }
