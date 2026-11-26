@@ -62,8 +62,7 @@ func DefaultPolicies() PolicyTable {
 		// target team (rbac.Decide); the entry only records that the decision was made.
 		"POST /v1/requests": {Action: rbac.ActionRequestCreate, Scope: ScopeAuthenticated},
 		// The caller's own profile and session.
-		"GET /v1/me":           {Action: rbac.ActionRead, Scope: ScopeAuthenticated},
-		"POST /v1/auth/logout": {Action: rbac.ActionRead, Scope: ScopeAuthenticated},
+		"GET /v1/me": {Action: rbac.ActionRead, Scope: ScopeAuthenticated},
 	}
 }
 

@@ -17,7 +17,7 @@ func exemptFromUserPolicy(path string) string {
 	switch {
 	case path == "/healthz" || path == "/readyz" || path == "/metrics":
 		return "probe"
-	case path == "/v1/auth/login" || path == "/v1/auth/callback":
+	case path == "/v1/auth/login" || path == "/v1/auth/callback" || path == "/v1/auth/logout":
 		return "public login flow"
 	case strings.HasPrefix(path, "/v1/internal/") || path == "/v1/runs":
 		return "machine route (OIDC or internal token, never a session)"

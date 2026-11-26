@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/url"
@@ -32,6 +33,7 @@ type LoginService interface {
 
 // SessionManager ends sessions and reports lifetimes (session.Service).
 type SessionManager interface {
+	Resolve(ctx context.Context, id string) (session.Record, error)
 	Revoke(ctx context.Context, id string) error
 	Policy() session.Policy
 }
@@ -70,6 +72,7 @@ func (h *AuthHandler) PublicRoutes(r chi.Router) {
 	}
 	r.Get("/auth/login", h.login)
 	r.Get("/auth/callback", h.callback)
+	r.Post("/auth/logout", h.logout)
 }
 
 type publicRegistrar struct{ h *AuthHandler }
@@ -81,9 +84,6 @@ func (h *AuthHandler) Public() RouteRegistrar { return publicRegistrar{h} }
 
 // Routes implements RouteRegistrar for the authenticated group.
 func (h *AuthHandler) Routes(r chi.Router) {
-	if h.Login != nil {
-		r.Post("/auth/logout", h.logout)
-	}
 	r.Get("/me", h.me)
 }
 
@@ -156,28 +156,58 @@ func withQuery(target, key, value string) string {
 	return u.String()
 }
 
+// logout is public on purpose: a browser whose session already expired must still be able
+// to clear its cookie. With a live session the CSRF token is required and the session is
+// revoked and audited; with a missing, expired or revoked one it only clears the cookie.
 func (h *AuthHandler) logout(w http.ResponseWriter, r *http.Request) {
-	p, err := identity.FromContext(r.Context())
-	if err != nil {
-		writeError(w, r, err)
+	w.Header().Set("Cache-Control", "no-store")
+	c, err := r.Cookie(session.CookieName)
+	if err != nil || c.Value == "" {
+		http.SetCookie(w, session.ClearCookie(h.Secure))
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if c, err := r.Cookie(session.CookieName); err == nil {
+	rec, err := h.Sessions.Resolve(r.Context(), c.Value)
+	switch {
+	case err == nil:
+		if !session.ValidCSRF(c.Value, r.Header.Get(session.CSRFHeader)) {
+			writeError(w, r, errCSRF)
+			return
+		}
 		if err := h.Sessions.Revoke(r.Context(), c.Value); err != nil {
 			writeError(w, r, err)
 			return
 		}
+		h.auditLogout(r, rec)
+	case isDeadSession(err):
+		// Nothing to revoke: fall through and clear the cookie.
+	default:
+		writeError(w, r, &apperr.Error{Kind: apperr.KindUnavailable, Code: "auth_unavailable", Message: "session store unavailable"})
+		return
 	}
 	http.SetCookie(w, session.ClearCookie(h.Secure))
-	if h.Audit != nil {
-		ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-		if err := h.Audit.Record(r.Context(), audit.Event{ActorType: string(p.Type), ActorID: p.AuditActorID(), ActorIP: ip,
-			Action: "auth.logout", SubjectType: "user", SubjectID: p.AuditActorID(), CorrelationID: RequestIDFrom(r.Context())}); err != nil {
-			observability.Logger(r.Context()).ErrorContext(r.Context(), "audit logout failed", "error", err)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func isDeadSession(err error) bool {
+	for _, e := range []error{session.ErrNotFound, session.ErrExpired, session.ErrIdle, session.ErrRevoked, session.ErrDisabled} {
+		if errors.Is(err, e) {
+			return true
 		}
 	}
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusNoContent)
+	return false
+}
+
+func (h *AuthHandler) auditLogout(r *http.Request, rec session.Record) {
+	if h.Audit == nil {
+		return
+	}
+	p := rec.Principal()
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if err := h.Audit.Record(r.Context(), audit.Event{ActorType: string(p.Type), ActorID: p.AuditActorID(), ActorIP: ip,
+		Action: "auth.logout", SubjectType: "user", SubjectID: p.AuditActorID(), CorrelationID: RequestIDFrom(r.Context())}); err != nil {
+		observability.Logger(r.Context()).ErrorContext(r.Context(), "audit logout failed", "error", err)
+	}
 }
 
 type teamRoleDTO struct {
