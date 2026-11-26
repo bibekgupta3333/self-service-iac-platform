@@ -370,8 +370,8 @@ jobs:
         # accounts change only through apply.yml.
         run: |
           terraform apply -input=false -lock=false -no-color tfplan
-          terraform plan -input=false -lock=false -no-color -out=replan
-          terraform show -json replan > "$RUNNER_TEMP/replan.json"
+          terraform plan -input=false -lock=false -no-color -out="$RUNNER_TEMP/replan"
+          terraform show -json "$RUNNER_TEMP/replan" > "$RUNNER_TEMP/replan.json"
           python -m tools.stack_pipeline --repo-root "$GITHUB_WORKSPACE" converged --plan "$RUNNER_TEMP/replan.json"
           terraform destroy -input=false -lock=false -no-color -auto-approve
 
