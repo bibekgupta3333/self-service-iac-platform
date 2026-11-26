@@ -31,9 +31,12 @@ func (r *PostgresRepository) InTx(ctx context.Context, fn func(Store) error) err
 
 type pgStore struct{ tx pgx.Tx }
 
+// StackIDByPath takes FOR KEY SHARE on the stacks row before anything touches locks, so
+// run reports lock stacks then locks, the same order as every lock operation (which takes
+// stacks FOR UPDATE first). The opposite order deadlocks against release and promotion.
 func (s *pgStore) StackIDByPath(ctx context.Context, path string) (uuid.UUID, error) {
 	var id uuid.UUID
-	err := s.tx.QueryRow(ctx, `SELECT id FROM stacks WHERE path = $1`, path).Scan(&id)
+	err := s.tx.QueryRow(ctx, `SELECT id FROM stacks WHERE path = $1 FOR KEY SHARE`, path).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return uuid.Nil, apperr.NotFound("stack %q not found", path)
 	}

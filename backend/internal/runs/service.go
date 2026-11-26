@@ -36,6 +36,8 @@ type Run struct {
 
 // Store is the transactional persistence port.
 type Store interface {
+	// StackIDByPath resolves and locks (FOR KEY SHARE) the stack row. It is called first, so
+	// the lock order stacks → locks matches the lock service and cannot deadlock with it.
 	StackIDByPath(ctx context.Context, path string) (uuid.UUID, error)
 	RequestByShortID(ctx context.Context, shortID string) (RequestRef, error)
 	// StackLock returns the stack's lock row, locked FOR SHARE so it cannot be released
