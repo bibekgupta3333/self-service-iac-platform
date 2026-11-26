@@ -42,6 +42,15 @@ type StackRef struct {
 	Status string    `json:"status"`
 }
 
+// PRLink is the branch and pull request that carry a request's generated files.
+type PRLink struct {
+	Branch string `json:"branch"`
+	Number int    `json:"pr_number"`
+	URL    string `json:"pr_url"`
+	// HeadSHA is the PR head the platform last accepted (published commit, then synchronize).
+	HeadSHA string `json:"head_sha,omitempty"`
+}
+
 // Request is a change request against one stack. Status changes go through Fire and
 // Approve so the state machine and its invariants hold.
 type Request struct {
@@ -57,7 +66,12 @@ type Request struct {
 	ApprovedPlanHash string
 	ApprovedBy       *uuid.UUID
 	ApprovedAt       *time.Time
-	RetryCount       int // automatic apply retries used (requests.retry_count)
+	RetryCount       int     // automatic apply retries used (requests.retry_count)
+	PR               *PRLink // set once the publisher opened the PR
+	RenderedTreeSHA  string  // git tree of the published commit
+	MergeCommitSHA   string
+	FailureReason    string
+	FailureDetail    json.RawMessage
 	CreatedBy        uuid.UUID
 	CreatedAt        time.Time
 	UpdatedAt        time.Time

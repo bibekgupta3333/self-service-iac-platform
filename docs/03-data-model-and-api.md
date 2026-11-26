@@ -223,6 +223,7 @@ CREATE TABLE requests (
     github_branch      text,
     github_pr_number   int,
     github_pr_url      text,
+    github_head_sha    char(40),                       -- PR head last accepted (webhook replay/order guard)
     merge_commit_sha   char(40),
     approved_plan_hash char(64),                                 -- sha256 of normalised plan JSON
     approved_by        uuid        REFERENCES users(id),
@@ -367,7 +368,7 @@ CREATE INDEX locks_expiry_idx ON locks (expires_at);
 -- ---------- infra tables ----------
 CREATE TABLE webhook_deliveries (
     delivery_id  uuid PRIMARY KEY,           -- X-GitHub-Delivery
-    event        text        NOT NULL,
+    event        text        NOT NULL CHECK (length(event) BETWEEN 1 AND 64),
     received_at  timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX webhook_deliveries_received_idx ON webhook_deliveries (received_at);  -- purge > 7 days
@@ -392,17 +393,28 @@ CREATE TABLE idempotency_keys (
 CREATE INDEX idempotency_keys_created_idx ON idempotency_keys (created_at);       -- purge > 24 h
 
 -- Transactional outbox: side effects (GitHub writes, notifications, schedules) written in the
--- same transaction as the state change, then published to SQS by the worker.
+-- same transaction as the state change. While local-first (ADR-0009) it is also the job queue:
+-- the in-process worker (internal/outbox) claims rows with FOR UPDATE SKIP LOCKED and a lease,
+-- runs the topic handler, and completes, retries (exponential backoff) or gives up. Publishing
+-- rows to SQS instead is a later adapter with the same handler contract.
 CREATE TABLE outbox (
     id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    topic         text        NOT NULL,          -- github.open_pr, github.dispatch, notify.slack, scheduler.ttl …
-    aggregate_id  uuid        NOT NULL,          -- request or stack id (ordering key)
+    topic         text        NOT NULL,          -- request.publish, github.event (later: notify.slack, scheduler.ttl …)
+    aggregate_id  uuid,                          -- request id when known
+    dedupe_key    text,                          -- at most one pending job per key (publish:<request id>)
     payload       jsonb       NOT NULL,
     created_at    timestamptz NOT NULL DEFAULT now(),
-    published_at  timestamptz,
-    attempts      int         NOT NULL DEFAULT 0
+    available_at  timestamptz NOT NULL DEFAULT now(),   -- backoff
+    locked_until  timestamptz,                          -- worker lease
+    attempts      int         NOT NULL DEFAULT 0,
+    last_error    text,
+    processed_at  timestamptz,
+    dead_at       timestamptz                           -- gave up after the last attempt
 );
-CREATE INDEX outbox_unpublished_idx ON outbox (id) WHERE published_at IS NULL;
+CREATE INDEX outbox_pending_idx ON outbox (available_at, id) WHERE processed_at IS NULL AND dead_at IS NULL;
+CREATE UNIQUE INDEX outbox_dedupe_idx ON outbox (dedupe_key)
+    WHERE dedupe_key IS NOT NULL AND processed_at IS NULL AND dead_at IS NULL;
+-- iacp_app: webhook_deliveries SELECT/INSERT/DELETE (7-day purge), outbox SELECT/INSERT/UPDATE (migration 0008).
 ```
 
 `request_kind` extends the four user-facing kinds (create/update/upgrade/destroy) with two platform-initiated kinds: `reconcile` (drift remediation) and `rollback` (revert PR to the last applied spec). Both follow the same state machine.
@@ -505,6 +517,7 @@ Notes:
 stateDiagram-v2
     [*] --> draft: POST /requests
     draft --> pr_open: PR created (lock held)
+    draft --> failed: publish failed (retries exhausted)
     draft --> cancelled: user cancels / queued too long
     pr_open --> validating: pr-validate.yml started
     validating --> plan_ready: all checks passed
@@ -520,7 +533,7 @@ stateDiagram-v2
     approved --> plan_ready: review dismissed
     approved --> validating: new commit pushed (re-plan)
     approved --> rejected: PR closed unmerged
-    approved --> applying: merged → apply.yml started
+    approved --> applying: PR merged (pr_merged) → apply.yml
     applying --> applied: apply ok + outputs reported
     applying --> failed: non-transient error / plan mismatch
     applying --> applying: transient error auto-retry (≤2)
@@ -533,7 +546,8 @@ stateDiagram-v2
 | From | Event | To | Side effects |
 |---|---|---|---|
 | — | `POST /v1/requests` | `draft` | validate, acquire lock or queue, audit `request.created` |
-| `draft` | PR opened by GitHub App | `pr_open` | store branch/PR, audit |
+| `draft` | PR opened by the publisher (`pr_opened`) | `pr_open` | store branch/PR/tree sha, audit `request.transitioned` |
+| `draft` | publisher gave up after its last attempt (`publish_failed`) | `failed` | `failure_reason = publish_failed`, release lock, promote and publish the next waiter |
 | `draft` | cancel / queued > 7 d | `cancelled` | dequeue |
 | `pr_open`/`plan_ready` | `POST /requests/{id}/cancel` | `cancelled` | close PR, release lock |
 | `pr_open` | `workflow_run` (pr-validate) in_progress | `validating` | create `pipeline_runs` |
@@ -544,10 +558,14 @@ stateDiagram-v2
 | `validating`/`plan_ready`/`approved` | `pull_request.synchronize` | `validating` | clear approval & pinned hash; restart validation |
 | `approved` | `pull_request_review` dismissed | `plan_ready` | clear approval & pinned hash |
 | `pr_open`/`validating`/`plan_ready`/`approved` | `pull_request.closed` (unmerged) | `rejected` | release lock |
-| `approved` | `push` to main / `workflow_run` apply in_progress | `applying` | stack → `updating`/`provisioning`/`destroying` |
+| `approved` | `pull_request.closed` merged (`pr_merged`, the push to main) / `workflow_run` apply in_progress | `applying` | store `merge_commit_sha`; the stack status is unchanged until the apply run reports (`provisioning`/`updating`/`destroying` arrive with WBS 5.3) |
 | `applying` | callback apply succeeded | `applied` | stack outputs, `last_applied_sha`; stack → `active`/`destroyed`; release lock; dispatch next queued |
 | `applying` | callback apply failed (transient), `retry_count < 2` | `applying` | `retry_count += 1`; re-dispatch with backoff |
 | `applying` | callback apply failed (non-transient, or transient with retries used up) | `failed` | stack → `failed`; notify; release lock |
+
+**Publishing (WBS 4.8), review hardening.** `PublishTarget` and `RecordPublished` check the stack's current lock row (`locks.CheckToken`), since `requests.fencing_token` is not cleared on release or takeover. Every promotion of a queued request (release, `DELETE …/lock`, or an expired lease handed to the head of the queue) runs the lock service's promotion hook, which enqueues the promoted request's publish job in the grant transaction. Commits replace the stack directory as a whole, keeping files the generator does not render (`.terraform.lock.hcl`); on GitHub only the stack's subtree is listed. A final publish failure withdraws the branch and PR it left behind (best effort, audited), unless a re-read shows a PR is recorded. Outbox outcome writes are guarded by the claim's attempt number.
+
+**Publishing (WBS 4.8).** `POST /v1/requests` inserts a `request.publish` outbox job in the creation transaction when the request holds the lock (and `IACP_PUBLISHER` is not `none`). The worker (`internal/prflow`) renders the stack with the generator outside any transaction, commits it on `iacp/<short_id>` through the `publish.Publisher` port (GitHub App via the git data API, or `localgit` for ADR-0009), opens and labels the PR, then records `pr_opened` in a second transaction that checks the request still holds the lock with the token it was rendered with. Every publisher call is idempotent (the branch is force-moved, an existing PR is returned), so retries converge. Each failed attempt is audited (`request.publish_failed`); the last one fires `publish_failed`. A terminal transition releases the lock in the same transaction (stacks row locked first) and enqueues the promoted request's publish job.
 
 Transitions are enforced in `internal/requests/statemachine.go` by a pure transition table, `Transition(from, event) (to, error)`, and `Next(snapshot, event)`, which also enforces the retry budget (`MaxApplyRetries = 2`, counted in `requests.retry_count`). The `Request` entity wraps them (`Fire`, and `Approve`, which also pins the plan hash); DB updates use `UPDATE … WHERE id=$1 AND status=$2` (optimistic check) so concurrent webhook + callback races resolve deterministically.
 
@@ -979,7 +997,9 @@ Current implementation (WBS 4.10): `pipeline` is one of `validate`, `apply`, `dr
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/webhooks/github` | GitHub App webhook. Verifies `X-Hub-Signature-256` (HMAC-SHA256, constant-time compare), dedupes `X-GitHub-Delivery`, enqueues to SQS, returns `202` in < 100 ms. |
+| POST | `/webhooks/github` | GitHub App webhook. Verifies `X-Hub-Signature-256` (HMAC-SHA256, constant-time compare; `401 webhook_not_configured` without `IACP_GITHUB_WEBHOOK_SECRET`, `401 invalid_signature` otherwise), caps the body at 2 MiB, dedupes `X-GitHub-Delivery` (`webhook_deliveries` primary key) and enqueues the mapped command in the same transaction, returns `202 {"accepted","duplicate","enqueued"}`. Local-first: the queue is the `outbox` table, not SQS. |
+
+Current implementation (WBS 4.9): `pull_request` closed+merged → `pr_merged`, closed unmerged → `pr_closed` (→ `rejected`, lock released), `synchronize` → `new_commit`; `workflow_run` completed → audited as `request.workflow_run_completed` (no transition; run reports drive status). Only branches named `iacp/<short_id>` map to requests, and when `IACP_GITHUB_REPOSITORY` is set other repositories are ignored. The worker applies commands idempotently: an event that is not allowed in the current status, or names another PR, is audited as `request.github_event_ignored`. Commands carry the PR head SHA, tracked in `requests.github_head_sha` (the published commit, then each accepted push). Only a `synchronize` is head-checked: it must start from the known head, so a replayed old push (the delivery id is not signed) cannot clear an approval. On a mismatch the worker re-reads the PR head through the publisher and, if it moved, applies one push from the known head to it; a replay finds the head unchanged and is audited as `stale_head`. Closes and merges are never dropped for their head, since they are status-guarded and a dropped close would keep the stack lock. A push still moves the tracked head when `new_commit` is not allowed in the current status. An event for a `draft` request whose PR is not recorded yet is retried through the outbox with backoff for about 13.5 minutes. The repository filter is case-insensitive. Every other event is acknowledged with `202` and no job. Reviews, `check_run`, `push` and installation events are follow-ups.
 
 Subscribed events and handling:
 
@@ -1033,6 +1053,7 @@ All errors use RFC 9457 Problem Details (`application/problem+json`) with the pl
 | 409 | `stack_locked` | Operation needs lock immediately (e.g. `preview` with `exclusive=true`); body includes `holder` and `request_id` |
 | 409 | `invalid_transition` | e.g. cancel an `applying` request |
 | 409 | `stale_fencing_token` | Callback from superseded run |
+| 401 | `invalid_signature` / `webhook_not_configured` | Webhook signature missing or wrong / no webhook secret configured |
 | 409 | `stack_exists` | Create for existing env/team/name |
 | 412 | `precondition_failed` | `If-Match` mismatch |
 | 422 | `validation_failed` | Schema/semantic validation |

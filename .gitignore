@@ -20,8 +20,13 @@ crash.log
 # Node / Next.js
 node_modules/
 .next/
-# Go
+# Go build outputs (`go build ./cmd/api` from backend/ writes backend/api)
 /backend/bin/
+/backend/api
+/backend/worker
+/backend/*.test
+/backend/*.out
+/tests/*.test
 # Env
 .env
 .env.*
