@@ -35,7 +35,7 @@ The module declares no provider. The calling root configures `provider "aws"`.
 |---|---|
 | Encryption at rest | SSE with a customer managed key. A dedicated key with rotation is created unless `kms_key_arn` is set. The AWS owned and `aws/dynamodb` keys are never used. |
 | Recoverable | Point-in-time recovery is always on (not an input). Deletion protection is on outside development and cannot be turned off there. |
-| Cost | On-demand billing (`PAY_PER_REQUEST`) by default. `PROVISIONED` needs explicit `read_capacity` and `write_capacity`. |
+| Cost | On-demand billing (`PAY_PER_REQUEST`) by default. `PROVISIONED` needs explicit `read_capacity` and `write_capacity`; capacity auto scaling is not supported in v1.0.0 (see below). |
 | Least privilege | No roles or resource policies. Callers attach `read_policy_json` / `write_policy_json`, whose KMS grants only apply through DynamoDB (`kms:ViaService`). Actions are explicit, so the documents pass the lambda module's `extra_policy_jsons` guard. |
 | Tagging | `iacp:team`, `iacp:environment`, `iacp:stack`, `iacp:module`, `iacp:managed-by` are merged last on the table and the key. |
 
@@ -43,6 +43,15 @@ Attribute definitions are derived from the key attributes of the table and its
 indexes. Non-key attributes need no definition in DynamoDB. A key attribute
 shared between the table and an index, or between indexes, must use the same
 type everywhere, which `variables.tf` checks.
+
+## Provisioned capacity and auto scaling
+
+The module does not create Application Auto Scaling targets or policies, and
+it does not ignore capacity changes, because `ignore_changes` cannot depend on
+an input. With `PROVISIONED` billing the table (and each index) keeps exactly
+`read_capacity` / `write_capacity`; if something else scales the table, the
+next apply resets it. Use on-demand billing for variable load, or change the
+capacity inputs. Auto scaling may come in a later minor release.
 
 ## Inputs
 
@@ -76,7 +85,7 @@ type everywhere, which `variables.tf` checks.
 | `name` | Table name (`<team>-<environment>-<name>`). |
 | `stream_arn` | Stream ARN, or null when streams are off. |
 | `kms_key_arn` | ARN of the KMS key encrypting the table. |
-| `read_policy_json` | IAM policy document for readers (get, query, scan on the table and its indexes; decrypt through DynamoDB). |
+| `read_policy_json` | IAM policy document for readers (get, query, scan on the table and its indexes; decrypt through DynamoDB). With a stream, it also grants `DescribeStream`, `GetRecords` and `GetShardIterator` on the stream and `ListStreams`, which is what a Lambda event source mapping needs. |
 | `write_policy_json` | IAM policy document for writers (put, update, delete, batch write; encrypt and decrypt through DynamoDB). |
 | `iacp_metadata` | `{ module = "dynamodb", version = "1.0.0" }` for inventory and drift correlation. |
 

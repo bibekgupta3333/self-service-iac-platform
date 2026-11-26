@@ -24,7 +24,7 @@ output "kms_key_arn" {
 }
 
 output "read_policy_json" {
-  description = "IAM policy document granting read access to the table and its indexes, and decrypt through DynamoDB on its key."
+  description = "IAM policy document granting read access to the table and its indexes (and its stream, when enabled), and decrypt through DynamoDB on its key."
   value       = data.aws_iam_policy_document.read.json
 }
 

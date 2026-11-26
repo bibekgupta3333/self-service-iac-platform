@@ -22,4 +22,6 @@ as git tags `modules/dynamodb/vX.Y.Z`.
 - Optional TTL attribute and optional stream (`stream_arn` output).
 - `read_policy_json` and `write_policy_json` least-privilege outputs with
   explicit actions and KMS access limited to DynamoDB (`kms:ViaService`).
+  `read_policy_json` also covers the stream when one is on.
+- Provisioned capacity is applied as given; auto scaling is not supported.
 - Mandatory `iacp:*` tags on the table and the key.

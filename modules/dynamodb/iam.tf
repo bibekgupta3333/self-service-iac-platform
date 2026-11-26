@@ -18,6 +18,35 @@ data "aws_iam_policy_document" "read" {
     resources = [aws_dynamodb_table.this.arn, "${aws_dynamodb_table.this.arn}/index/*"]
   }
 
+  # Stream consumers (for example a Lambda event source mapping) read the
+  # table's stream; only present when stream_view_type enables one.
+  dynamic "statement" {
+    for_each = var.stream_view_type == null ? [] : [aws_dynamodb_table.this.stream_arn]
+
+    content {
+      sid    = "ReadStream"
+      effect = "Allow"
+      actions = [
+        "dynamodb:DescribeStream",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+      ]
+      resources = [statement.value]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.stream_view_type == null ? [] : [true]
+
+    content {
+      # ListStreams does not support resource-level permissions.
+      sid       = "ListStreams"
+      effect    = "Allow"
+      actions   = ["dynamodb:ListStreams"]
+      resources = ["*"]
+    }
+  }
+
   statement {
     sid       = "DecryptThroughDynamoDB"
     effect    = "Allow"

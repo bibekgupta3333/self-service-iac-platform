@@ -99,7 +99,7 @@ variable "range_key_type" {
 # ---- Capacity ----
 
 variable "billing_mode" {
-  description = "PAY_PER_REQUEST (on-demand, the default) or PROVISIONED (requires read_capacity and write_capacity)."
+  description = "PAY_PER_REQUEST (on-demand, the default) or PROVISIONED (requires read_capacity and write_capacity; capacity auto scaling is not supported)."
   type        = string
   default     = "PAY_PER_REQUEST"
 
