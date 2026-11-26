@@ -15,9 +15,12 @@ policy="$here/../opa"
 context="$here/context.json"
 
 expected_denies=(
+  iacp.encryption.dynamodb_cmk
   iacp.encryption.kms_rotation
   iacp.encryption.s3_cmk
   iacp.encryption.s3_kms
+  iacp.encryption.sns_kms
+  iacp.encryption.sns_sse
   iacp.encryption.sqs_kms
   iacp.encryption.sqs_sse
   iacp.forbidden.data_source

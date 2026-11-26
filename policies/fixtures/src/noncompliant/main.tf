@@ -173,3 +173,27 @@ resource "terraform_data" "bootstrap" {
     command = "echo bootstrap"
   }
 }
+
+# iacp.encryption.sns_sse: no server-side encryption.
+resource "aws_sns_topic" "plain" {
+  name = "orders-plain"
+}
+
+# iacp.encryption.sns_kms: the AWS-managed key outside development.
+resource "aws_sns_topic" "aws_managed" {
+  name              = "orders-aws-managed"
+  kms_master_key_id = "alias/aws/sns"
+}
+
+# iacp.encryption.dynamodb_cmk: the AWS owned key (no server_side_encryption
+# block) outside development.
+resource "aws_dynamodb_table" "plain" {
+  name         = "orders-plain"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "pk"
+
+  attribute {
+    name = "pk"
+    type = "S"
+  }
+}
