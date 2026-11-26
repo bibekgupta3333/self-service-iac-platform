@@ -31,6 +31,8 @@ type userAuth struct {
 	Public  []httpapi.RouteRegistrar
 	Roles   httpapi.RoleLookup
 	Denials httpapi.EventRecorder
+	// Streams lets open event streams notice that their session ended (github mode only).
+	Streams httpapi.StreamSession
 }
 
 // newUserAuth builds the user authenticator for cfg.AuthMode. In dev mode the fixed local
@@ -74,7 +76,8 @@ func newUserAuth(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, clo
 		}
 		login := oauth.NewService(gh, states, syncer, sessions, recorder,
 			oauth.RedirectPolicy{Origins: g.RedirectAllowlist, Default: g.DefaultRedirect}, clock)
-		out.Authenticator = httpapi.NewSessionAuthenticator(sessions, g.SecureCookies())
+		sessionAuth := httpapi.NewSessionAuthenticator(sessions, g.SecureCookies())
+		out.Authenticator, out.Streams = sessionAuth, sessionAuth
 		out.Handler = &httpapi.AuthHandler{Login: login, Sessions: sessions, Profiles: users, Audit: recorder,
 			Secure: g.SecureCookies(), Mode: string(config.AuthModeGitHub),
 			LoginLimiter: ratelimit.New(loginsPerMinute, time.Minute, 10_000, clock)}

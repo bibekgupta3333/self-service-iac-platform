@@ -37,6 +37,10 @@ type StreamOptions struct {
 	// Stop, when closed, ends every open stream at once. The server passes its shutdown
 	// signal, so http.Server.Shutdown does not wait out streams of up to MaxLifetime.
 	Stop <-chan struct{}
+	// Session, when set, is asked on every poll whether the session behind the request is
+	// still live; the stream ends when it is not, so logout or revocation cuts it at once
+	// instead of after MaxLifetime. Nil in dev mode, which has no sessions.
+	Session StreamSession
 }
 
 // DefaultStreamOptions are the production timings.
@@ -315,6 +319,14 @@ func (h *RequestEventsHandler) stream(w http.ResponseWriter, r *http.Request) {
 			}
 			beat.Reset(h.opts.Heartbeat)
 		case <-poll.C:
+			if h.opts.Session != nil {
+				if err := h.opts.Session.Alive(ctx, r); err != nil {
+					if ctx.Err() == nil {
+						log.InfoContext(ctx, "status stream ended: session is no longer live", "request", id, "reason", err.Error())
+					}
+					return
+				}
+			}
 			events, err := h.svc.StatusEventsAfter(ctx, p, id, after, feedBatch)
 			if err != nil {
 				if ctx.Err() == nil {

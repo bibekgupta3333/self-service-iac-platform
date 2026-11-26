@@ -211,6 +211,37 @@ func TestTouchIsThrottled(t *testing.T) {
 	}
 }
 
+// Check answers like Resolve but never slides the idle window, so an open stream cannot
+// keep an idle session alive.
+func TestCheckDoesNotSlideTheIdleWindow(t *testing.T) {
+	svc, store, clock := newTestService(t)
+	ctx := context.Background()
+	id, _ := svc.Issue(ctx, uuid.New())
+
+	clock.advance(10 * time.Minute) // past the touch interval, inside the idle window
+	if _, err := svc.Check(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if store.touches != 0 {
+		t.Fatalf("Check touched the session %d times", store.touches)
+	}
+	clock.advance(25 * time.Minute) // 35 minutes since the last real request: idle
+	if _, err := svc.Check(ctx, id); !errors.Is(err, ErrIdle) {
+		t.Fatalf("an idle session: %v", err)
+	}
+	if _, err := svc.Check(ctx, "garbage"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a malformed id: %v", err)
+	}
+
+	live, _ := svc.Issue(ctx, uuid.New())
+	if err := svc.Revoke(ctx, live); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Check(ctx, live); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("a revoked session: %v", err)
+	}
+}
+
 func TestRevocation(t *testing.T) {
 	svc, _, _ := newTestService(t)
 	u := uuid.New()

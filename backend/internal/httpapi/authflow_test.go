@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,14 +27,22 @@ type flowClock struct{ t time.Time }
 
 func (c *flowClock) Now() time.Time { return c.t }
 
-type flowStore struct{ rows map[string]session.Record }
+// flowStore is locked: an open event stream reads it from the handler goroutine.
+type flowStore struct {
+	mu   sync.Mutex
+	rows map[string]session.Record
+}
 
 func (s *flowStore) Insert(_ context.Context, r session.Record) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	r.Login = "priya"
 	s.rows[string(r.IDHash)] = r
 	return nil
 }
 func (s *flowStore) Get(_ context.Context, h []byte) (session.Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	r, ok := s.rows[string(h)]
 	if !ok {
 		return session.Record{}, session.ErrNotFound
@@ -41,12 +50,16 @@ func (s *flowStore) Get(_ context.Context, h []byte) (session.Record, error) {
 	return r, nil
 }
 func (s *flowStore) Touch(_ context.Context, h []byte, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	r := s.rows[string(h)]
 	r.LastSeenAt = now
 	s.rows[string(h)] = r
 	return nil
 }
 func (s *flowStore) Revoke(_ context.Context, h []byte, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if r, ok := s.rows[string(h)]; ok {
 		r.RevokedAt = &now
 		s.rows[string(h)] = r
