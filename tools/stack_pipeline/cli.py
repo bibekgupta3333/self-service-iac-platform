@@ -13,7 +13,7 @@ from typing import Any, Mapping, Sequence
 
 from .adapters import AwsCliTagReader, FileSystemStackRepository, GitCli, GitDiff
 from .api_client import ApiError, FreshCredentials, IacpApiClient, TokenSource
-from .cost import parse_infracost
+from .cost import fold_cost, parse_infracost, redact_plan
 from .detection import DEFAULT_MAX_STACKS, DetectionError, DetectionPolicy, DetectionResult, StackDetector
 from .models import StackMetadataError
 from .module_install import MANIFEST, ModuleInstallVerifier, parse_manifest
@@ -100,6 +100,15 @@ def build_parser() -> argparse.ArgumentParser:
     installed = sub.add_parser("verify-modules", help="after init: match installed modules to the pins one to one")
     installed.add_argument("stack_dir", type=Path)
     installed.add_argument("--repo-url", default=DEFAULT_REPO_URL, help="module repository URL used in stack sources")
+
+    cost_input = sub.add_parser("cost-input", help="plan JSON for the separate Infracost job, sensitive values nulled")
+    cost_input.add_argument("--plan", type=Path, required=True, help="terraform show -json tfplan")
+    cost_input.add_argument("--out", type=Path, required=True)
+
+    fold = sub.add_parser("fold-cost", help="add an Infracost estimate to a rendered summary (in place)")
+    fold.add_argument("--summary-json", type=Path, required=True, help="summary --json-out document")
+    fold.add_argument("--markdown", type=Path, required=True, help="summary --markdown-out document")
+    fold.add_argument("--cost", type=Path, required=True, help="infracost breakdown --format json output")
 
     sarif = sub.add_parser("sarif", help="rewrite a stack's TFLint or Checkov SARIF to repository-relative paths")
     sarif.add_argument("stack_dir", type=Path)
@@ -273,6 +282,31 @@ def run_verify_modules(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_cost_input(args: argparse.Namespace) -> int:
+    plan = _read_json(args.plan)
+    if not isinstance(plan, dict):
+        raise ValueError(f"{args.plan} is missing or is not a plan JSON object")
+    args.out.write_text(json.dumps(redact_plan(plan)) + "\n", encoding="utf-8")
+    print(f"wrote the redacted plan for Infracost to {args.out}")
+    return 0
+
+
+def run_fold_cost(args: argparse.Namespace) -> int:
+    """Informational: a missing or unreadable estimate leaves the summary as it is."""
+    estimate = parse_infracost(_read_json(args.cost))
+    summary = _read_json(args.summary_json)
+    markdown = _read_text(args.markdown)
+    if estimate is None or not isinstance(summary, dict) or markdown is None:
+        print("::notice title=No cost estimate::the summary is left without a cost line "
+              "(no Infracost output, or no summary to add it to)")
+        return 0
+    folded, md = fold_cost(summary, markdown, estimate)
+    args.summary_json.write_text(json.dumps(folded, indent=2) + "\n", encoding="utf-8")
+    args.markdown.write_text(md, encoding="utf-8")
+    print(estimate.render_markdown())
+    return 0
+
+
 def run_sarif(args: argparse.Namespace) -> int:
     meta = FileSystemStackRepository(args.repo_root).load_dir(args.stack_dir)
     doc = _read_json(args.input)
@@ -442,6 +476,8 @@ COMMANDS = {
     "summary": run_summary,
     "verify-pins": run_verify_pins,
     "verify-modules": run_verify_modules,
+    "cost-input": run_cost_input,
+    "fold-cost": run_fold_cost,
     "sarif": run_sarif,
     "smoke": run_smoke,
     "report": run_report,
