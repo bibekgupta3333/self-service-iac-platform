@@ -379,7 +379,7 @@ Indexing is idempotent on `(module, version)`; re-indexing the same version with
 |---|---|---|---|---|
 | **s3** (MVP) | `aws_s3_bucket`, versioning, SSE config, public access block, ownership controls, lifecycle, bucket policy, `aws_kms_key` + alias, optional logging target | `name`, `versioning_enabled`, `kms_key_arn`, `noncurrent_version_expiration_days`, `transition_to_ia_days`, `force_destroy` | SSE-KMS with CMK + bucket key, all public access blocked, `BucketOwnerEnforced`, TLS-only policy, versioning on, `force_destroy=false` | `id`, `arn`, `name`, `kms_key_arn`, `read_policy_json`, `write_policy_json` |
 | **sqs** (MVP) | `aws_sqs_queue` (main + DLQ), redrive policy, redrive allow policy, queue policy, `aws_kms_key`, CloudWatch alarms (DLQ depth, age of oldest message) | `name`, `fifo`, `visibility_timeout_seconds`, `message_retention_seconds`, `max_receive_count`, `dlq_retention_seconds` | SSE-KMS CMK, DLQ always created, TLS-only policy, no wildcard principals, alarms on DLQ > 0 | `id` (URL), `arn`, `name`, `dlq_arn`, `dlq_url`, `kms_key_arn`, `consumer_policy_json`, `producer_policy_json` |
-| **lambda** (MVP) | `aws_lambda_function`, execution role + boundary, log group (retention + KMS), optional SQS event source mapping, optional function URL (disabled), alarms | `name`, `runtime`, `handler`, `artifact_s3_uri`, `memory_mb`, `timeout_seconds`, `environment_variables`, `sqs_trigger`, `extra_policy_jsons` | Role with permission boundary `iacp-boundary`, no function URL, X-Ray active, log retention 30d, env vars encrypted with CMK, reserved concurrency set, code signing config in prod | `id`, `arn`, `name`, `role_arn`, `invoke_arn`, `log_group_name` |
+| **lambda** (MVP) | `aws_lambda_function`, execution role under `/iacp/` + boundary, log group (retention + KMS), optional SQS event source mapping (tagged), `aws_kms_key` | `name`, `runtime`, `handler`, `artifact_s3_uri`, `memory_mb`, `timeout_seconds`, `environment_variables`, `sqs_trigger`, `dead_letter_target_arn`, `extra_policy_jsons` (map) | Role always carries a permissions boundary (default `iacp-boundary`), no function URL, X-Ray active (required in prod), log retention 30d, env vars encrypted with CMK, reserved concurrency 1-1000 (required in prod). Default alarms and code signing in prod are planned for a later minor release | `id`, `arn`, `name`, `role_arn`, `invoke_arn`, `log_group_name`, `kms_key_arn` |
 | **ecs-service** | ECS service + task def, ALB target group + listener rule, ECR repository, security groups, log group, autoscaling | `name`, `image_tag`, `cpu`, `memory`, `desired_count`, `container_port`, `health_check_path`, `cluster_arn`, `vpc_id`, `subnet_ids` | Fargate only, private subnets, no public IP, ECR scan on push + immutable tags, read-only root FS, non-root user, HTTPS listener only | `id`, `arn`, `name`, `service_url`, `task_role_arn`, `ecr_repository_url`, `security_group_id` |
 | **postgres** | `aws_db_instance` (or Aurora later), subnet group, parameter group, security group, Secrets Manager secret (managed master password), KMS key, alarms | `name`, `engine_version`, `instance_class`, `allocated_storage_gb`, `multi_az`, `vpc_id`, `subnet_ids`, `allowed_security_group_ids` | Not publicly accessible, storage encrypted CMK, `rds.force_ssl=1`, managed master password, backups 7d (35d prod), deletion protection + final snapshot in prod, IAM auth on, Performance Insights encrypted | `id`, `arn`, `name`, `connection` {host, port, secret_arn}, `security_group_id` |
 | **redis** | `aws_elasticache_replication_group`, subnet group, parameter group, security group, auth token secret, KMS key | `name`, `node_type`, `num_cache_clusters`, `engine_version`, `vpc_id`, `subnet_ids`, `allowed_security_group_ids` | At-rest + in-transit encryption, AUTH token in Secrets Manager, automatic failover when >1 node, snapshots on, private subnets only | `id`, `arn`, `name`, `connection` {host, port, secret_arn}, `security_group_id` |
@@ -713,18 +713,20 @@ variable "environment_variables" {
 }
 
 variable "sqs_trigger" {
-  description = "Optional SQS trigger; queue_arn is wireable from the sqs module."
+  description = "Optional SQS trigger; queue_arn and kms_key_arn are wireable from the sqs module."
   type = object({
-    queue_arn  = string
-    batch_size = optional(number, 10)
+    queue_arn                          = string
+    batch_size                         = optional(number, 10) # 1-10 unless a batching window is set
+    maximum_batching_window_in_seconds = optional(number, 0)
+    kms_key_arn                        = optional(string) # role gets kms:Decrypt on it
   })
   default = null
 }
 
 variable "extra_policy_jsons" {
-  description = "Additional IAM policy documents (e.g. s3 read_policy_json). Must not contain '*' actions."
-  type        = list(string)
-  default     = []
+  description = "Additional IAM policy documents keyed by a stable name (e.g. { orders-read = s3 read_policy_json }). Allow statements may not use '*', '<service>:*', NotAction or NotResource."
+  type        = map(string)
+  default     = {}
 }
 
 # outputs.tf
