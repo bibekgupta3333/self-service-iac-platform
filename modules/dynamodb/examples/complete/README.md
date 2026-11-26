@@ -17,9 +17,14 @@ terraform init -backend=false && terraform apply && terraform destroy
 ```bash
 terraform plan -out tfplan && terraform show -json tfplan > plan.json
 conftest test plan.json -p ../../../../policies/opa --data policy-context.json
+
+# The same example as a staging stack, where the stricter branches apply
+# (customer-managed keys required, deletion protection on).
+terraform plan -var environment=staging -out tfplan && terraform show -json tfplan > plan.json
+conftest test plan.json -p ../../../../policies/opa --data policy-context.staging.json
 ```
 
-Expected result: no denies except `iacp.forbidden.module_source` for the
+Expected result for both contexts: no denies except `iacp.forbidden.module_source` for the
 module call. The example calls the module through a relative path (`../../`)
 so it tests the working tree. Generated stacks always use a pinned
 `git::…?ref=modules/dynamodb/vX.Y.Z` source, and that rule stays non-waivable.
