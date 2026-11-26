@@ -1,10 +1,12 @@
 # Module release (WBS 3.6, 3.7). See docs/04-module-registry.md section 9 and
 # docs/05-automation-pipeline.md section 4.6.
 #
-# pull_request: check-only. Runs the SemVer interface-diff gate for every module
-#   the PR touches, and for every module whose version is not tagged yet
-#   (merging will release it). Nothing is tagged.
-# push to main: runs the gate for changed modules and for modules whose declared
+# pull_request: check-only, on every PR so the required "semver gate result"
+#   check always reports. When the PR touches modules/ or this tooling, runs the
+#   SemVer interface-diff gate for every module it touches and for every module
+#   whose version is not tagged yet (merging will release it). Otherwise the
+#   matrix is empty and the check passes. Nothing is tagged.
+# push to main: runs the gate for changed modules and modules whose declared
 #   version has no tag yet, then creates modules/<name>/v<version>, a GitHub
 #   release, and (when configured) indexes the version in the catalog.
 #
@@ -13,12 +15,8 @@
 name: module-release
 
 on:
+  # No paths filter: a required check must report on every PR (see detect).
   pull_request:
-    paths:
-      - "modules/**"
-      - "tools/module_release/**"
-      - "tools/requirements.txt"
-      - ".github/workflows/module-release.yml"
   push:
     branches: [main]
     paths:
@@ -37,6 +35,8 @@ concurrency:
 
 env:
   PYTHON_VERSION: "3.12"
+  # Paths that can change what the gate decides; detect skips the tool otherwise.
+  RELEASE_PATHS: modules tools/module_release tools/requirements.txt .github/workflows/module-release.yml
 
 defaults:
   run:
@@ -55,17 +55,8 @@ jobs:
           fetch-depth: 0 # tags and history for the diff base
           persist-credentials: false
 
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-          cache-dependency-path: tools/requirements.txt
-
-      - name: Install tool dependencies
-        run: python -m pip install --quiet -r tools/requirements.txt
-
-      - id: detect
-        name: Detect modules
+      - id: scope
+        name: Check whether the gate is needed
         env:
           EVENT: ${{ github.event_name }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
@@ -73,12 +64,41 @@ jobs:
         run: |
           if [ "$EVENT" = "pull_request" ]; then
             base="$(git merge-base "$PR_BASE" HEAD)"
+            # RELEASE_PATHS is a space-separated list of pathspecs.
+            # shellcheck disable=SC2086
+            changed="$(git diff --name-only "$base" HEAD -- $RELEASE_PATHS)"
+            needed=$([ -n "$changed" ] && echo true || echo false)
           else
             base="$PUSH_BEFORE"
+            needed=true # push is already path-filtered
+          fi
+          { echo "base=$base"; echo "needed=$needed"; } | tee -a "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        if: steps.scope.outputs.needed == 'true'
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: tools/requirements.txt
+
+      - name: Install tool dependencies
+        if: steps.scope.outputs.needed == 'true'
+        run: python -m pip install --quiet -r tools/requirements.txt
+
+      - id: detect
+        name: Detect modules
+        env:
+          NEEDED: ${{ steps.scope.outputs.needed }}
+          BASE: ${{ steps.scope.outputs.base }}
+        run: |
+          if [ "$NEEDED" != "true" ]; then
+            echo "modules=[]" | tee -a "$GITHUB_OUTPUT"
+            exit 0
           fi
           # --include-untagged: a module whose declared version has no tag is
           # released on the next push to main, so a failed or skipped run self-heals.
-          modules="$(python -m tools.module_release detect --base "$base" --include-untagged)"
+          args=(detect --base "$BASE" --include-untagged)
+          modules="$(python -m tools.module_release "${args[@]}")"
           echo "modules=$modules" | tee -a "$GITHUB_OUTPUT"
 
   gate:
@@ -120,7 +140,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
 
-  # Single status check for branch protection, green when no module changed.
+  # Single status check for branch protection; green when the gate passed or was not needed.
   gate-result:
     name: semver gate result
     needs: [detect, gate]
