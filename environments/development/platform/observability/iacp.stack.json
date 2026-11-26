@@ -1,0 +1,17 @@
+{
+  "backend": "local",
+  "depends_on": [],
+  "environment": "development",
+  "fencing_token": 1,
+  "lifecycle": "active",
+  "modules": {
+    "observability": {
+      "ref": "modules/monitoring/v1.0.0",
+      "sha": "4537d679f5419c0011881982f25fa9af100c550c"
+    }
+  },
+  "region": "us-east-1",
+  "request_id": "req-obs001",
+  "stack": "observability",
+  "team": "platform"
+}
