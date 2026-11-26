@@ -162,6 +162,12 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
   - requests list (All/Mine, team filter, cursor paging) and request detail with a status timeline, refreshed every 5 s until terminal
   - CI job `portal` (npm ci, lint, typecheck, test, build) and make targets `portal-install`, `portal-dev`, `portal-test`
 
+- Pipeline extras (WBS 5.4, 5.5, 5.7, 6.1):
+  - Code scanning: TFLint and Checkov also write SARIF in `ci.yml` (modules) and `pr-validate.yml` (per stack); the gating runs are unchanged. `tools.stack_pipeline sarif` rewrites stack SARIF to repository paths, and a separate `code-scanning` job uploads it with `github/codeql-action/upload-sarif` under one category per tool and stack (`ci/tflint`, `ci/checkov`, `pr-validate/<tool>/<stack-id>`).
+  - Informational Infracost estimate per stack in `pr-validate.yml` (pinned `0.10.49`, sha256 verified), in its own `cost` job on a redacted plan (`cost-input`), folded into `summary.json` and the sticky comment by a `cost-summary` job (`fold-cost`). It never changes the result. Skipped with a notice while `INFRACOST_API_KEY` is not configured.
+  - Post-apply smoke test in `apply.yml`: `tools.stack_pipeline smoke` checks the declared outputs and the required `iacp:*` tags in state and on the live LocalStack resources (read-only AWS CLI calls), writes the job summary and is reported as stage `smoke`. It refuses any endpoint that is not loopback or `*.localstack.cloud`.
+  - `apply.yml` documents its provider cache parity with `pr-validate.yml`.
+
 ### Security
 - The backend fails closed: it binds to loopback by default, refuses to start without `IACP_AUTH_MODE`, keeps internal endpoints behind a constant-time token check, and enforces team membership on request creation.
 - The API runs as the `iacp_app` role, which can only INSERT and SELECT on `audit_events`. Triggers block UPDATE, DELETE and TRUNCATE.
@@ -177,16 +183,20 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 - Pull-request tokens can now also read the budget context, which is read-only, for any team's stack path (an accepted exposure, documented in docs/07). They still cannot take locks or index the catalog.
 - `tools/stack_pipeline` mints a new GitHub OIDC token for every API request, retries included, because the API now rejects a reused `jti`; the shared internal token is still reused.
 - `tools/codeowners` only counts git-tracked stack roots and rejects `platform_paths` under `/environments/<env>/`, which team rules would shadow.
+- `security-events: write` is granted only to the `code-scanning` upload jobs, which run no PR code; fork and Dependabot PRs skip the upload. Stack SARIF paths always stay inside the repository, and a run's own `automationDetails` is dropped so a PR cannot pick its category. `INFRACOST_API_KEY` is passed only to the `cost` job, which runs no PR code.
 
 ### Changed
 - `AGENTS.md`: local-first rules, the 70/30 object-oriented and functional coding style, and the small-commit, reviewed-PR workflow.
+
+### Removed
+- The compiled `backend/api` binary (8.7 MB) is no longer tracked; Go build outputs under `backend/` and `tests/` are ignored.
 
 ### Planned
 - M0 Foundations (remaining): smoke stack against LocalStack. The real-AWS state bucket and OIDC roles are deferred by ADR-0009.
 - M1 Module registry (remaining): upgrade-plan test and CHANGELOG/upgrade-notes check in `module-release.yml`, a live catalog index once a hosted API exists, Lambda Terratest.
 - M2 Orchestration engine (remaining): GitHub App PRs, webhooks, OAuth/RBAC, `pr-validate.yml`, `apply.yml`.
-- M3 Security gates (remaining): SARIF upload, wiring the budget context into the workflows, approval and budget policies, applying the ruleset and Environment protection.
-- M4 Portal and destroy: Next.js dashboard, destroy flow, Infracost comments.
+- M3 Security gates (remaining): wiring the budget context into the workflows, approval and budget policies, applying the ruleset and Environment protection.
+- M4 Portal and destroy: Next.js dashboard, destroy flow, Infracost budget gating (WBS 8.5).
 
 ## [0.1.0] - 2026-11-24
 

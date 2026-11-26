@@ -11,14 +11,17 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .adapters import FileSystemStackRepository, GitCli, GitDiff
+from .adapters import AwsCliTagReader, FileSystemStackRepository, GitCli, GitDiff
 from .api_client import ApiError, FreshCredentials, IacpApiClient, TokenSource
+from .cost import fold_cost, parse_infracost, redact_plan
 from .detection import DEFAULT_MAX_STACKS, DetectionError, DetectionPolicy, DetectionResult, StackDetector
 from .models import StackMetadataError
 from .module_install import MANIFEST, ModuleInstallVerifier, parse_manifest
 from .module_pins import DEFAULT_REPO_URL, DEFAULT_TRUSTED_REF, ModulePinVerifier, PinError, Resolution, insteadof_config
 from .plan_summary import render_markdown, summarize
 from .policy_context import build_context
+from .sarif import SarifError, rebase_sarif, result_count
+from .smoke import SmokeTester
 from .report import (
     GitHubRun,
     ReportError,
@@ -68,6 +71,8 @@ def build_parser() -> argparse.ArgumentParser:
     summary.add_argument("--plan", type=Path, help="terraform show -json output (may be missing)")
     summary.add_argument("--conftest", type=Path, help="conftest --output json result (may be missing)")
     summary.add_argument("--plan-text", type=Path, help="terraform plan text output (may be missing)")
+    summary.add_argument("--cost", type=Path,
+                         help="infracost breakdown --format json output (informational; may be missing)")
     summary.add_argument("--step", action="append", default=[], metavar="NAME=OUTCOME", help="step outcome (repeatable)")
     summary.add_argument("--commit", default="", help="head commit shown in the comment")
     summary.add_argument("--run-url", default="", help="workflow run URL shown in the comment")
@@ -95,6 +100,35 @@ def build_parser() -> argparse.ArgumentParser:
     installed = sub.add_parser("verify-modules", help="after init: match installed modules to the pins one to one")
     installed.add_argument("stack_dir", type=Path)
     installed.add_argument("--repo-url", default=DEFAULT_REPO_URL, help="module repository URL used in stack sources")
+
+    cost_input = sub.add_parser("cost-input", help="plan JSON for the separate Infracost job, sensitive values nulled")
+    cost_input.add_argument("--plan", type=Path, required=True, help="terraform show -json tfplan")
+    cost_input.add_argument("--out", type=Path, required=True)
+
+    fold = sub.add_parser("fold-cost", help="add an Infracost estimate to a rendered summary (in place)")
+    fold.add_argument("--summary-json", type=Path, required=True, help="summary --json-out document")
+    fold.add_argument("--markdown", type=Path, required=True, help="summary --markdown-out document")
+    fold.add_argument("--cost", type=Path, required=True, help="infracost breakdown --format json output")
+
+    sarif = sub.add_parser("sarif", help="rewrite a stack's TFLint or Checkov SARIF to repository-relative paths")
+    sarif.add_argument("stack_dir", type=Path)
+    sarif.add_argument("--in", dest="input", type=Path, required=True, help="SARIF written inside the stack root")
+    sarif.add_argument("--out", type=Path, required=True)
+    sarif.add_argument("--external-dir", action="append", default=[],
+                       help="Checkov --external-modules-download-path (repeatable)")
+
+    smoke = sub.add_parser("smoke", help="post-apply smoke test: declared outputs and iacp:* tags (state and live)")
+    smoke.add_argument("stack_dir", type=Path)
+    smoke.add_argument("--plan", type=Path, required=True, help="terraform show -json tfplan (declared outputs)")
+    smoke.add_argument("--outputs", type=Path, required=True, help="terraform output -json")
+    smoke.add_argument("--state", type=Path, required=True, help="terraform show -json after apply")
+    smoke.add_argument("--endpoint-url", default=os.environ.get("AWS_ENDPOINT_URL", ""),
+                       help="LocalStack or loopback endpoint for the live probes (default: $AWS_ENDPOINT_URL); "
+                            "required: an empty or other endpoint is refused, so the probes never reach real AWS")
+    smoke.add_argument("--region", default="", help="default: region in iacp.stack.json")
+    smoke.add_argument("--markdown-out", type=Path)
+    smoke.add_argument("--json-out", type=Path)
+
     report = sub.add_parser("report", help="POST one stage report to $IACP_API_URL/v1/runs")
     report.add_argument("stack_dir", type=Path)
     report.add_argument("--pipeline", required=True, choices=("validate", "apply", "drift", "ttl_destroy"))
@@ -214,6 +248,7 @@ def run_summary(args: argparse.Namespace) -> int:
         plan=_read_json(args.plan),
         conftest_output=conftest_output if isinstance(conftest_output, list) else None,
         steps=parse_steps(args.step),
+        cost=parse_infracost(_read_json(args.cost)),
     )
     args.markdown_out.write_text(
         render_markdown(result, _read_text(args.plan_text), commit=args.commit, run_url=args.run_url), encoding="utf-8"
@@ -252,6 +287,65 @@ def run_verify_modules(args: argparse.Namespace) -> int:
     for line in verifier.verify(Path(args.stack_dir), meta, parse_manifest(data)):
         print(line)
     return 0
+
+
+def run_cost_input(args: argparse.Namespace) -> int:
+    plan = _read_json(args.plan)
+    if not isinstance(plan, dict):
+        raise ValueError(f"{args.plan} is missing or is not a plan JSON object")
+    args.out.write_text(json.dumps(redact_plan(plan)) + "\n", encoding="utf-8")
+    print(f"wrote the redacted plan for Infracost to {args.out}")
+    return 0
+
+
+def run_fold_cost(args: argparse.Namespace) -> int:
+    """Informational: a missing or unreadable estimate leaves the summary as it is."""
+    estimate = parse_infracost(_read_json(args.cost))
+    summary = _read_json(args.summary_json)
+    markdown = _read_text(args.markdown)
+    if estimate is None or not isinstance(summary, dict) or markdown is None:
+        print("::notice title=No cost estimate::the summary is left without a cost line "
+              "(no Infracost output, or no summary to add it to)")
+        return 0
+    folded, md = fold_cost(summary, markdown, estimate)
+    args.summary_json.write_text(json.dumps(folded, indent=2) + "\n", encoding="utf-8")
+    args.markdown.write_text(md, encoding="utf-8")
+    print(estimate.render_markdown())
+    return 0
+
+
+def run_sarif(args: argparse.Namespace) -> int:
+    meta = FileSystemStackRepository(args.repo_root).load_dir(args.stack_dir)
+    doc = _read_json(args.input)
+    if doc is None:
+        raise SarifError(f"{args.input} is missing or is not JSON")
+    # Both spellings: a tool may print the resolved path (/private/tmp on macOS).
+    dirs = [str(p) for d in args.external_dir for p in dict.fromkeys((Path(d), Path(d).resolve()))]
+    out = rebase_sarif(doc, meta.ref.path, dirs, str(Path(args.repo_root).resolve()))
+    args.out.write_text(json.dumps(out, indent=1) + "\n", encoding="utf-8")
+    print(f"{meta.ref.path}: {result_count(out)} SARIF result(s) -> {args.out}")
+    return 0
+
+
+def run_smoke(args: argparse.Namespace) -> int:
+    meta = FileSystemStackRepository(args.repo_root).load_dir(args.stack_dir)
+    # First: refuses an empty or non-LocalStack endpoint before anything else runs.
+    reader = AwsCliTagReader(args.endpoint_url, args.region or meta.region)
+    docs = {name: _read_json(getattr(args, name)) for name in ("plan", "outputs", "state")}
+    unusable = [f"--{name} {getattr(args, name)}" for name, doc in docs.items() if not isinstance(doc, dict)]
+    if unusable:
+        raise ValueError(f"missing or not a JSON object: {', '.join(unusable)}")
+    result = SmokeTester(reader).run(meta, docs["plan"], docs["outputs"], docs["state"])
+    if args.markdown_out:
+        args.markdown_out.write_text(result.render_markdown(), encoding="utf-8")
+    if args.json_out:
+        args.json_out.write_text(json.dumps(result.to_dict(), indent=2) + "\n", encoding="utf-8")
+    for check in result.checks:
+        detail = f": {check.detail}" if check.detail else ""
+        print(f"{'ok  ' if check.passed else 'FAIL'} {check.kind} {check.subject}{detail}")
+    if not result.ok:
+        print(f"::error title=Smoke test failed::{annotation(f'{meta.ref.path}: {len(result.failures)} failed check(s)')}")
+    return 0 if result.ok else 1
 
 
 def _build_report(args: argparse.Namespace, env: Mapping[str, str]) -> RunReport:
@@ -415,6 +509,10 @@ COMMANDS = {
     "summary": run_summary,
     "verify-pins": run_verify_pins,
     "verify-modules": run_verify_modules,
+    "cost-input": run_cost_input,
+    "fold-cost": run_fold_cost,
+    "sarif": run_sarif,
+    "smoke": run_smoke,
     "report": run_report,
     "lock": run_lock,
 }

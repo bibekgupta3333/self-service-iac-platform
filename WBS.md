@@ -84,17 +84,17 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 | ID | Task | Est | Dep |
 |----|------|-----|-----|
 | [x] 5.1 | Changed-stack detection + matrix (`tools/stack_pipeline detect`) | 0.5 | 2.1 |
-| [~] 5.2 | `pr-validate.yml`: fmt, validate, plan (plan role), PR comment, report to API (LocalStack instead of the plan role per ADR-0009; API report wired through the 5.6 action in a separate `report` job, skipped until `IACP_API_URL` is set; SARIF and Infracost not yet) | 2 | 2.4, 4.10 |
+| [~] 5.2 | `pr-validate.yml`: fmt, validate, plan (plan role), PR comment, report to API (LocalStack instead of the plan role per ADR-0009; API report wired through the 5.6 action in a separate `report` job, skipped until `IACP_API_URL` is set; SARIF (6.1) and Infracost (5.5) wired) | 2 | 2.4, 4.10 |
 | [~] 5.3 | `apply.yml`: lock claim, re-plan, plan-hash verify, apply (apply role), outputs report (LocalStack and hermetic local state per ADR-0009; `GET /v1/internal/requests/by-path` now supplies the lock target and approved plan hash, so `IACP_API_URL` can be set; request and stack status transitions from the apply reports are still pending; apply role and GitHub Environments pending) | 2 | 5.2, 4.6 |
-| [x] 5.4 | Concurrency groups per stack, caching (providers, plugins) | 0.5 | 5.2 |
-| [ ] 5.5 | Infracost step + PR comment (informational in MVP) | 1 | 5.2 |
+| [x] 5.4 | Concurrency groups per stack, caching (providers, plugins; `apply.yml` shares pr-validate's provider cache key and runs no TFLint) | 0.5 | 5.2 |
+| [x] 5.5 | Infracost step + PR comment (informational in MVP; per-stack `infracost breakdown` in its own `cost` job on a redacted plan, folded into the summary and sticky comment by `stack_pipeline fold-cost`; skipped with a notice until the `INFRACOST_API_KEY` secret is set, no `diff` against `main` yet) | 1 | 5.2 |
 | [x] 5.6 | Reusable `.github/actions/iacp-report` composite action | 1 | 5.2 |
-| [ ] 5.7 | Smoke tests / Terratest post-apply for ephemeral envs | 1 | 3.5, 5.3 |
+| [~] 5.7 | Smoke tests / Terratest post-apply for ephemeral envs (`stack_pipeline smoke` in `apply.yml`: declared outputs, `iacp:*` tags in state and live on LocalStack, reported as stage `smoke`; Terratest stays in `ci.yml` on every PR. Pending: `health=degraded` instead of a failed run needs backend support, and ephemeral stacks arrive with WBS 8.4) | 1 | 3.5, 5.3 |
 
 ## 6. Security & policy — M3
 | ID | Task | Est | Dep |
 |----|------|-----|-----|
-| [x] 6.1 | TFLint config + Checkov (+ custom `IACP_*` checks); SARIF upload pending | 1.5 | 5.2 |
+| [x] 6.1 | TFLint config + Checkov (+ custom `IACP_*` checks); SARIF uploaded to code scanning from `ci.yml` and `pr-validate.yml` (one category per tool and stack) | 1.5 | 5.2 |
 | [x] 6.2 | OPA policies: tags, encryption, no public access, source allow-list + exact pin, IAM wildcard deny, env restrictions; yanked-version check (`iacp.modules.yanked`) from the budget-context `yanked_module_versions` | 3 | 5.2 |
 | [x] 6.3 | `opa test` suite with ≥ 90% rule coverage | 1 | 6.2 |
 | [x] 6.4 | `GET /v1/internal/budget-context` for conftest input (`budgets` table, `budget_context` route class; workflows not wired yet, 5.2/5.6) | 0.5 | 4.2 |
