@@ -70,26 +70,43 @@ run "secure_defaults" {
   }
 
   assert {
-    condition     = strcontains(aws_s3_bucket_policy.this.policy, "aws:SecureTransport")
-    error_message = "Bucket policy must deny non-TLS requests."
+    condition     = toset([for s in jsondecode(aws_s3_bucket_policy.this.policy).Statement : s.Sid]) == toset(["DenyInsecureTransport", "DenyOutdatedTls"])
+    error_message = "Bucket policy must hold exactly the TLS-only and minimum-TLS-version denies."
   }
 
   assert {
-    condition = alltrue([
-      for k in ["iacp:team", "iacp:environment", "iacp:stack", "iacp:managed-by"] :
-      contains(keys(aws_s3_bucket.this.tags_all), k)
-    ])
-    error_message = "Bucket must carry every mandatory iacp:* tag."
+    condition     = strcontains(aws_s3_bucket_policy.this.policy, "aws:SecureTransport") && strcontains(aws_s3_bucket_policy.this.policy, "s3:TlsVersion")
+    error_message = "Bucket policy must deny non-TLS requests and TLS older than 1.2."
   }
 
   assert {
-    condition     = aws_s3_bucket.this.tags_all["iacp:managed-by"] == "iacp" && aws_s3_bucket.this.tags_all["cost-center"] == "cc-1234"
-    error_message = "Platform and user tags must both be applied."
+    condition     = length(jsondecode(aws_kms_key.this[0].policy).Statement) == 1
+    error_message = "Without key_service_principals the key policy must only trust the account."
+  }
+
+  assert {
+    condition     = aws_s3_bucket.this.tags_all["iacp:team"] == "platform" && aws_s3_bucket.this.tags_all["iacp:environment"] == "development" && aws_s3_bucket.this.tags_all["iacp:stack"] == "tftest" && aws_s3_bucket.this.tags_all["iacp:managed-by"] == "iacp" && aws_s3_bucket.this.tags_all["iacp:module"] == "s3"
+    error_message = "Bucket must carry the mandatory iacp:* tags with the stack's values."
+  }
+
+  assert {
+    condition     = aws_kms_key.this[0].tags_all["iacp:stack"] == "tftest" && aws_kms_key.this[0].tags_all["iacp:team"] == "platform"
+    error_message = "The KMS key must carry the stack's iacp:* tags."
+  }
+
+  assert {
+    condition     = aws_s3_bucket.this.tags_all["cost-center"] == "cc-1234"
+    error_message = "User tags must be applied alongside platform tags."
   }
 
   assert {
     condition     = length(aws_s3_bucket_logging.this) == 0
     error_message = "Access logging must be off when access_logging is null."
+  }
+
+  assert {
+    condition     = length(aws_s3_bucket_lifecycle_configuration.this.rule) == 1 && length(one(aws_s3_bucket_lifecycle_configuration.this.rule).transition) == 0
+    error_message = "A single lifecycle rule without a transition is expected by default."
   }
 
   assert {
@@ -112,16 +129,34 @@ run "consumer_policies_are_scoped" {
   }
 }
 
-run "lifecycle_transition_enabled" {
+run "lifecycle_transition_and_extras" {
   command = apply
 
   variables {
-    transition_to_ia_days = 60
+    transition_to_ia_days  = 60
+    key_service_principals = ["logging.s3.amazonaws.com"]
+    additional_policy_statements = [{
+      sid                   = "AllowLogDelivery"
+      effect                = "Allow"
+      actions               = ["s3:PutObject"]
+      principal_type        = "Service"
+      principal_identifiers = ["logging.s3.amazonaws.com"]
+    }]
   }
 
   assert {
-    condition     = length(aws_s3_bucket_lifecycle_configuration.this.rule) == 3
-    error_message = "Setting transition_to_ia_days must add the STANDARD_IA transition rule."
+    condition     = one(one(aws_s3_bucket_lifecycle_configuration.this.rule).transition).storage_class == "STANDARD_IA"
+    error_message = "Setting transition_to_ia_days must add the STANDARD_IA transition."
+  }
+
+  assert {
+    condition     = contains([for s in jsondecode(aws_s3_bucket_policy.this.policy).Statement : s.Sid], "AllowLogDelivery")
+    error_message = "additional_policy_statements must be appended to the bucket policy."
+  }
+
+  assert {
+    condition     = contains([for s in jsondecode(aws_kms_key.this[0].policy).Statement : s.Sid], "ServicePrincipalsForThisAccount")
+    error_message = "key_service_principals must add a scoped key policy statement."
   }
 }
 
@@ -144,6 +179,23 @@ run "production_forces_versioning" {
   }
 }
 
+# Separate state: the provider refuses to plan Enabled -> Disabled on the bucket
+# applied above, and this run is about a brand-new bucket.
+run "unversioned_bucket_uses_disabled" {
+  command   = plan
+  state_key = "unversioned"
+
+  variables {
+    name               = "tftest-s3-unversioned"
+    versioning_enabled = false
+  }
+
+  assert {
+    condition     = one(aws_s3_bucket_versioning.this.versioning_configuration).status == "Disabled"
+    error_message = "A new unversioned bucket must use Disabled, not Suspended."
+  }
+}
+
 run "rejects_invalid_name" {
   command = plan
 
@@ -154,14 +206,31 @@ run "rejects_invalid_name" {
   expect_failures = [var.name]
 }
 
+# A valid 41-character name with a long team passes the name pattern but makes
+# <team>-<environment>-<name> 64 characters, so only the length rule fails.
 run "rejects_too_long_bucket_name" {
   command = plan
 
   variables {
-    name = "a-very-long-logical-bucket-name-over-limit"
+    team = "platform-a"
+    name = "a-valid-but-long-logical-bucket-name-1234"
   }
 
   expect_failures = [var.name]
+}
+
+run "accepts_63_character_bucket_name" {
+  command = plan
+
+  variables {
+    team = "platforms"
+    name = "a-valid-but-long-logical-bucket-name-1234"
+  }
+
+  assert {
+    condition     = length(aws_s3_bucket.this.bucket) == 63
+    error_message = "A 63-character bucket name must be accepted."
+  }
 }
 
 run "rejects_reserved_tag_prefix" {
@@ -203,4 +272,30 @@ run "rejects_short_ia_transition" {
   }
 
   expect_failures = [var.transition_to_ia_days]
+}
+
+run "rejects_public_allow_statement" {
+  command = plan
+
+  variables {
+    additional_policy_statements = [{
+      sid                   = "PublicRead"
+      effect                = "Allow"
+      actions               = ["s3:GetObject"]
+      principal_type        = "*"
+      principal_identifiers = ["*"]
+    }]
+  }
+
+  expect_failures = [var.additional_policy_statements]
+}
+
+run "rejects_invalid_service_principal" {
+  command = plan
+
+  variables {
+    key_service_principals = ["arn:aws:iam::123456789012:root"]
+  }
+
+  expect_failures = [var.key_service_principals]
 }
