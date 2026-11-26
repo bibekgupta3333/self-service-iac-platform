@@ -210,6 +210,28 @@ func TestEventStreamOfATerminalRequestEndsAtOnce(t *testing.T) {
 	}
 }
 
+// A browser reconnects with the id of the terminal frame it already saw: it must be told
+// the stream is over at once, not left on heartbeats for the whole lifetime.
+func TestEventStreamResumeAtTheTerminalSeqEndsAtOnce(t *testing.T) {
+	feed := &fakeFeed{}
+	feed.add(requests.StatusDraft)
+	feed.add(requests.StatusRejected)
+	srv := eventsServer(t, feed, StreamOptions{Poll: time.Hour, Heartbeat: time.Hour, MaxLifetime: time.Hour})
+	path := "/v1/requests/" + feedRequest.String() + "/events"
+
+	for _, last := range []string{"2", "9"} { // the terminal seq, and one past it
+		frames := readFrames(t, open(t, srv, path, "Last-Event-ID", last).Body, 100) // returns when the server closes
+		if len(frames) != 1 || frames[0].Event != "end" || !strings.Contains(frames[0].Data, `"status":"rejected"`) {
+			t.Fatalf("Last-Event-ID %s: frames = %+v", last, frames)
+		}
+	}
+	// Resuming before the terminal seq still delivers the terminal change, then end.
+	frames := readFrames(t, open(t, srv, path, "Last-Event-ID", "1").Body, 100)
+	if len(frames) != 2 || frames[0].ID != "2" || frames[0].Event != "status" || frames[1].Event != "end" {
+		t.Fatalf("Last-Event-ID 1: frames = %+v", frames)
+	}
+}
+
 func TestEventStreamHeartbeatAndLifetime(t *testing.T) {
 	feed := &fakeFeed{}
 	feed.add(requests.StatusDraft)

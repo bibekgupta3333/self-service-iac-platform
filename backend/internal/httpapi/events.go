@@ -161,9 +161,21 @@ func (h *RequestEventsHandler) stream(w http.ResponseWriter, r *http.Request) {
 		snapshot *requests.StatusSnapshot
 		backlog  []requests.StatusEvent
 	)
+	var endNow *requests.Status // set when a resumed stream has nothing left to say: the request is already terminal
 	if last, ok := ParseLastEventID(r.Header.Get("Last-Event-ID")); ok {
 		after = last
 		backlog, err = h.svc.StatusEventsAfter(ctx, p, id, after, feedBatch)
+		if err == nil && len(backlog) == 0 {
+			// A client that reconnects after the terminal frame (or whose connection dropped
+			// before `end`) must still be told the stream is over, not wait for heartbeats.
+			var snap requests.StatusSnapshot
+			if snap, err = h.svc.StatusSnapshot(ctx, p, id); err == nil && snap.Request.Status.IsTerminal() {
+				// The terminal change may have committed after the first read: replay it if so.
+				if backlog, err = h.svc.StatusEventsAfter(ctx, p, id, after, feedBatch); err == nil && len(backlog) == 0 {
+					endNow = &snap.Request.Status
+				}
+			}
+		}
 	} else {
 		var snap requests.StatusSnapshot
 		snap, err = h.svc.StatusSnapshot(ctx, p, id)
@@ -192,6 +204,11 @@ func (h *RequestEventsHandler) stream(w http.ResponseWriter, r *http.Request) {
 			_ = out.frame(0, "end", endEvent{RequestID: rq.ID, Status: rq.Status})
 			return
 		}
+	}
+
+	if endNow != nil {
+		_ = out.frame(0, "end", endEvent{RequestID: id, Status: *endNow})
+		return
 	}
 
 	deadline := time.NewTimer(h.opts.MaxLifetime)
