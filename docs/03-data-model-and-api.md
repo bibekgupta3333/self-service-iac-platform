@@ -398,22 +398,26 @@ CREATE INDEX outbox_unpublished_idx ON outbox (id) WHERE published_at IS NULL;
 
 `request_kind` extends the four user-facing kinds (create/update/upgrade/destroy) with two platform-initiated kinds: `reconcile` (drift remediation) and `rollback` (revert PR to the last applied spec). Both follow the same state machine.
 
-**Lock acquisition** (single statement, inside the request-creation transaction):
+**Lock acquisition** (inside the request-creation transaction; `backend/internal/locks`):
 
 ```sql
--- name: AcquireStackLock :one
-INSERT INTO locks (stack_id, request_id, holder, expires_at)
-VALUES ($1, $2, $3, now() + interval '24 hours')
+-- 1. Serialise every lock operation on the stack.
+SELECT team_id FROM stacks WHERE id = $1 FOR UPDATE;
+-- 2. Read the lease and the queue; the pure locks.Decide picks granted / held / queued.
+-- 3. Grant (fresh lease, or take over an expired one):
+INSERT INTO locks (stack_id, request_id, holder, acquired_at, expires_at)
+VALUES ($1, $2, $3, $4, $4 + interval '7 days')
 ON CONFLICT (stack_id) DO UPDATE
    SET request_id    = EXCLUDED.request_id,
        holder        = EXCLUDED.holder,
        fencing_token = nextval('lock_fencing_seq'),
-       acquired_at   = now(),
+       acquired_at   = EXCLUDED.acquired_at,
        expires_at    = EXCLUDED.expires_at
- WHERE locks.expires_at < now()                -- only steal an expired lease
 RETURNING request_id, fencing_token;
--- No row returned => lock held; caller sets requests.queued_behind = current holder.
+-- and record requests.fencing_token; or, when queued, set requests.queued_behind = holder.
 ```
+
+A free or expired lock goes to the oldest queued request first, so a newcomer never jumps the queue. Release deletes the row and, in the same transaction, grants the oldest waiter a new token and points the remaining waiters at it.
 
 ## 3. Hash-chained audit log
 
@@ -873,8 +877,14 @@ Called only by GitHub Actions jobs with `Authorization: Bearer <GitHub OIDC JWT>
 | GET | `/internal/budget-context?stack_path=` | `pr-validate.yml`, `apply.yml` | OPA input: environment, team, allowed regions, budget (`limit_usd`, `spent_usd`, active override), approved policy exceptions. |
 | POST | `/drift` | `drift.yml` | Drift result per stack (see [6.6](#66-drift)). |
 | POST | `/internal/catalog/index` | `module-release.yml` | Index a released module version (see [6.2](#62-catalog-modules-and-versions)). |
+| GET | `/internal/stacks/{id}/lock` | worker, `apply.yml` | Current platform lock: `stack_id`, `request_id`, `holder`, `fencing_token`, `acquired_at`, `expires_at`; `404` when unlocked. |
+| POST | `/internal/stacks/{id}/lock` | worker | Acquire for `{"request_id"}`: `200 {"lock": "granted"\|"held", "queued_behind": null, "current": {…}}` or `202 {"lock": "queued", "queued_behind": "<holder request id>", "current": {…}}`. |
+| POST | `/internal/stacks/{id}/lock/heartbeat` | worker, `apply.yml` | Renew the lease: `{"request_id", "fencing_token"}`; `409 stale_fencing_token` when superseded. |
+| DELETE | `/internal/stacks/{id}/lock?request_id=&fencing_token=` | worker | Release (terminal request) and promote the oldest queued request: `200 {"released": {…}, "promoted": {…}\|null}`; `409 stale_fencing_token`. |
 
-Verification order: JWKS signature → `iss == https://token.actions.githubusercontent.com` → `aud` → `repository_id == 87654321` → `job_workflow_ref` in the allowlist for the endpoint → `ref == refs/heads/main` for `requests/by-path`, `/drift`, catalog indexing and apply/TTL reports → `run_id` + `run_attempt` matches a `pipeline_runs` row or the PR head SHA of an open request → fencing token current. Replays rejected via `jti` cache (1 h).
+Machine endpoints accept the GitHub OIDC JWT, and, as a fallback while workflows migrate, the shared `IACP_INTERNAL_TOKEN`. Neither configured means every call is rejected.
+
+Verification order: JWKS signature (RS256 only) → `iss == https://token.actions.githubusercontent.com` → `aud` → `exp`/`nbf`/`iat` (30 s leeway) → `repository`, `repository_owner` and `repository_id == 87654321` → `ref` and `job_workflow_ref` in the allowlist (`403 workflow_not_allowed`) → per endpoint, the pipeline's own workflow file and `ref == refs/heads/main` for `requests/by-path`, `/drift`, catalog indexing and apply/TTL reports → the report's `run_id` + `run_attempt` equal the token's (`403 run_mismatch`) → fencing token current. Replays rejected via `jti` cache (1 h) — not implemented yet.
 
 `GET /v1/internal/requests/by-path?stack_path=environments/production/payments/order-events&head_sha=a1b2c3d4e5f60718293a4b5c6d7e8f9012345678` (apply) → `200`
 
@@ -916,7 +926,9 @@ Verification order: JWKS signature → `iss == https://token.actions.githubuserc
 
 Apply callback adds `"outputs": {...}` (sensitive outputs replaced with `"<sensitive>"`), `"terraform_exit_code"`, and on failure `"error": {"class": "transient|permanent", "message": "...", "log_excerpt": "..."}`.
 
-Response `200 {"accepted": true, "request_status": "plan_ready"}`; `409 stale_fencing_token` aborts the job.
+Response `200 {"accepted": true, "run_id": "…", "run_status": "succeeded", "request_status": "plan_ready"}`; `409 stale_fencing_token` aborts the job.
+
+Current implementation (WBS 4.10): `pipeline` is one of `validate`, `apply`, `drift`, `ttl_destroy`; `status` is `in_progress`, `passed`, `failed` or `cancelled`. `fencing_token` and `request_short_id` are required except for `drift`. Each report is appended to `pipeline_runs.stages` (one row per run id, attempt and stack); a `passed` `summary` stage finishes the run as `succeeded`, a `failed`/`cancelled` stage finishes it as such, and a finished run keeps its status. `request_status` is the request's status as stored; the transitions driven by reports, `plan_summaries` and `cost_estimates` arrive with WBS 5.2/5.3.
 
 ### 6.10 GitHub webhooks
 
@@ -970,6 +982,7 @@ All errors use RFC 9457 Problem Details (`application/problem+json`) with the pl
 | 401 | `unauthenticated` | Missing/expired session or token; invalid OIDC JWT |
 | 403 | `forbidden` | RBAC denies (e.g. developer approving prod) |
 | 403 | `workflow_not_allowed` | OIDC `job_workflow_ref` not allowlisted for endpoint |
+| 403 | `run_mismatch` | `POST /runs` report names a different `run_id`/`run_attempt` than the caller's OIDC token |
 | 404 | `not_found` | Resource missing or not visible to caller |
 | 409 | `stack_locked` | Operation needs lock immediately (e.g. `preview` with `exclusive=true`); body includes `holder` and `request_id` |
 | 409 | `invalid_transition` | e.g. cancel an `applying` request |
@@ -1012,8 +1025,9 @@ backend/
 │   │   └── testdata/golden/     # golden files
 │   ├── github/                  # GitHub App client (installation tokens, git data API, PRs, dispatch), rate-limit aware
 │   ├── webhooks/                # signature verification, dedupe, event mapping → SQS
+│   ├── runs/                    # POST /v1/runs: report validation, OIDC provenance, pipeline_runs
 │   ├── callbacks/               # pipeline callback handlers (plan, cost, apply, drift)
-│   ├── locks/                   # acquire/renew/release, fencing
+│   ├── locks/                   # acquire/heartbeat/release, fencing, FIFO queue promotion
 │   ├── budgets/                 # budgets, overrides, OPA budget context
 │   ├── policyex/                # policy exceptions workflow
 │   ├── drift/                   # drift scheduling (batch fan-out), report handling
