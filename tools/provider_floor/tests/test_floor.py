@@ -3,7 +3,16 @@ from pathlib import Path
 import pytest
 
 from tools.provider_floor.__main__ import main
-from tools.provider_floor.floor import OVERRIDE_FILE, FloorError, FloorPin, ModuleStager, floor_pins, render_override
+from tools.provider_floor.floor import (
+    OVERRIDE_FILE,
+    FloorError,
+    FloorPin,
+    ModuleStager,
+    floor_mismatches,
+    floor_pins,
+    locked_versions,
+    render_override,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -82,3 +91,58 @@ class TestModuleStager:
     def test_real_offline_modules_have_a_floor(self, name, tmp_path):
         pins = ModuleStager().stage(REPO_ROOT / "modules" / name, tmp_path / name)
         assert FloorPin("aws", "hashicorp/aws", "5.70.0") in pins
+
+
+LOCK = """# This file is maintained automatically by "terraform init".
+provider "registry.terraform.io/hashicorp/aws" {
+  version     = "%s"
+  constraints = "= 5.70.0"
+  hashes = [
+    "h1:abc=",
+  ]
+}
+
+provider "registry.terraform.io/hashicorp/random" {
+  version     = "3.6.0"
+  constraints = "= 3.6.0"
+  hashes = [
+    "h1:def=",
+  ]
+}
+"""
+
+
+class TestVerify:
+    def test_locked_versions(self):
+        assert locked_versions(LOCK % "5.70.0") == {"hashicorp/aws": "5.70.0", "hashicorp/random": "3.6.0"}
+
+    def test_mismatches(self):
+        pins = floor_pins({"hashicorp/aws": ">= 5.70, < 6.0", "hashicorp/random": "~> 3.6"})
+        assert floor_mismatches(pins, locked_versions(LOCK % "5.70.0")) == ()
+        assert "expected the floor 5.70.0, init selected 5.100.0" in floor_mismatches(
+            pins, locked_versions(LOCK % "5.100.0"))[0]
+        assert "selected nothing" in floor_mismatches(pins, {})[0]
+
+    def stage(self, tmp_path):
+        mod = tmp_path / "mod"
+        mod.mkdir()
+        (mod / "versions.tf").write_text(VERSIONS)
+        ModuleStager().stage(mod, tmp_path / "out")
+        return tmp_path / "out"
+
+    def test_cli_verify(self, tmp_path, capsys):
+        out = self.stage(tmp_path)
+        assert main(["verify", str(out)]) == 2  # no lock file yet
+        (out / ".terraform.lock.hcl").write_text(LOCK % "5.70.0")
+        assert main(["verify", str(out)]) == 0
+        (out / ".terraform.lock.hcl").write_text(LOCK % "5.100.0")
+        assert main(["verify", str(out)]) == 1
+        assert "init selected 5.100.0" in capsys.readouterr().err
+
+    def test_verify_needs_a_staged_module(self, tmp_path):
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        (plain / "versions.tf").write_text(VERSIONS)
+        (plain / ".terraform.lock.hcl").write_text(LOCK % "5.70.0")
+        with pytest.raises(FloorError):
+            ModuleStager().verify(plain)

@@ -12,6 +12,7 @@ merges override files over the module's own ``required_providers``, so
 
 from __future__ import annotations
 
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -74,6 +75,23 @@ def render_override(pins: tuple[FloorPin, ...]) -> str:
     )
 
 
+_LOCK_RE = re.compile(r'provider\s+"registry\.terraform\.io/([^"]+)"\s*\{[^}]*?\bversion\s*=\s*"([^"]+)"', re.S)
+
+
+def locked_versions(lock_text: str) -> dict[str, str]:
+    """Provider source -> selected version, from the text of a ``.terraform.lock.hcl``. Pure."""
+    return {source: version for source, version in _LOCK_RE.findall(lock_text)}
+
+
+def floor_mismatches(pins: tuple[FloorPin, ...], locked: dict[str, str]) -> tuple[str, ...]:
+    """One message per pin whose provider was not resolved to exactly its floor. Pure."""
+    return tuple(
+        f"{pin.source}: expected the floor {pin.version}, init selected {locked.get(pin.source, 'nothing')}"
+        for pin in pins
+        if locked.get(pin.source) != pin.version
+    )
+
+
 class ModuleStager:
     """Copies a module to a scratch directory and writes the floor override there."""
 
@@ -88,3 +106,14 @@ class ModuleStager:
         shutil.copytree(module_dir, dest, ignore=_SKIPPED, dirs_exist_ok=True)
         (dest / OVERRIDE_FILE).write_text(override, encoding="utf-8")
         return pins
+
+    def verify(self, staged_dir: Path) -> tuple[str, ...]:
+        """Problems with a staged module after ``terraform init -upgrade``: the lock file must pin every floor."""
+        lock = staged_dir / ".terraform.lock.hcl"
+        if not lock.is_file():
+            raise FloorError(f"{lock} is missing: run terraform init first")
+        files = {p.name: p.read_text(encoding="utf-8") for p in staged_dir.glob("*.tf")}
+        if OVERRIDE_FILE not in files:
+            raise FloorError(f"{staged_dir} was not staged by tools.provider_floor")
+        pins = floor_pins(parse_interface(files).providers)
+        return floor_mismatches(pins, locked_versions(lock.read_text(encoding="utf-8")))
