@@ -58,6 +58,20 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
     - New `verify-modules` step after init: the installed module calls must match the pins one to one, at the recorded commits.
     - Serving unpublished tags now requires `IACP_PIN_BOOTSTRAP` (`--allow-unpublished`).
     - The comment job writes the comment marker itself.
+
+- Run reports and the apply pipeline (WBS 5.2 report, 5.3, 5.6):
+  - `tools/stack_pipeline report` builds a `POST /v1/runs` body that mirrors `runs.Report` and `runs.Validate`, from the plan summary, `terraform output -json` (sensitive values redacted) and the runner environment. `head_sha` is always `GITHUB_SHA`.
+  - `tools/stack_pipeline lock acquire|release` claims and releases the platform stack lock.
+  - `api_client.py`: a GitHub OIDC token for the configured audience, falling back to `IACP_INTERNAL_TOKEN`. Tokens are masked, redirects are refused, and only idempotent calls are retried. Both commands skip with a notice while `IACP_API_URL` is empty.
+  - `.github/actions/iacp-report`: a thin composite action over `report`. Every input passes through `env:`.
+  - `pr-validate.yml`: a separate `report` job, the only one with `id-token: write`, reports each stack's summary as pipeline `validate`. It never affects `pr-validate-result`.
+  - `.github/workflows/apply.yml`: on push to `main` (`environments/**`) or dispatch, per stack against LocalStack:
+    - lock claim, verify-pins, init, verify-modules
+    - plan (or `plan -destroy`), then a conftest pre-apply gate
+    - plan report and the plan-hash check when an approved hash is given
+    - apply, outputs, apply and summary reports, then lock release in an `always()` step
+    - one apply per stack (`iacp-stack-<id>-apply`, never cancelled)
+  - State is hermetic per job until the S3 backend arrives. That limit is documented in docs/05 and ADR-0009.
     - The workflow runs on every PR, and policy and tool-version changes re-validate every stack.
   - After the first module releases:
     - The smoke stack is pinned to the published `modules/s3/v1.0.0` (`681144a`).
