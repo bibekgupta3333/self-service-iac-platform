@@ -129,23 +129,23 @@ variable "timeout_seconds" {
 }
 
 variable "reserved_concurrent_executions" {
-  description = "Concurrency reserved for the function. -1 removes the reservation (not allowed in production)."
+  description = "Concurrency reserved for the function (1-1000). Null leaves the function unreserved, which is not allowed in production. Zero is rejected because it silently stops the function."
   type        = number
   default     = 10
 
   validation {
-    condition     = var.reserved_concurrent_executions >= -1 && var.reserved_concurrent_executions <= 1000
-    error_message = "reserved_concurrent_executions must be between -1 and 1000."
+    condition     = var.reserved_concurrent_executions == null || try(var.reserved_concurrent_executions >= 1 && var.reserved_concurrent_executions <= 1000, false)
+    error_message = "reserved_concurrent_executions must be between 1 and 1000, or null for unreserved."
   }
 
   validation {
-    condition     = !(var.reserved_concurrent_executions == -1 && var.environment == "production")
+    condition     = !(var.reserved_concurrent_executions == null && var.environment == "production")
     error_message = "Production functions must reserve concurrency."
   }
 }
 
 variable "tracing_mode" {
-  description = "X-Ray tracing mode."
+  description = "X-Ray tracing mode. Only Active is allowed in production."
   type        = string
   default     = "Active"
 
@@ -153,10 +153,15 @@ variable "tracing_mode" {
     condition     = contains(["Active", "PassThrough"], var.tracing_mode)
     error_message = "tracing_mode must be Active or PassThrough."
   }
+
+  validation {
+    condition     = !(var.tracing_mode != "Active" && var.environment == "production")
+    error_message = "Production functions must use Active tracing."
+  }
 }
 
 variable "environment_variables" {
-  description = "Non-secret configuration. Pass Secrets Manager ARNs, never secret values."
+  description = "Non-secret configuration. Pass Secrets Manager ARNs, never secret values. Keys are letters, digits and underscores, start with a letter, and may not use the reserved AWS_ prefix."
   type        = map(string)
   default     = {}
 
@@ -178,7 +183,7 @@ variable "log_retention_days" {
 }
 
 variable "kms_key_arn" {
-  description = "Existing KMS key ARN for environment variables and logs. If null, the module creates a dedicated key with rotation enabled."
+  description = "Existing KMS key ARN for environment variables and logs. If null, the module creates a dedicated key with rotation enabled. Must be known at plan time."
   type        = string
   default     = null
 
@@ -189,10 +194,18 @@ variable "kms_key_arn" {
 }
 
 variable "sqs_trigger" {
-  description = "Optional SQS trigger. queue_arn is wireable from the sqs module's arn output; batch_size is the maximum messages per invocation. An object (not a plain ARN string) so the queue may be created in the same configuration."
+  description = <<-EOT
+    Optional SQS trigger, an object so the queue may be created in the same configuration.
+    queue_arn: queue ARN (wireable from the sqs module's arn output).
+    batch_size: messages per invocation; 1-10 unless maximum_batching_window_in_seconds > 0 (then up to 10000; FIFO queues stay at 10).
+    maximum_batching_window_in_seconds: 0-300 seconds to gather a batch.
+    kms_key_arn: the queue's KMS key (the sqs module's kms_key_arn output); the role gets kms:Decrypt on it.
+  EOT
   type = object({
-    queue_arn  = string
-    batch_size = optional(number, 10)
+    queue_arn                          = string
+    batch_size                         = optional(number, 10)
+    maximum_batching_window_in_seconds = optional(number, 0)
+    kms_key_arn                        = optional(string)
   })
   default = null
 
@@ -202,8 +215,26 @@ variable "sqs_trigger" {
   }
 
   validation {
-    condition     = var.sqs_trigger == null || try(var.sqs_trigger.batch_size >= 1 && var.sqs_trigger.batch_size <= 10000, false)
-    error_message = "sqs_trigger.batch_size must be between 1 and 10000."
+    condition     = var.sqs_trigger == null || try(var.sqs_trigger.maximum_batching_window_in_seconds >= 0 && var.sqs_trigger.maximum_batching_window_in_seconds <= 300, false)
+    error_message = "sqs_trigger.maximum_batching_window_in_seconds must be between 0 and 300."
+  }
+
+  validation {
+    condition = var.sqs_trigger == null || try(
+      var.sqs_trigger.batch_size >= 1 && var.sqs_trigger.batch_size <= (var.sqs_trigger.maximum_batching_window_in_seconds > 0 ? 10000 : 10),
+      false,
+    )
+    error_message = "sqs_trigger.batch_size must be 1-10, or up to 10000 when maximum_batching_window_in_seconds is greater than 0."
+  }
+
+  validation {
+    condition     = var.sqs_trigger == null || try(!endswith(var.sqs_trigger.queue_arn, ".fifo") || var.sqs_trigger.batch_size <= 10, true)
+    error_message = "FIFO queues allow a batch_size of at most 10."
+  }
+
+  validation {
+    condition     = var.sqs_trigger == null || try(var.sqs_trigger.kms_key_arn == null || can(regex("^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/.+$", var.sqs_trigger.kms_key_arn)), false)
+    error_message = "sqs_trigger.kms_key_arn must be a KMS key ARN."
   }
 }
 
@@ -218,33 +249,54 @@ variable "dead_letter_target_arn" {
   }
 }
 
-variable "permissions_boundary_arn" {
-  description = "IAM permissions boundary attached to the execution role (the platform's iacp-boundary in shared accounts). Null attaches none."
+variable "dead_letter_target_kms_key_arn" {
+  description = "KMS key encrypting the dead-letter target (for example the sqs module's kms_key_arn output). The role gets kms:GenerateDataKey and kms:Decrypt on it. Requires dead_letter_target_arn."
   type        = string
   default     = null
 
   validation {
-    condition     = var.permissions_boundary_arn == null || can(regex("^arn:aws[a-z-]*:iam::[0-9]{12}:policy/.+$", var.permissions_boundary_arn))
+    condition     = var.dead_letter_target_kms_key_arn == null || (var.dead_letter_target_arn != null && can(regex("^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/.+$", var.dead_letter_target_kms_key_arn)))
+    error_message = "dead_letter_target_kms_key_arn must be a KMS key ARN and requires dead_letter_target_arn."
+  }
+}
+
+variable "permissions_boundary_arn" {
+  description = "IAM permissions boundary for the execution role. Null uses the platform boundary arn:<partition>:iam::<account>:policy/iacp-boundary, which the account's SCP requires; a boundary is always attached."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.permissions_boundary_arn == null || can(regex("^arn:aws[a-z-]*:iam::[0-9]{12}:policy/[A-Za-z0-9+=,.@_/-]+$", var.permissions_boundary_arn))
     error_message = "permissions_boundary_arn must be an IAM policy ARN."
   }
 }
 
 variable "extra_policy_jsons" {
-  description = "Additional IAM policy documents for the execution role, for example s3 read_policy_json or sqs consumer_policy_json. Wildcard actions are rejected."
-  type        = list(string)
-  default     = []
+  description = <<-EOT
+    Additional IAM policy documents for the execution role, keyed by a stable name (for example { orders-consumer = <sqs consumer_policy_json> }).
+    Allow statements may not use NotAction or NotResource, and their actions may not be "*", "<service>:*", or any other wildcard except read prefixes such as s3:Get* or sqs:List*.
+  EOT
+  type        = map(string)
+  default     = {}
 
   validation {
-    condition     = length(var.extra_policy_jsons) <= 10
-    error_message = "At most 10 extra policy documents are allowed."
+    condition     = length(var.extra_policy_jsons) <= 10 && alltrue([for k in keys(var.extra_policy_jsons) : can(regex("^[a-z0-9][a-z0-9-]{0,39}$", k))])
+    error_message = "At most 10 extra policy documents, keyed by 1-40 lowercase letters, digits and hyphens."
   }
 
   validation {
     condition = alltrue([
-      for doc in var.extra_policy_jsons : try(alltrue([
-        for s in jsondecode(doc).Statement : !contains(flatten([try(s.Action, [])]), "*")
+      for doc in values(var.extra_policy_jsons) : try(alltrue([
+        for s in flatten([jsondecode(doc).Statement]) : try(s.Effect, "") != "Allow" || (
+          try(s.NotAction, null) == null &&
+          try(s.NotResource, null) == null &&
+          alltrue([
+            for a in flatten([try(s.Action, [])]) :
+            !strcontains(a, "*") || can(regex("^[A-Za-z0-9-]+:(Get|List|Describe|Head|BatchGet)[A-Za-z]*\\*$", a))
+          ])
+        )
       ]), false)
     ])
-    error_message = "extra_policy_jsons must be valid IAM policy JSON and must not grant the '*' action."
+    error_message = "extra_policy_jsons must be valid IAM policy JSON whose Allow statements use explicit actions (no \"*\", \"<service>:*\", NotAction or NotResource)."
   }
 }

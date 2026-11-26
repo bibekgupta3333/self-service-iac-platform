@@ -1,6 +1,6 @@
 resource "aws_lambda_function" "this" {
   #checkov:skip=CKV_AWS_117:VPC placement arrives with the vpc module (post-MVP); functions reach AWS APIs over public endpoints with IAM auth.
-  #checkov:skip=CKV_AWS_272:Code signing is enforced for production by platform policy, not by a module default.
+  #checkov:skip=CKV_AWS_272:Code signing for production is planned for a later minor release (docs/04 section 10); 1.0.0 does not configure it.
   #checkov:skip=CKV_AWS_116:A dead-letter target is configured through var.dead_letter_target_arn; SQS-triggered functions use the queue's DLQ.
   function_name                  = local.full_name
   description                    = "Managed by iacp (stack ${var.stack})"

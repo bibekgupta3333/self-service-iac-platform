@@ -1,12 +1,16 @@
 # Execution role with only what the function needs: write its own logs, send
 # traces, decrypt with its key, and (optionally) consume its SQS trigger and
-# publish to its dead-letter target. Extra access comes from
-# var.extra_policy_jsons, produced by other modules.
+# publish to its dead-letter target, including the KMS keys those queues use.
+# Extra access comes from var.extra_policy_jsons, produced by other modules.
+#
+# The role lives under /iacp/ (iam:PassRole for the platform is limited to that
+# path) and always carries a permissions boundary.
 
 resource "aws_iam_role" "this" {
   name                 = local.full_name
+  path                 = "/iacp/"
   assume_role_policy   = data.aws_iam_policy_document.assume.json
-  permissions_boundary = var.permissions_boundary_arn
+  permissions_boundary = local.permissions_boundary_arn
   tags                 = local.tags
 }
 
@@ -74,6 +78,17 @@ data "aws_iam_policy_document" "execution" {
   }
 
   dynamic "statement" {
+    for_each = local.has_sqs_trigger && try(var.sqs_trigger.kms_key_arn != null, false) ? [var.sqs_trigger.kms_key_arn] : []
+
+    content {
+      sid       = "DecryptTriggerQueueMessages"
+      effect    = "Allow"
+      actions   = ["kms:Decrypt"]
+      resources = [statement.value]
+    }
+  }
+
+  dynamic "statement" {
     for_each = local.has_dlq ? [var.dead_letter_target_arn] : []
 
     content {
@@ -83,12 +98,25 @@ data "aws_iam_policy_document" "execution" {
       resources = [statement.value]
     }
   }
+
+  dynamic "statement" {
+    for_each = var.dead_letter_target_kms_key_arn != null ? [var.dead_letter_target_kms_key_arn] : []
+
+    content {
+      sid       = "EncryptFailedInvocations"
+      effect    = "Allow"
+      actions   = ["kms:GenerateDataKey", "kms:Decrypt"]
+      resources = [statement.value]
+    }
+  }
 }
 
+# Keyed by caller-supplied names so adding or removing one document never
+# renames or recreates the others.
 resource "aws_iam_role_policy" "extra" {
-  count = length(var.extra_policy_jsons)
+  for_each = var.extra_policy_jsons
 
-  name   = "extra-${count.index}"
+  name   = "extra-${each.key}"
   role   = aws_iam_role.this.id
-  policy = var.extra_policy_jsons[count.index]
+  policy = each.value
 }

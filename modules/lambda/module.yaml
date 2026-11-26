@@ -14,7 +14,7 @@ metadata:
 compatibility:
   terraform: ">= 1.10, < 2.0"
   providers:
-    hashicorp/aws: ">= 5.60, < 6.0"
+    hashicorp/aws: ">= 5.70, < 6.0"
   environments: [development, staging, production]
 
 inputs:
@@ -35,6 +35,7 @@ inputs:
       x-iacp-ui: select
     handler:
       type: string
+      pattern: "^[A-Za-z0-9_.:/$-]{1,128}$"
       default: bootstrap
       description: Function entry point, for example app.handler.
     architecture:
@@ -66,22 +67,25 @@ inputs:
       default: 30
       description: Maximum execution time in seconds.
     reserved_concurrent_executions:
-      type: integer
-      minimum: -1
+      type: [integer, "null"]
+      minimum: 1
       maximum: 1000
       default: 10
-      description: Reserved concurrency. -1 removes the reservation (not allowed in production).
+      description: Reserved concurrency (1-1000). Null leaves the function unreserved, which is not allowed in production.
     tracing_mode:
       type: string
       enum: [Active, PassThrough]
       default: Active
-      description: X-Ray tracing mode.
+      description: X-Ray tracing mode. Only Active is allowed in production.
       x-iacp-group: Observability
     environment_variables:
       type: object
       additionalProperties: { type: string }
+      propertyNames:
+        pattern: "^[A-Za-z][A-Za-z0-9_]*$"
+        not: { pattern: "^AWS_" }
       default: {}
-      description: Non-secret configuration. Use Secrets Manager ARNs for secrets.
+      description: Non-secret configuration. Use Secrets Manager ARNs for secrets. Keys may not start with AWS_.
       x-iacp-ui: key-value
     log_retention_days:
       type: integer
@@ -98,7 +102,7 @@ inputs:
     sqs_trigger:
       type: [object, "null"]
       default: null
-      description: Optional SQS trigger. queue_arn is wired from an sqs stack; batch_size is the maximum messages per invocation.
+      description: Optional SQS trigger. batch_size is 1-10 unless maximum_batching_window_in_seconds is greater than 0 (FIFO queues stay at 10).
       additionalProperties: false
       required: [queue_arn]
       properties:
@@ -106,33 +110,64 @@ inputs:
           type: string
           pattern: "^arn:aws[a-z-]*:sqs:[a-z0-9-]+:[0-9]{12}:.+$"
           x-iacp-ui: stack-output
+        kms_key_arn:
+          type: [string, "null"]
+          pattern: "^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/.+$"
+          x-iacp-ui: stack-output
         batch_size:
           type: integer
           minimum: 1
           maximum: 10000
           default: 10
+        maximum_batching_window_in_seconds:
+          type: integer
+          minimum: 0
+          maximum: 300
+          default: 0
+      allOf:
+        - if:
+            anyOf:
+              - not: { required: [maximum_batching_window_in_seconds] }
+              - properties: { maximum_batching_window_in_seconds: { const: 0 } }
+          then:
+            properties: { batch_size: { maximum: 10 } }
+        - if:
+            required: [queue_arn]
+            properties: { queue_arn: { pattern: "\\.fifo$" } }
+          then:
+            properties: { batch_size: { maximum: 10 } }
       x-iacp-group: Triggers
     dead_letter_target_arn:
       type: [string, "null"]
       default: null
+      pattern: "^arn:aws[a-z-]*:(sqs|sns):[a-z0-9-]+:[0-9]{12}:.+$"
       description: SQS queue or SNS topic ARN for failed asynchronous invocations.
+      x-iacp-ui: stack-output
+    dead_letter_target_kms_key_arn:
+      type: [string, "null"]
+      default: null
+      pattern: "^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/.+$"
+      description: KMS key of the dead-letter target. Requires dead_letter_target_arn.
       x-iacp-ui: stack-output
     permissions_boundary_arn:
       type: [string, "null"]
       default: null
-      description: IAM permissions boundary for the execution role.
+      pattern: "^arn:aws[a-z-]*:iam::[0-9]{12}:policy/[A-Za-z0-9+=,.@_/-]+$"
+      description: IAM permissions boundary for the execution role. Null uses the platform's iacp-boundary policy; a boundary is always attached.
       x-iacp-group: Security
     extra_policy_jsons:
-      type: array
-      items: { type: string }
-      maxItems: 10
-      default: []
-      description: Additional IAM policy documents from other modules. Wildcard actions are rejected.
+      type: object
+      additionalProperties: { type: string }
+      propertyNames: { pattern: "^[a-z0-9][a-z0-9-]{0,39}$" }
+      maxProperties: 10
+      default: {}
+      description: Additional IAM policy documents keyed by a stable name. Allow statements must use explicit actions (no "*", "<service>:*", NotAction or NotResource).
       x-iacp-group: Security
       x-iacp-ui: stack-output
     tags:
       type: object
       additionalProperties: { type: string }
+      propertyNames: { not: { pattern: "^iacp:" } }
       maxProperties: 30
       description: Extra tags. The iacp:* prefix is reserved.
       x-iacp-ui: key-value
@@ -152,10 +187,18 @@ dependencies:
     description: Queue that triggers the function.
     accepts:
       - { module: sqs, output: arn }
+  - input: sqs_trigger.kms_key_arn
+    description: Key encrypting the trigger queue.
+    accepts:
+      - { module: sqs, output: kms_key_arn }
   - input: dead_letter_target_arn
     description: Destination for failed asynchronous invocations.
     accepts:
       - { module: sqs, output: arn }
+  - input: dead_letter_target_kms_key_arn
+    description: Key encrypting the dead-letter target.
+    accepts:
+      - { module: sqs, output: kms_key_arn }
   - input: extra_policy_jsons
     description: Access to other platform resources.
     accepts:
