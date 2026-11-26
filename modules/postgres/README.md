@@ -55,6 +55,17 @@ network.
 Enhanced Monitoring (which needs a monitoring role) and default CloudWatch
 alarms are planned for a later minor release.
 
+## Known limits
+
+- **Provider floor not exercised.** The module declares
+  `hashicorp/aws >= 5.70, < 6.0`, and every argument it uses exists in 5.70,
+  but CI resolves the newest 5.x (no lock file is committed for modules, as
+  for the other modules). Nothing runs the suite against 5.70 itself.
+- **Policy view of derived instances.** `iacp.encryption.rds_storage` denies
+  an `aws_db_instance` whose `storage_encrypted` is not set in the plan. Read
+  replicas and instances restored from a snapshot inherit encryption, so
+  outside this module they need an exception. This module always sets it.
+
 ## Inputs
 
 | Name | Description | Type | Default | Required |

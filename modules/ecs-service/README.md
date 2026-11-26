@@ -70,6 +70,31 @@ planned for later minor releases. TLS ends at the load balancer; traffic to
 the tasks stays inside the VPC and is limited to the load balancer's security
 group.
 
+## Known limits
+
+- **`https_egress_cidr_blocks` defaults to `0.0.0.0/0` on TCP 443.** Without
+  VPC endpoints the tasks reach ECR, CloudWatch Logs and Secrets Manager
+  through a NAT gateway, so the default must allow the public AWS endpoints.
+  Only port 443 is open and ingress is limited to the load balancer. When the
+  VPC has interface endpoints for every API the service uses, set it to the
+  VPC CIDR.
+- **Task-role documents are only partly validated.** `extra_policy_jsons`
+  rejects wildcards, `NotAction`, `NotResource`, `iam:PassRole` and `iam:`
+  actions on `Resource "*"`, but other explicit actions on `Resource "*"`
+  (for example `sts:AssumeRole` or `kms:Decrypt`) pass. Review the documents;
+  the permissions boundary is the backstop.
+- **Execution policy can be unknown at plan time.** When `secrets` come from
+  another module in the same configuration (the example's
+  `module.database.secret_arn`), the `ReadInjectedSecrets` statement is only
+  rendered at apply. The plan still works and OPA reads the statement's
+  actions from the policy document data source, but its resources are
+  checked only after apply. In platform stacks the ARNs arrive as another
+  stack's outputs and are known at plan time.
+- **Provider floor not exercised.** The module declares
+  `hashicorp/aws >= 5.70, < 6.0`, and every argument it uses exists in 5.70,
+  but CI resolves the newest 5.x (no lock file is committed for modules, as
+  for the other modules). Nothing runs the suite against 5.70 itself.
+
 ## Inputs
 
 | Name | Description | Type | Default | Required |

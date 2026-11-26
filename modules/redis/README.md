@@ -52,10 +52,26 @@ network.
 | Maintenance | Module parameter group (`redis7`, configurable `maxmemory-policy`), automatic minor version upgrades in the maintenance window, no immediate applies. |
 | Tagging | `iacp:team`, `iacp:environment`, `iacp:stack`, `iacp:module`, `iacp:managed-by` are merged last, on every taggable resource. |
 
-The AUTH token is a resource argument, so it is also stored in Terraform
-state, which the platform keeps encrypted and access-controlled (docs/02).
-Use `rbac` to keep credentials out of state entirely. Scheduled token
-rotation is planned for a later minor release.
+## Known limits
+
+- **The AUTH token is in Terraform state.** In `auth_mode = "token"` the token
+  is a resource argument, so state holds it (in `random_password` and in the
+  secret version), as well as Secrets Manager. The platform keeps state
+  encrypted and access-controlled (docs/02). Use `auth_mode = "rbac"` to keep
+  credentials out of state entirely, and prefer it for production. Scheduled
+  token rotation is planned for a later minor release.
+- **Log delivery is not exercised offline.** Delivering slow and engine logs
+  to the KMS-encrypted log groups depends on the key policy (both grants
+  above) and on the log groups' resource policy. AWS creates that resource
+  policy for `delivery.logs.amazonaws.com` on first delivery, so the apply
+  role needs `logs:CreateLogDelivery`, `logs:PutResourcePolicy`,
+  `logs:DescribeResourcePolicies` and `logs:DescribeLogGroups` (ElastiCache
+  logging documentation). Mocked tests cannot catch an `AccessDenied` here;
+  smoke-test one apply in a sandbox account before relying on the logs.
+- **Provider floor not exercised.** The module declares
+  `hashicorp/aws >= 5.70, < 6.0`, and every argument it uses exists in 5.70,
+  but CI resolves the newest 5.x (no lock file is committed for modules, as
+  for the other modules). Nothing runs the suite against 5.70 itself.
 
 ## Inputs
 
