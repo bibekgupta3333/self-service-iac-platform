@@ -164,7 +164,9 @@ func (f fakeTeams) VisibleTeams(context.Context, identity.Principal) (identity.V
 
 type fakeMembers struct{ role rbac.Role }
 
-func (f fakeMembers) RoleInTeam(context.Context, string, uuid.UUID) (rbac.Role, error) { return f.role, nil }
+func (f fakeMembers) RoleInTeam(context.Context, string, uuid.UUID) (rbac.Role, error) {
+	return f.role, nil
+}
 
 type fakeReconciler struct {
 	calls []string
