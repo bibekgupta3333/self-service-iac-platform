@@ -63,8 +63,9 @@ lint: fmt-check validate validate-manifests module-gate tflint checkov policy-te
 ## ---- stacks (environments/, mirrors pr-validate.yml) ----
 STACK ?= environments/development/platform/smoke
 BASE  ?= origin/main
-# Same switch as the workflow's IACP_PIN_BOOTSTRAP (ADR-0009); set to false to refuse unpublished tags.
-IACP_PIN_BOOTSTRAP ?= true
+# Same switch as the workflow's IACP_PIN_BOOTSTRAP: off, so unpublished module tags are refused.
+# IACP_PIN_BOOTSTRAP=true serves them from a local mirror (the pre-release ADR-0009 bootstrap).
+IACP_PIN_BOOTSTRAP ?= false
 PIN_BOOTSTRAP_FLAG := $(if $(filter true,$(IACP_PIN_BOOTSTRAP)),--allow-unpublished,)
 
 stack-detect: ## Stacks changed since BASE (default origin/main) as a JSON matrix

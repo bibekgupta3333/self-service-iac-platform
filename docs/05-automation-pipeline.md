@@ -362,7 +362,7 @@ Notes:
 `python -m tools.stack_pipeline verify-pins <stack>` runs before `terraform init`:
 
 - **Published tag:** the tag on `origin` must resolve to the recorded commit, or the step fails.
-- **Unpublished tag:** refused, unless the workflow-level `IACP_PIN_BOOTSTRAP` flag is `"true"`. The flag is set while ADR-0009 applies and module-release (WBS 3.6) has not yet published every pinned tag; it passes `--allow-unpublished`. With the flag on:
+- **Unpublished tag:** refused. The workflow-level `IACP_PIN_BOOTSTRAP` flag is `"false"`, now that module-release (WBS 3.6) publishes the tags; `modules/{s3,sqs,lambda}/v1.0.0` point at `681144a`. The `--allow-unpublished` path is kept, off by default, for the bootstrap that served tags before the first releases. Setting the flag to `"true"` passes that option, and then:
   - the recorded commit must already be on `origin/main`, and its `modules/<name>/module.yaml` must declare exactly that version;
   - the step pushes that one commit as the tag into a throwaway bare mirror;
   - the repository URL (with and without `.git`) is routed to the mirror through `GIT_CONFIG_*` `insteadOf` environment variables. No git config file is changed.
@@ -373,9 +373,9 @@ Notes:
 - Each source must be exactly `git::<repo>//modules/<name>?ref=<pinned tag>`, and nested calls inside platform modules may only use local paths.
 - It checks that `HEAD` of each fetched checkout is the recorded commit. This uses an explicit `--git-dir`, so git cannot resolve the enclosing repository. It also catches a tag that moved between `ls-remote` and `init`.
 
-The plan JSON therefore carries the real pinned source, and every policy is evaluated unchanged. Code from the PR branch is never served as a module. `make stack-plan` runs the same sequence locally and honours `IACP_PIN_BOOTSTRAP` (default `true`).
+The plan JSON therefore carries the real pinned source, and every policy is evaluated unchanged. Code from the PR branch is never served as a module. `make stack-plan` runs the same sequence locally and honours `IACP_PIN_BOOTSTRAP` (default `false`).
 
-Turning the bootstrap off: once module-release has published every pinned tag, set `IACP_PIN_BOOTSTRAP` to `"false"` (or remove it). Several commits on `main` can declare the same module version, and module-release tags the commit it releases, which may differ from the one a bootstrapped stack recorded. Re-render each such stack with the commit the published tag resolves to (`git ls-remote --tags origin`), or `verify-pins` fails on the mismatch.
+If the bootstrap is ever switched on again, switch it off as soon as the tags are published. Several commits on `main` can declare the same module version, and module-release tags the commit it releases, which may differ from the one a bootstrapped stack recorded. Re-render each such stack with the commit the published tag resolves to (`git ls-remote --tags origin`), or `verify-pins` fails on the mismatch. That happened with the smoke stack: it was bootstrapped at `06f6930` and re-rendered at `681144a` when the tag was published.
 
 ### 4.3 `apply.yml`
 

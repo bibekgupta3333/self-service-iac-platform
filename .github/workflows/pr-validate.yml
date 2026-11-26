@@ -39,11 +39,11 @@ env:
   AWS_ACCESS_KEY_ID: test
   AWS_SECRET_ACCESS_KEY: test
   AWS_DEFAULT_REGION: us-east-1
-  # ADR-0009 bootstrap: serve module tags that module-release (WBS 3.6) has not
-  # published yet from a local mirror of a commit on main. Set to "false" (or
-  # delete) once every pinned tag is published; verify-pins then refuses any
-  # unpublished tag. See docs/05 section 4.2, "Module pins".
-  IACP_PIN_BOOTSTRAP: "true"
+  # Off: every pinned module tag must be published by module-release, and
+  # verify-pins refuses an unpublished one. "true" serves unpublished tags from a
+  # local mirror of a commit on main (the ADR-0009 bootstrap used before the
+  # first releases); keep it off. See docs/05 section 4.2, "Module pins".
+  IACP_PIN_BOOTSTRAP: "false"
 
 jobs:
   detect:
