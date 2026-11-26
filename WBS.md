@@ -119,7 +119,7 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 ## 8. Lifecycle & governance — Phase 2
 | ID | Task | Est | Dep |
 |----|------|-----|-----|
-| [ ] 8.1 | Packages: `ecs-service` (+ALB, ECR), `postgres`, `redis`, `vpc`, `monitoring` | 12 | 3.6 |
+| [~] 8.1 | Packages: `ecs-service` (+ALB, ECR), `postgres`, `redis`, `vpc`, `monitoring` — `ecs-service`, `postgres` and `redis` v1.0.0 done with offline `terraform test` suites (LocalStack community has no ECS/RDS/ElastiCache), new OPA rules and conftest-checked example plans; `vpc` and `monitoring` in a separate PR | 12 | 3.6 |
 | [ ] 8.2 | Version upgrades: upgrade-path API + UI, major migration flow | 3 | 4.3, 7.2 |
 | [ ] 8.3 | Drift detection: `drift.yml` 02:00 UTC, `drift_reports`, reconcile/codify/ignore | 3 | 5.2 |
 | [ ] 8.4 | TTL: EventBridge Scheduler, 24 h warning, auto destroy (non-prod), extend, hourly reaper | 3 | 7.6 |

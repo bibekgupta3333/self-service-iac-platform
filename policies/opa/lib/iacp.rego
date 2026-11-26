@@ -229,6 +229,17 @@ as_array(x) := x if is_array(x)
 
 as_array(x) := [x] if not is_array(x)
 
+# enabled(x): a flag that is on. Some provider attributes are booleans and
+# others strings ("true"), e.g. aws_elasticache_replication_group's
+# at_rest_encryption_enabled.
+enabled(true)
+
+enabled("true")
+
+# flag(rc, key): rc's planned attribute key is on. A missing attribute is off,
+# so `not flag(...)` fails closed instead of skipping the rule.
+flag(rc, key) if enabled(object.get(after(rc), key, false))
+
 # object_or_empty(x) maps null (or any non-object) to {}.
 object_or_empty(x) := x if is_object(x)
 
