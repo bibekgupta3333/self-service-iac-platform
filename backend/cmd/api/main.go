@@ -157,6 +157,7 @@ func run() error {
 			httpapi.NewLockHandler(lockSvc),
 			httpapi.NewRequestLookupHandler(requestSvc),
 			httpapi.NewBudgetContextHandler(budgets.NewService(budgets.NewPostgresRepository(pool), clock)),
+			httpapi.NewSurgeryHandler(recovery.NewSurgeryRecorder(recoveryRepo, clock)),
 		},
 		Webhooks:         []httpapi.RouteRegistrar{webhookHandler},
 		PipelineHandlers: []httpapi.RouteRegistrar{httpapi.NewRunHandler(runs.NewService(runs.NewPostgresRepository(pool), clock)).

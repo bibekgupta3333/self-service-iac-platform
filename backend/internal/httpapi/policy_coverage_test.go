@@ -37,7 +37,7 @@ func TestEveryUserRouteHasAPolicy(t *testing.T) {
 		Public: []RouteRegistrar{NewRequestHandler(nil, nil), NewRequestEventsHandler(nil, StreamOptions{}),
 			NewStackHandler(nil), NewRollbackHandler(nil), NewAuditHandler(nil), ah},
 		PublicHandlers:   []RouteRegistrar{ah.Public()},
-		InternalHandlers: []RouteRegistrar{NewLockHandler(nil), NewBudgetContextHandler(nil)},
+		InternalHandlers: []RouteRegistrar{NewLockHandler(nil), NewBudgetContextHandler(nil), NewSurgeryHandler(nil)},
 		PipelineHandlers: []RouteRegistrar{NewRunHandler(nil)},
 		Webhooks:         []RouteRegistrar{NewWebhookHandler(nil, "", nil)},
 		Policies:         DefaultPolicies(),
