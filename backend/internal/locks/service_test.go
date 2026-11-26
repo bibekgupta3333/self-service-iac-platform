@@ -80,7 +80,9 @@ func (m *memStore) Request(_ context.Context, id uuid.UUID) (RequestInfo, error)
 	if !ok {
 		return RequestInfo{}, apperr.NotFound("request %s not found", id)
 	}
-	return r.info, nil
+	info := r.info
+	info.QueuedBehind = r.queuedBehind
+	return info, nil
 }
 
 func (m *memStore) Current(_ context.Context, id uuid.UUID) (*Lock, error) {
@@ -195,6 +197,11 @@ func TestAcquireQueueReleasePromote(t *testing.T) {
 		if res.Outcome != OutcomeQueued || *res.QueuedBehind != reqA || res.Lock.RequestID != reqA {
 			t.Fatalf("acquire %s = %+v", id, res)
 		}
+	}
+	// A waiter polling again behind the same holder writes no second lock.queued event.
+	before := len(repo.s.events)
+	if res := acquire(t, svc, reqC); res.Outcome != OutcomeQueued || *res.QueuedBehind != reqA || len(repo.s.events) != before {
+		t.Fatalf("re-poll = %+v, events %d -> %d", res, before, len(repo.s.events))
 	}
 
 	// A heartbeat with a stale token or from a waiter is rejected.

@@ -148,6 +148,24 @@ func TestCheckToken(t *testing.T) {
 	}
 }
 
+func TestAlreadyQueuedBehind(t *testing.T) {
+	a, b := reqA, reqB
+	tests := []struct {
+		current *uuid.UUID
+		holder  uuid.UUID
+		want    bool
+	}{
+		{nil, reqA, false},
+		{&a, reqA, true},
+		{&b, reqA, false},
+	}
+	for _, tt := range tests {
+		if got := AlreadyQueuedBehind(tt.current, tt.holder); got != tt.want {
+			t.Errorf("AlreadyQueuedBehind(%v, %s) = %v", tt.current, tt.holder, got)
+		}
+	}
+}
+
 func TestHolderAndLease(t *testing.T) {
 	if HolderFor("req-7k3p9x") != "request:req-7k3p9x" {
 		t.Fatal("HolderFor")

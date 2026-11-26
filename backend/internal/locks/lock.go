@@ -113,6 +113,12 @@ func Decide(now time.Time, current *Lock, caller uuid.UUID, waiters []Waiter) De
 	return Decision{Outcome: OutcomeQueued, Grantee: head.RequestID, Behind: head.RequestID, Replaced: replaced}
 }
 
+// AlreadyQueuedBehind reports whether a request whose queued_behind is current already
+// waits behind holder, so queueing it again would change nothing. Pure.
+func AlreadyQueuedBehind(current *uuid.UUID, holder uuid.UUID) bool {
+	return current != nil && *current == holder
+}
+
 // CheckToken verifies that request holds the lock with token. It rejects callers whose
 // lease was released or taken over, so a late callback from a superseded run cannot act
 // on the stack. An expired lease that nobody took over is still current. Pure.

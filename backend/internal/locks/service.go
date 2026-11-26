@@ -20,6 +20,8 @@ type RequestInfo struct {
 	ShortID   string
 	StackID   uuid.UUID
 	Completed bool // terminal status (completed_at is set)
+	// QueuedBehind is the request this one currently waits for, if any.
+	QueuedBehind *uuid.UUID
 }
 
 // Grant is a new lease to write. The store assigns the fencing token.
@@ -178,12 +180,15 @@ func (s *Service) AcquireIn(ctx context.Context, st Store, cmd AcquireCommand) (
 		}
 		holder = &l
 	}
-	if err := st.Queue(ctx, cmd.RequestID, d.Behind); err != nil {
-		return Result{}, fmt.Errorf("queue request: %w", err)
-	}
-	if err := a.append(ctx, "lock.queued", map[string]any{"request_id": req.ID, "short_id": req.ShortID,
-		"queued_behind": d.Behind}); err != nil {
-		return Result{}, err
+	// A waiter polling again behind the same holder changes nothing: no write, no audit.
+	if !AlreadyQueuedBehind(req.QueuedBehind, d.Behind) {
+		if err := st.Queue(ctx, cmd.RequestID, d.Behind); err != nil {
+			return Result{}, fmt.Errorf("queue request: %w", err)
+		}
+		if err := a.append(ctx, "lock.queued", map[string]any{"request_id": req.ID, "short_id": req.ShortID,
+			"queued_behind": d.Behind}); err != nil {
+			return Result{}, err
+		}
 	}
 	behind := d.Behind
 	return Result{Outcome: OutcomeQueued, Lock: *holder, QueuedBehind: &behind}, nil
