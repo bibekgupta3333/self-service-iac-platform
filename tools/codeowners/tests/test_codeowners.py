@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
 
+from tools.codeowners.adapters import stack_files
 from tools.codeowners.cli import main
 from tools.codeowners.models import ConfigError, OwnersConfig, Team
 from tools.codeowners.render import drift, render, team_rules, undeclared_teams
@@ -112,15 +114,18 @@ def test_drift() -> None:
 
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     (tmp_path / ".github").mkdir()
     (tmp_path / ".github" / "teams.yaml").write_text(yaml.safe_dump(config()))
     return tmp_path
 
 
-def add_stack(root: Path, env: str, team: str, stack: str, declared: str | None = None) -> None:
+def add_stack(root: Path, env: str, team: str, stack: str, declared: str | None = None, track: bool = True) -> None:
     d = root / "environments" / env / team / stack
     d.mkdir(parents=True)
     (d / "iacp.stack.json").write_text(json.dumps({"team": declared or team, "stack": stack, "environment": env}))
+    if track:
+        subprocess.run(["git", "add", "--", str(d / "iacp.stack.json")], cwd=root, check=True)
 
 
 def run(root: Path, *args: str) -> tuple[int, str, str]:
@@ -152,6 +157,26 @@ def test_stack_of_undeclared_team_fails(repo: Path) -> None:
     assert code == 1 and "data" in err
 
 
+def test_untracked_stacks_are_ignored(repo: Path) -> None:
+    add_stack(repo, "staging", "data", "lake", track=False)  # leftover, never committed
+    run(repo)
+    assert run(repo, "--check")[0] == 0
+
+
+def test_stack_files() -> None:
+    paths = [
+        "environments/production/payments/orders/iacp.stack.json",
+        "environments/production/payments/orders/main.tf",
+        "environments/qa/payments/orders/iacp.stack.json",
+        "environments/production/payments/iacp.stack.json",
+        "environments/development/search/idx/iacp.stack.json",
+    ]
+    assert stack_files(paths) == [
+        ("environments/development/search/idx/iacp.stack.json", "search"),
+        ("environments/production/payments/orders/iacp.stack.json", "payments"),
+    ]
+
+
 def test_stack_metadata_must_match_its_directory(repo: Path) -> None:
     add_stack(repo, "staging", "payments", "orders", declared="search")
     code, _, err = run(repo)
@@ -159,6 +184,7 @@ def test_stack_metadata_must_match_its_directory(repo: Path) -> None:
 
 
 def test_bad_config_exit_code(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     code, _, err = run(tmp_path)
     assert code == 2 and "not found" in err
     (tmp_path / ".github").mkdir()
