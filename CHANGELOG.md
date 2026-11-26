@@ -72,6 +72,13 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
     - apply, outputs, apply and summary reports, then lock release in an `always()` step
     - one apply per stack (`iacp-stack-<id>-apply`, never cancelled)
   - State is hermetic per job until the S3 backend arrives. That limit is documented in docs/05 and ADR-0009.
+  - Review hardening:
+    - The pr-validate `report` job is OIDC only, and `apply.yml` never receives `IACP_INTERNAL_TOKEN`. A job that can mint OIDC tokens no longer falls back to the shared token.
+    - `apply.yml` runs only from `main`.
+    - The plan-hash check fails closed once the API is configured, and both hashes are format-checked.
+    - A lock claim is recorded before the call, so an ambiguous claim is still released (by request when no token came back). A failed release is reported as its own stage.
+    - Destroy dispatches have their own concurrency group.
+    - The dispatched `stack_path` and server text are kept out of workflow commands.
     - The workflow runs on every PR, and policy and tool-version changes re-validate every stack.
   - After the first module releases:
     - The smoke stack is pinned to the published `modules/s3/v1.0.0` (`681144a`).
