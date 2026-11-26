@@ -7,6 +7,12 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 ## [Unreleased]
 
 ### Added
+- Stacks and request kinds (WBS 4.5, prerequisites of 5.3 and 7.4):
+  - `GET /v1/internal/requests/by-path?stack_path=&head_sha=` resolves the request holding a stack's lock (ids, fencing token, approved plan hash) for `apply.yml`; it fails closed (no lock, expired lease, holder not approved, merge commit mismatch). New route class `request_lookup`: `apply.yml` on main via `push` or `workflow_dispatch` only, never `pr-validate.yml`.
+  - `tools.stack_pipeline lock acquire --stack-path [--head-sha]` resolves the UUIDs and the approved plan hash through it; `apply.yml` uses them for the claim, the release and the plan-hash check, which removes the "fails closed because UUIDs are unknown" gap and the `IACP_API_URL` prerequisite.
+  - `GET /v1/stacks` (filters `team`, `env`, `status`; keyset pagination) and `GET /v1/stacks/{id}` (status, outputs, latest request and link), scoped in SQL to the caller's teams (platform admins see all; a hidden stack is `404`).
+  - `update` and `destroy` requests for existing stacks, named by `stack_id`. Kind-aware pure validation, `CheckStackAllowsKind` (`stack_busy`, `stack_destroyed`, `destroy_pending`), a destroy needs its stack name and a justification; the same idempotency, audit chain, stack lock and queue as a create. A destroy renders an empty root marked `"lifecycle": "destroy"` (golden-file tested) and the PR body warns. `upgrade` stays `unsupported_kind`.
+  - `GET /v1/requests/{id}/events`: Server-Sent Events from the audit log (snapshot, status changes with the audit seq as event id, `Last-Event-ID` resume, heartbeat, `end`, bounded lifetime, per-poll authorization).
 - PR publishing and GitHub webhooks (WBS 4.8, 4.9):
   - `publish.Publisher` port with pure branch naming (`iacp/<short id>`), path checks and a deterministic PR title, body (plan placeholder, request link), labels and commit message.
   - `githubapp` adapter: App JWT → cached, repository-scoped installation token; atomic commits with the git data API; idempotent PR, labels, `workflow_dispatch`; timeouts, same-host redirects only, retries on 5xx/429 honouring `Retry-After`.

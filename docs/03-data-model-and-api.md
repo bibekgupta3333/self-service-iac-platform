@@ -688,8 +688,8 @@ RBAC column uses team roles (see [07-security-and-policy.md](07-security-and-pol
 
 | Method | Path | Description | RBAC |
 |---|---|---|---|
-| GET | `/stacks?team=&env=&status=&module=` | List stacks. | viewer |
-| GET | `/stacks/{id}` | Stack detail: resources, versions, outputs, status, lock holder, drift, TTL. | viewer |
+| GET | `/stacks?team=&env=&status=&limit=&cursor=` | List stacks, newest first, keyset-paginated (`next_cursor`). A user sees only the stacks of teams they belong to (any role); platform admins see all. `module=` is not implemented yet. | viewer |
+| GET | `/stacks/{id}` | Stack detail: `status`, `outputs` (non-sensitive, as reported by the last apply), `latest_request {id, short_id, kind, status}` and `links` to it. A stack the caller may not see is `404`. Resources, versions, lock holder, drift and TTL arrive with their features. | viewer |
 | GET | `/stacks/{id}/requests` | Request history. | viewer |
 | GET | `/stacks/{id}/outputs` | Non-sensitive outputs. | viewer |
 | GET | `/stacks/{id}/files` | Current generated files (from `main`). | viewer |
@@ -703,14 +703,14 @@ Stacks are never created or destroyed directly; mutation is always a request.
 
 | Method | Path | Description | RBAC |
 |---|---|---|---|
-| POST | `/requests` | Create request (`kind`: create, update, upgrade, destroy, reconcile, rollback). Requires `Idempotency-Key`. | developer (any env); maintainer to create `destroy` in production. Enforced now from `memberships` (platform admins count as admin); full RBAC middleware arrives with WBS 4.4 |
+| POST | `/requests` | Create request (`kind`: create, update, destroy are implemented; upgrade, reconcile, rollback answer `422 unsupported_kind`). Requires `Idempotency-Key`. | developer (any env); maintainer to create `destroy` in production. Enforced now from `memberships` (platform admins count as admin); full RBAC middleware arrives with WBS 4.4 |
 | GET | `/requests?team=&status=&kind=&mine=true` | List. | viewer |
 | GET | `/requests/{id}` | Detail incl. PR, pipeline runs, plan, cost, timeline. | viewer |
 | POST | `/requests/{id}/preview` | Dry-run render: returns generated files + diff without opening a PR. | developer |
 | POST | `/requests/{id}/cancel` | Cancel (`draft`/`pr_open`/`plan_ready`); closes PR, releases lock. | creator or maintainer |
 | POST | `/requests/{id}/replan` | Re-dispatch `pr-validate.yml` (e.g. after plan mismatch). | developer |
 | POST | `/requests/{id}/retry-apply` | Re-dispatch `apply.yml` for a `failed` request whose merge is on `main`. | maintainer |
-| GET | `/requests/{id}/events` | Server-Sent Events stream of status changes. | viewer |
+| GET | `/requests/{id}/events` | Server-Sent Events stream of status changes (below). Any role in the request's team; others get `404`. | viewer |
 
 **Create** — `POST /v1/requests`
 
@@ -786,7 +786,7 @@ If the change spans several dependent stacks, the backend splits it into **seque
 }
 ```
 
-**Update** — same shape with `"kind": "update"`, `"stack_id"` instead of team/env/stack, and the full desired `resources` list (declarative; removed resources are destroyed and shown in the plan). Optional `"if_match_spec_version": 7` guards against concurrent edits.
+**Update** — same shape with `"kind": "update"`, `"stack_id"` instead of team/env/stack/region/ephemeral (sending those is `422 not_allowed`: they are fixed once the stack exists), and the full desired `resources` list (declarative; removed resources are destroyed and shown in the plan). The new inputs and versions are validated like a create's. The publisher renders over the stack root and keeps `.terraform.lock.hcl`. `if_match_spec_version` is not implemented yet.
 
 **Upgrade** — `POST /v1/requests`
 
@@ -801,7 +801,35 @@ If the change spans several dependent stacks, the backend splits it into **seque
 
 The API validates existing inputs against the target version's schema, applies manifest-declared input renames (`migrations` in `module.yaml`), and rejects with `422 upgrade_requires_input_changes` listing fields if manual edits are needed. Major upgrades require `"acknowledge_breaking": true`.
 
-**Destroy** — `{"kind": "destroy", "stack_id": "…", "justification": "Feature retired", "confirm_stack_name": "order-events"}`. The generator writes a destroy marker (`iacp.stack.json` `"lifecycle": "destroy"`) and empties `main.tf` module blocks so the plan shows the destroys; production destroys require maintainer + `prevent_destroy`-protected resources need a prior update request to lift protection.
+**Destroy** — `{"kind": "destroy", "stack_id": "…", "justification": "Feature retired", "confirm_stack_name": "order-events"}`. `justification` is required and `confirm_stack_name` must equal the stack's name (`422 mismatch`); `resources` must be omitted. The generator writes a destroy marker (`iacp.stack.json` `"lifecycle": "destroy"`) and empties `main.tf` module blocks (the stored spec has `"resources": []`), so `pr-validate.yml` and `apply.yml` plan and apply the destruction through the normal pipeline with no special mode; the PR body says that merging destroys the stack. Production destroys require maintainer + `prevent_destroy`-protected resources need a prior update request to lift protection. The cleanup PR and the `destroyed` status belong to WBS 7.6.
+
+**What a stack accepts.** Update and destroy are checked against the stack, by the pure `requests.CheckStackAllowsKind`, first before the transaction and again inside it with the stack row locked:
+
+| Stack status | Update / destroy |
+|---|---|
+| `active`, `drifted`, `failed` | accepted (a failed stack is open to fix-forward and destroy) |
+| `provisioning`, `updating`, `destroying` | `409 stack_busy`: an apply is in flight |
+| `destroyed` | `409 stack_destroyed` |
+
+A stack with an open `destroy` request also refuses further update and destroy requests (`409 destroy_pending`). Anything else queues behind the lock holder exactly like a create (`queued_behind`, publish on promotion). Request creation does not change the stack status; the apply reports do (`requests.StackStatusWhileApplying` and `StackStatusAfterApply` are the table WBS 5.3 applies). Idempotency, the audit chain (`request.created`) and the role rules are the same as for a create. `upgrade` stays `unsupported_kind` until the applied-spec and input-migration pieces it needs exist.
+
+**Status stream** — `GET /v1/requests/{id}/events` (`text/event-stream`). The feed is the request's `request.created` and `request.transitioned` audit rows, so no change is lost between polls (the DB is polled every 2 s; no broker). Each frame's `id` is the audit `seq`; `EventSource` sends it back as `Last-Event-ID` on reconnect and the stream resumes after it. Without a valid `Last-Event-ID` it starts with the current state:
+
+```
+id: 1048213
+event: snapshot
+data: {"request_id":"…","status":"pr_open","kind":"update","updated_at":"…","seq":1048213}
+
+id: 1048230
+event: status
+data: {"request_id":"…","seq":1048230,"occurred_at":"…","status":"validating","from":"pr_open","event":"validation_started"}
+
+event: end
+data: {"request_id":"…","status":"applied"}
+
+```
+
+`end` (no id) is sent once the request is terminal and the server closes the stream: the client closes its `EventSource` instead of reconnecting. A `: heartbeat` comment goes out every 15 s while idle, and the stream closes after 5 minutes without an `end`, which the client answers by reconnecting with `Last-Event-ID`. Authorization is checked before the first byte (a non-member gets the same `404` as an unknown request, as problem+json) and again on every poll, so a revoked member's stream ends. Each write extends its own deadline, so the server-wide `WriteTimeout` does not cut the stream.
 
 **Request detail** — `GET /v1/requests/{id}` (abridged)
 
@@ -901,7 +929,7 @@ Called only by GitHub Actions jobs with `Authorization: Bearer <GitHub OIDC JWT>
 | Method | Path | Called by | Purpose |
 |---|---|---|---|
 | POST | `/runs` | `pr-validate.yml`, `apply.yml`, `ttl-reaper.yml` | Report run status and stage results (validating, plan summary, policy, cost, apply outcome, outputs). Creates/updates `pipeline_runs`, `plan_summaries`, `cost_estimates`. |
-| GET | `/internal/requests/by-path?stack_path=&head_sha=` | `apply.yml` (before `terraform init`) | Confirms the per-stack lock row for the merge commit; returns `request_short_id`, `approved_plan_hash`, `fencing_token`, approvals (for the pre-apply OPA gate). `409 stack_locked` → job waits/retries. |
+| GET | `/internal/requests/by-path?stack_path=&head_sha=` | `apply.yml` (before the lock claim) | Resolves the request that holds the stack's lock: stack and request ids, `fencing_token`, `approved_plan_hash` (below). Fails closed. |
 | GET | `/internal/budget-context?stack_path=` | `pr-validate.yml`, `apply.yml` | OPA input (`conftest --data`): environment, team, allowed regions, budget (`limit_usd`, `spent_usd`, active override), approved policy exceptions, yanked module versions. |
 | POST | `/drift` | `drift.yml` | Drift result per stack (see [6.6](#66-drift)). |
 | POST | `/internal/catalog/index` | `module-release.yml` | Index a released module version (see [6.2](#62-catalog-modules-and-versions)). |
@@ -921,6 +949,7 @@ Route classes (`backend/internal/auth/routes.go`, pure table enforced by middlew
 | locks | `/internal/stacks/{id}/lock*` | `apply.yml`, `ttl-reaper.yml` | `refs/heads/main` (ref and workflow definition) | `push`, `workflow_dispatch`, `schedule` |
 | catalog_index | `/internal/catalog/index` | `module-release.yml` | `refs/heads/main` | `push`, `workflow_dispatch` |
 | runs | `/runs` | `pr-validate.yml`, `apply.yml`, `drift.yml`, `ttl-reaper.yml` | per pipeline | `pull_request`, `push`, `workflow_dispatch`, `schedule` |
+| request_lookup | `/internal/requests/by-path` (read-only) | `apply.yml` only | `refs/heads/main` (ref and workflow definition) | `push`, `workflow_dispatch` |
 | budget_context | `/internal/budget-context` (read-only) | `pr-validate.yml`, `apply.yml` | global allow-list (PR merge ref for `pr-validate.yml`, main otherwise) | `pull_request`, `push`, `workflow_dispatch` |
 
 Per pipeline on `/runs`: `validate` ← `pr-validate.yml` on `pull_request`; `apply` ← `apply.yml` on main via `push`/`workflow_dispatch`; `drift` ← `drift.yml` on main via `schedule`/`workflow_dispatch`; `ttl_destroy` ← `ttl-reaper.yml` on main via `schedule`/`workflow_dispatch`. `pull_request_target` and `workflow_run` never qualify.
@@ -928,11 +957,24 @@ Per pipeline on `/runs`: `validate` ← `pr-validate.yml` on `pull_request`; `ap
 `GET /v1/internal/requests/by-path?stack_path=environments/production/payments/order-events&head_sha=a1b2c3d4e5f60718293a4b5c6d7e8f9012345678` (apply) → `200`
 
 ```json
-{ "lock": "granted", "request_short_id": "req-7k3p9x", "fencing_token": 48214,
+{ "stack_id": "b2c1f0a9-3e4d-4c5b-8a7f-1e2d3c4b5a69", "stack_path": "environments/production/payments/order-events",
+  "request_id": "0d7e3a52-6c11-4f0e-b9b6-5f2f3c8d1a90", "request_short_id": "req-7k3p9x", "kind": "update", "status": "approved",
+  "fencing_token": 48214,
   "approved_plan_hash": "3f9a1c0b7e2d4f6a8b0c1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6f708",
-  "author": "priya-s", "allow_stateful_destroy": false,
-  "approvals": [ { "login": "marco-p", "role": "maintainer", "state": "APPROVED" } ] }
+  "merge_commit_sha": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+  "links": { "request": "/v1/requests/0d7e3a52-…", "lock": "/v1/internal/stacks/b2c1f0a9-…/lock" } }
 ```
+
+`stack_path` is validated like every stack path (`environments/<development|staging|production>/<team>/<stack>`, no trailing slash, sent once) and `head_sha` must be 40 lowercase hex characters; an unknown query parameter is `400`, so a misspelt `head_sha` cannot skip the check. The answer is the request named by the stack's lock row. It is refused when:
+
+| Condition | Response |
+|---|---|
+| no stack at the path | `404 stack_not_found` |
+| no lock, or the lease has expired | `404 no_active_request` |
+| the holder is not `approved` or `applying` | `409 request_not_approved` (`applying` is accepted because the `pr_merged` webhook can trail the push that starts `apply.yml`) |
+| `head_sha` differs from the recorded `merge_commit_sha` | `409 merge_commit_mismatch` (a merge not recorded yet passes) |
+
+The route class is `apply.yml` only, from main, on `push` or `workflow_dispatch`. `pr-validate.yml` does not get it: it needs neither ids nor tokens (it reads its request id and fencing token from `iacp.stack.json`), and the response is the credential for the stack lock plus the hash an apply is verified against, which a workflow file under a PR author's control must never read. `tools.stack_pipeline lock acquire --stack-path … [--head-sha …]` calls it when the UUIDs are not passed, and writes `stack_id`, `request_id` and `approved_plan_hash` to the step outputs for the release and the plan-hash check. The earlier `approvals`/`author`/`allow_stateful_destroy` fields for the pre-apply OPA gate are not returned: that gate reads the budget context.
 
 `POST /v1/runs` (PR validation summary)
 
