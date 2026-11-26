@@ -306,6 +306,27 @@ func TestDestroyRequest(t *testing.T) {
 	}
 }
 
+func TestDestroyAuditRecordsWhy(t *testing.T) {
+	repo, svc, created := existingStackFixture(t, StackActive)
+	if _, err := svc.Create(context.Background(), dev, createCmd(stackInput(destroyInput(), created.Stack.ID), "key-destroy-0003")); err != nil {
+		t.Fatal(err)
+	}
+	var p map[string]any
+	if err := json.Unmarshal(repo.state.events[len(repo.state.events)-1].Payload, &p); err != nil {
+		t.Fatal(err)
+	}
+	if p["justification"] != "feature retired" || p["confirm_stack_name"] != "order-events" || p["kind"] != "destroy" ||
+		p["stack_id"] != created.Stack.ID.String() {
+		t.Fatalf("audit payload = %v", p)
+	}
+	// A create keeps its payload small, and an update records its justification.
+	var first map[string]any
+	_ = json.Unmarshal(repo.state.events[0].Payload, &first)
+	if _, ok := first["justification"]; ok {
+		t.Fatalf("create payload = %v", first)
+	}
+}
+
 func TestDestroyNeedsTheStackName(t *testing.T) {
 	repo, svc, created := existingStackFixture(t, StackActive)
 	in := stackInput(destroyInput(), created.Stack.ID)

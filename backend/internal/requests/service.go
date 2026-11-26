@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -416,6 +417,20 @@ func (s *Service) createForStack(ctx context.Context, st Store, by identity.Prin
 	return s.record(ctx, st, by, cmd, StackRef{ID: t.ID, Path: t.Path, Status: string(t.Status)}, t.TeamID, NormalizeForStack(in, t))
 }
 
+// createdPayload is the request.created audit payload. A destroy records why it was asked
+// for and the stack name that confirmed it, because the audit chain is where reviewers
+// look, not the request row. Pure.
+func createdPayload(req *Request, stack StackRef, in CreateInput) map[string]any {
+	p := map[string]any{"short_id": req.ShortID, "kind": req.Kind, "stack_path": stack.Path, "stack_id": stack.ID}
+	if in.Kind != KindCreate && strings.TrimSpace(in.Justification) != "" {
+		p["justification"] = in.Justification
+	}
+	if in.Kind == KindDestroy {
+		p["confirm_stack_name"] = in.ConfirmStackName
+	}
+	return p
+}
+
 // record inserts the draft request for stack, audits request.created and takes the stack
 // lock or queues behind its holder, in the caller's transaction. Create, update and
 // destroy share it, so idempotency, audit and queueing behave the same for every kind.
@@ -431,7 +446,7 @@ func (s *Service) record(ctx context.Context, st Store, by identity.Principal, c
 		return nil, fmt.Errorf("insert request: %w", err)
 	}
 
-	payload, err := json.Marshal(map[string]any{"short_id": req.ShortID, "kind": req.Kind, "stack_path": stack.Path})
+	payload, err := json.Marshal(createdPayload(req, stack, cmd.Input))
 	if err != nil {
 		return nil, fmt.Errorf("encode audit payload: %w", err)
 	}
