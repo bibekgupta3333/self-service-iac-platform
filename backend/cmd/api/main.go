@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/audit"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/auth"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/catalog"
@@ -91,9 +93,21 @@ func run() error {
 		},
 		InternalHandlers: []httpapi.RouteRegistrar{httpapi.NewLockHandler(lockSvc)},
 		PipelineHandlers: []httpapi.RouteRegistrar{httpapi.NewRunHandler(runs.NewService(runs.NewPostgresRepository(pool), clock))},
+		Metrics:          newMetrics(pool),
+		MetricsAccess:    httpapi.NewMetricsAccess(cfg.MetricsToken),
 	})
 
 	return serve(ctx, newServer(cfg.HTTPAddr, handler), cfg.ShutdownTimeout)
+}
+
+// newMetrics builds the Prometheus registry served on /metrics, including pool gauges.
+func newMetrics(pool *pgxpool.Pool) *observability.Metrics {
+	m := observability.NewMetrics()
+	m.RegisterPool(func() observability.PoolStats {
+		s := pool.Stat()
+		return observability.PoolStats{Acquired: s.AcquiredConns(), Idle: s.IdleConns(), Total: s.TotalConns(), Max: s.MaxConns()}
+	})
+	return m
 }
 
 // newServer bounds every phase of a connection so slow or idle clients cannot pin

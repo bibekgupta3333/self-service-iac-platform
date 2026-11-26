@@ -59,6 +59,10 @@ type Config struct {
 	// InternalToken is the shared bearer token for /v1/internal/* and /v1/runs, accepted
 	// alongside GitHub OIDC. Empty means the token path rejects every call.
 	InternalToken string
+	// MetricsToken lets non-loopback scrapers read /metrics ("Authorization: Bearer").
+	// Empty means /metrics answers loopback peers only. It is deliberately separate from
+	// InternalToken, which can take stack locks.
+	MetricsToken string
 	// OIDC configures GitHub Actions OIDC verification; disabled when Audience is empty.
 	OIDC OIDCConfig
 }
@@ -119,6 +123,7 @@ func Load(lookup LookupFunc) (Config, error) {
 		DevUserLogin:       get("DEV_USER", "local-dev"),
 		ModuleRepoURL:      get("MODULE_REPO_URL", "https://github.com/bibekgupta3333/self-service-iac-platform.git"),
 		InternalToken:      get("INTERNAL_TOKEN", ""),
+		MetricsToken:       get("METRICS_TOKEN", ""),
 	}
 	oidc, err := loadOIDC(get)
 	errs = append(errs, err)
@@ -135,6 +140,12 @@ func Load(lookup LookupFunc) (Config, error) {
 	}
 	if cfg.InternalToken != "" && len(cfg.InternalToken) < MinInternalTokenLen {
 		errs = append(errs, fmt.Errorf("%sINTERNAL_TOKEN must be at least %d characters", Prefix, MinInternalTokenLen))
+	}
+	if cfg.MetricsToken != "" && len(cfg.MetricsToken) < MinInternalTokenLen {
+		errs = append(errs, fmt.Errorf("%sMETRICS_TOKEN must be at least %d characters", Prefix, MinInternalTokenLen))
+	}
+	if cfg.MetricsToken != "" && cfg.MetricsToken == cfg.InternalToken {
+		errs = append(errs, fmt.Errorf("%sMETRICS_TOKEN must differ from %sINTERNAL_TOKEN", Prefix, Prefix))
 	}
 	if err := errors.Join(errs...); err != nil {
 		return Config{}, fmt.Errorf("load config: %w", err)
