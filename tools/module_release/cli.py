@@ -106,7 +106,8 @@ def build_parser() -> argparse.ArgumentParser:
     index.add_argument("--released-by", default=None,
                        help="recorded as released_by (default: $GITHUB_ACTOR, else module-release)")
     index.add_argument("--skip-if-unconfigured", action="store_true",
-                       help=f"exit 0 with a notice when {API_URL_ENV} or {TOKEN_ENV} is not set")
+                       help=f"exit 0 with a notice when neither {API_URL_ENV} nor {TOKEN_ENV} is set "
+                            "(setting only one of them is still an error)")
     index.add_argument("--dry-run", action="store_true", help="print the payload instead of sending it")
     return parser
 
@@ -159,10 +160,11 @@ def _index(app: App, args: argparse.Namespace, env: Mapping[str, str]) -> int:
     url, token = env.get(API_URL_ENV, "").strip(), env.get(TOKEN_ENV, "").strip()
     if not url or not token:
         missing = " and ".join(n for n, v in ((API_URL_ENV, url), (TOKEN_ENV, token)) if not v)
-        if args.skip_if_unconfigured:
+        if args.skip_if_unconfigured and not url and not token:
             print(f"::notice title=Catalog index skipped::{missing} not configured, "
                   f"so {payload['git_tag']} was not indexed (local-first, ADR-0009)")
             return 0
+        # Exactly one of the two set is a misconfiguration, never a reason to skip.
         raise ValueError(f"{missing} must be set to index {payload['git_tag']}")
     try:
         result = CatalogClient(url, token).index(payload)

@@ -263,6 +263,13 @@ class TestCli:
         assert run(released_repo, "index", "demo", "--commit-sha", sha, env={"IACP_API_URL": "http://localhost"}) == 2
         assert "IACP_INTERNAL_TOKEN must be set" in capsys.readouterr().err
 
+    @pytest.mark.parametrize("env,missing", [({"IACP_API_URL": "https://iacp.example.com"}, "IACP_INTERNAL_TOKEN"),
+                                             ({"IACP_INTERNAL_TOKEN": "t"}, "IACP_API_URL")])
+    def test_index_half_configured_fails_even_with_skip(self, released_repo, capsys, env, missing):
+        sha = released_repo.git("rev-parse", "HEAD")
+        assert run(released_repo, "index", "demo", "--commit-sha", sha, "--skip-if-unconfigured", env=env) == 2
+        assert f"{missing} must be set" in capsys.readouterr().err
+
 
 def test_repository_modules_pass_the_gate():
     """The modules in this repository must pass against their own tags (first release before any tag)."""
