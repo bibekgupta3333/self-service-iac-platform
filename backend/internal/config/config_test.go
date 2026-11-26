@@ -58,6 +58,36 @@ func TestLoad(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "oidc disabled by default",
+			env:  dev,
+			check: func(t *testing.T, c Config) {
+				if c.OIDC.Enabled() || c.OIDC.Issuer != DefaultOIDCIssuer ||
+					c.OIDC.JWKSURL != DefaultOIDCIssuer+"/.well-known/jwks" || c.OIDC.Leeway != 30*time.Second {
+					t.Fatalf("oidc defaults: %+v", c.OIDC)
+				}
+			},
+		},
+		{
+			name: "oidc configured",
+			env: with(map[string]string{
+				"IACP_OIDC_AUDIENCE": "https://api.iacp.acme.internal", "IACP_OIDC_REPOSITORY": "acme/iacp",
+				"IACP_OIDC_REPOSITORY_ID": "87654321", "IACP_OIDC_ISSUER": "http://127.0.0.1:9999/",
+				"IACP_OIDC_ALLOWED_REFS": "refs/heads/main, refs/pull/*/merge", "IACP_OIDC_LEEWAY": "10s",
+				"IACP_OIDC_ALLOWED_WORKFLOWS": "acme/iacp/.github/workflows/apply.yml@refs/heads/main",
+			}),
+			check: func(t *testing.T, c Config) {
+				o := c.OIDC
+				if !o.Enabled() || o.Repository != "acme/iacp" || o.RepositoryID != "87654321" || o.Issuer != "http://127.0.0.1:9999" ||
+					o.JWKSURL != "http://127.0.0.1:9999/.well-known/jwks" || len(o.Refs) != 2 || o.Refs[1] != "refs/pull/*/merge" ||
+					len(o.WorkflowRefs) != 1 || o.Leeway != 10*time.Second {
+					t.Fatalf("oidc = %+v", o)
+				}
+			},
+		},
+		{name: "oidc audience without repository", env: with(map[string]string{"IACP_OIDC_AUDIENCE": "x"}), wantErr: "must be set together"},
+		{name: "oidc repository without audience", env: with(map[string]string{"IACP_OIDC_REPOSITORY": "a/b"}), wantErr: "must be set together"},
+		{name: "oidc leeway too large", env: with(map[string]string{"IACP_OIDC_LEEWAY": "1h"}), wantErr: "OIDC_LEEWAY"},
 		{name: "auth mode is required", env: map[string]string{}, wantErr: "IACP_AUTH_MODE must be set"},
 		{name: "blank auth mode is required", env: map[string]string{"IACP_AUTH_MODE": "  "}, wantErr: "IACP_AUTH_MODE must be set"},
 		{name: "unknown auth mode", env: map[string]string{"IACP_AUTH_MODE": "none"}, wantErr: "unsupported value"},
