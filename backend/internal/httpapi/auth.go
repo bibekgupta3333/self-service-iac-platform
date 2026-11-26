@@ -121,6 +121,24 @@ func (as AnyAuthenticator) Authenticate(r *http.Request) (identity.Principal, er
 	return identity.Principal{}, errors.Join(append(errs, ErrUnauthenticated)...)
 }
 
+// requireRoute scopes an OIDC caller to a route class (auth.RoutePolicies). It runs
+// after requireAuth; callers authenticated with the shared token carry no workflow and pass.
+func requireRoute(class auth.RouteClass) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			p, err := identity.FromContext(r.Context())
+			if err == nil {
+				err = auth.AuthorizeRoute(class, p.Workflow)
+			}
+			if err != nil {
+				writeError(w, r, err)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // requireAuth rejects unauthenticated requests and stores the Principal in the context.
 // The reason is logged, never returned: clients get a generic 401. The exception is a
 // verified identity that is not allowed (OIDC workflow_not_allowed), which gets its 403.

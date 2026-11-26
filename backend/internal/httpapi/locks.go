@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/auth"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/locks"
 )
@@ -29,11 +30,15 @@ type LockHandler struct{ svc LockService }
 func NewLockHandler(svc LockService) *LockHandler { return &LockHandler{svc: svc} }
 
 // Routes implements RouteRegistrar. Mount it under /v1/internal.
+// Only apply/destroy workflows on main (or the shared token) may use them.
 func (h *LockHandler) Routes(r chi.Router) {
-	r.Get("/stacks/{id}/lock", h.get)
-	r.Post("/stacks/{id}/lock", h.acquire)
-	r.Post("/stacks/{id}/lock/heartbeat", h.heartbeat)
-	r.Delete("/stacks/{id}/lock", h.release)
+	r.Group(func(g chi.Router) {
+		g.Use(requireRoute(auth.RouteLocks))
+		g.Get("/stacks/{id}/lock", h.get)
+		g.Post("/stacks/{id}/lock", h.acquire)
+		g.Post("/stacks/{id}/lock/heartbeat", h.heartbeat)
+		g.Delete("/stacks/{id}/lock", h.release)
+	})
 }
 
 type lockDTO struct {

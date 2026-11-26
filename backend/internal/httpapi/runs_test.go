@@ -92,7 +92,10 @@ func TestRunsEndToEndWithOIDC(t *testing.T) {
 		c := auth.Claims{RegisteredClaims: jwt.RegisteredClaims{Issuer: auth.GitHubIssuer, Audience: jwt.ClaimStrings{"https://api.iacp.acme.internal"},
 			ExpiresAt: jwt.NewNumericDate(now.Add(5 * time.Minute)), IssuedAt: jwt.NewNumericDate(now)},
 			Repository: repo, RepositoryOwner: "acme", Ref: ref, JobWorkflowRef: repo + "/.github/workflows/" + workflow + "@" + ref,
-			RunID: runID, RunAttempt: "1"}
+			RunID: runID, RunAttempt: "1", SHA: "e4c2a1f0b9d8c7e6f5a4b3c2d1e0f9a8b7c6d5e4", EventName: "push"}
+		if strings.HasPrefix(ref, "refs/pull/") {
+			c.EventName = "pull_request"
+		}
 		tok := jwt.NewWithClaims(jwt.SigningMethodRS256, c)
 		tok.Header["kid"] = "gh1"
 		s, err := tok.SignedString(key)

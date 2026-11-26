@@ -50,14 +50,24 @@ func TestTokenAuthenticator(t *testing.T) {
 	}
 }
 
-// fakeTokenVerifier accepts "good.jwt.token" and maps "forbidden.jwt.token" to workflow_not_allowed.
+func workflowClaims(file, ref, event string) auth.Claims {
+	return auth.Claims{Repository: "acme/iacp", Ref: ref, RunID: "11873399021", RunAttempt: "2", EventName: event,
+		JobWorkflowRef: "acme/iacp/.github/workflows/" + file + "@" + ref}
+}
+
+// fakeTokenVerifier maps fixed token strings to verified workflow identities:
+// good/apply = apply.yml on main, release = module-release.yml on main, prvalidate =
+// pr-validate.yml on a PR merge ref; "forbidden.jwt.token" is a global allow-list rejection.
 type fakeTokenVerifier struct{}
 
 func (fakeTokenVerifier) Verify(_ context.Context, raw string) (auth.Claims, error) {
 	switch raw {
-	case "good.jwt.token":
-		return auth.Claims{Repository: "acme/iacp", Ref: "refs/heads/main", RunID: "11873399021", RunAttempt: "2",
-			JobWorkflowRef: "acme/iacp/.github/workflows/apply.yml@refs/heads/main"}, nil
+	case "good.jwt.token", "apply.jwt.token":
+		return workflowClaims("apply.yml", "refs/heads/main", "push"), nil
+	case "release.jwt.token":
+		return workflowClaims("module-release.yml", "refs/heads/main", "push"), nil
+	case "prvalidate.jwt.token":
+		return workflowClaims("pr-validate.yml", "refs/pull/812/merge", "pull_request"), nil
 	case "badrun.jwt.token":
 		return auth.Claims{RunID: "x", RunAttempt: "1"}, nil
 	case "forbidden.jwt.token":
@@ -107,8 +117,10 @@ func TestOIDCOrTokenOnInternalRoutes(t *testing.T) {
 		header string
 		want   int
 	}{
-		{"Bearer good.jwt.token", 201},
+		{"Bearer release.jwt.token", 201},
 		{"Bearer " + testInternalToken, 200},
+		{"Bearer apply.jwt.token", 403},      // not module-release.yml
+		{"Bearer prvalidate.jwt.token", 403}, // PR-controlled workflow
 		{"Bearer bad.jwt.token", 401},
 		{"Bearer forbidden.jwt.token", 403},
 		{"", 401},

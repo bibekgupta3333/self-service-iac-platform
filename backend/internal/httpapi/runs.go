@@ -7,6 +7,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/auth"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/runs"
 )
@@ -25,7 +26,7 @@ func NewRunHandler(svc RunService) *RunHandler { return &RunHandler{svc: svc} }
 
 // Routes implements RouteRegistrar.
 func (h *RunHandler) Routes(r chi.Router) {
-	r.Post("/runs", h.record)
+	r.With(requireRoute(auth.RouteRuns)).Post("/runs", h.record)
 }
 
 type runAcceptedDTO struct {

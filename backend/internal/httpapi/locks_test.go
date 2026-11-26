@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -154,5 +155,42 @@ func TestLockHandlers(t *testing.T) {
 	// Lock routes are machine-only: the dev user authenticator does not open them.
 	if rec := do(t, h, http.MethodGet, base, ""); rec.Code != 401 {
 		t.Fatalf("lock route without internal token = %d", rec.Code)
+	}
+}
+
+// Each machine route accepts only its own workflows: a pull-request token never reaches
+// the lock or catalog routes, apply.yml on main drives the lock, module-release.yml indexes.
+func TestMachineRoutesAreScopedPerWorkflow(t *testing.T) {
+	h := NewRouter(Deps{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DevAuthenticator{Principal: devPrincipal},
+		Internal: AnyAuthenticator{NewOIDCAuthenticator(fakeTokenVerifier{}), NewTokenAuthenticator(testInternalToken, releaseBot)},
+		Ready:    okPinger{}, Catalog: NewCatalogHandler(&fakeCatalog{versions: []catalog.ModuleVersion{sqsVersion()}}),
+		InternalHandlers: []RouteRegistrar{NewLockHandler(&fakeLocks{})},
+	})
+	base := "/v1/internal/stacks/" + lockStack.String() + "/lock"
+	holder := lockHolder.String()
+	routes := []struct{ method, path, body string }{
+		{"GET", base, ""},
+		{"POST", base, `{"request_id":"` + holder + `"}`},
+		{"POST", base + "/heartbeat", `{"request_id":"` + holder + `","fencing_token":48214}`},
+		{"DELETE", base + "?request_id=" + holder + "&fencing_token=48214", ""},
+	}
+	index := struct{ method, path, body string }{"POST", "/v1/internal/catalog/index", `{"module":"sqs","version":"1.3.0"}`}
+
+	for _, rt := range routes {
+		for token, want := range map[string]int{"apply.jwt.token": 200, "prvalidate.jwt.token": 403, "release.jwt.token": 403} {
+			rec := do(t, h, rt.method, rt.path, rt.body, "Authorization", "Bearer "+token)
+			if rec.Code != want && !(want == 200 && rec.Code == 202) {
+				t.Errorf("%s %s with %s = %d, want %d: %s", rt.method, rt.path, token, rec.Code, want, rec.Body)
+			}
+			if want == 403 && !strings.Contains(rec.Body.String(), `"code":"workflow_not_allowed"`) {
+				t.Errorf("403 body = %s", rec.Body)
+			}
+		}
+	}
+	for token, want := range map[string]int{"release.jwt.token": 201, "apply.jwt.token": 403, "prvalidate.jwt.token": 403} {
+		if rec := do(t, h, index.method, index.path, index.body, "Authorization", "Bearer "+token); rec.Code != want {
+			t.Errorf("index with %s = %d, want %d: %s", token, rec.Code, want, rec.Body)
+		}
 	}
 }
