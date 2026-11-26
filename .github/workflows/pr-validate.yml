@@ -478,9 +478,10 @@ jobs:
           overwrite: true
 
   # Folds the estimate into the stack's summary.json and comment.md with
-  # tools/stack_pipeline fold-cost and uploads them as summary-cost-<id> (a new
-  # name: the original pr-validate-<id> is never deleted or replaced). The comment
-  # and report jobs prefer summary-cost-<id> and fall back to the original. It runs
+  # tools/stack_pipeline fold-cost and uploads them as summary-cost-<id>-<attempt>
+  # (a new name: the original pr-validate-<id> is never deleted or replaced, and a
+  # re-run attempt never picks up the file of an earlier one). The comment and report
+  # jobs prefer the current attempt's summary-cost artifact and fall back to the original. It runs
   # the PR's tools/ code, so it gets no secret and no write token. Never fails the
   # workflow; without an estimate the summary is left as it is.
   cost-summary:
@@ -542,17 +543,17 @@ jobs:
             --cost "$RUNNER_TEMP/cost/infracost.json" | tee -a "$GITHUB_STEP_SUMMARY"
           echo "folded=true" >> "$GITHUB_OUTPUT"
 
-      # overwrite only replaces this artifact on a re-run; the original summary stays.
+      # The run attempt is part of the name: the name is unique per attempt, so no
+      # overwrite is needed and an artifact of an earlier attempt is never reused.
       - name: Upload the summary with the cost
         if: steps.fold.outputs.folded == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: summary-cost-${{ matrix.stack.id }}
+          name: summary-cost-${{ matrix.stack.id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/summary/comment.md
             ${{ runner.temp }}/summary/summary.json
           retention-days: 7
-          overwrite: true
 
   comment:
     name: sticky PR comments
@@ -576,7 +577,7 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: summary-cost-*
+          pattern: summary-cost-*-${{ github.run_attempt }}
           path: summaries-cost
 
       # Create or update one comment per stack, found by its hidden marker. The
@@ -587,6 +588,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           shopt -s nullglob
           for dir in summaries/pr-validate-*/; do
@@ -597,8 +599,8 @@ jobs:
               continue
             fi
             # Prefer the summary with the cost; the original is the fallback.
-            if [ -f "summaries-cost/summary-cost-${id}/comment.md" ]; then
-              dir="summaries-cost/summary-cost-${id}/"
+            if [ -f "summaries-cost/summary-cost-${id}-${RUN_ATTEMPT}/comment.md" ]; then
+              dir="summaries-cost/summary-cost-${id}-${RUN_ATTEMPT}/"
             fi
             marker="<!-- iacp-plan:${id} -->"
             body="$RUNNER_TEMP/comment-${id}.md"
@@ -716,7 +718,7 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: summary-cost-${{ matrix.stack.id }}
+          name: summary-cost-${{ matrix.stack.id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/summary-cost
 
       - name: Prefer the summary with the cost
