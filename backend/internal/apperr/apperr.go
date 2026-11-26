@@ -25,6 +25,8 @@ const (
 	KindForbidden
 	// KindMethodNotAllowed means the route exists but not for this HTTP method.
 	KindMethodNotAllowed
+	// KindUnavailable means a dependency needed to answer is down; the caller may retry.
+	KindUnavailable
 )
 
 // Forbidden builds a KindForbidden error.

@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
 )
 
 // replayClock is a settable Clock.
@@ -163,7 +165,8 @@ func TestReplayGuard(t *testing.T) {
 	if _, err := NewReplayGuard(staticVerifier{err: inner}, failingStore{}, 0).Verify(ctx, "x"); !errors.Is(err, inner) {
 		t.Fatalf("verification errors pass through before the store is touched: %v", err)
 	}
-	if _, err := NewReplayGuard(staticVerifier{claims: claims}, failingStore{}, 0).Verify(ctx, "x"); !errors.Is(err, ErrInvalidToken) {
-		t.Fatalf("store failure must fail closed: %v", err)
+	_, err = NewReplayGuard(staticVerifier{claims: claims}, failingStore{}, 0).Verify(ctx, "x")
+	if !apperr.IsKind(err, apperr.KindUnavailable) || errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("store failure must refuse the token as unavailable (503), not as invalid: %v", err)
 	}
 }

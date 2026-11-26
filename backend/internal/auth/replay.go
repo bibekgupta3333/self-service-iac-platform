@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
 )
 
@@ -44,8 +45,14 @@ func NewReplayGuard(inner ClaimsVerifier, store ReplayStore, leeway time.Duratio
 	return &ReplayGuard{inner: inner, store: store, leeway: leeway}
 }
 
-// Verify implements the TokenVerifier port. Replays and store failures wrap
-// ErrInvalidToken, so the caller gets the generic 401 (fail closed).
+// ErrReplayStoreUnavailable is returned when the replay store cannot be reached. The
+// token is refused (fail closed) with a 503, so callers retry and operators can tell an
+// outage from a replay.
+var ErrReplayStoreUnavailable = &apperr.Error{Kind: apperr.KindUnavailable, Code: "replay_store_unavailable",
+	Message: "the token replay check is unavailable; retry with a fresh token"}
+
+// Verify implements the TokenVerifier port. A replay wraps ErrInvalidToken (generic
+// 401); a store failure wraps ErrReplayStoreUnavailable (503). Both refuse the token.
 func (g *ReplayGuard) Verify(ctx context.Context, raw string) (Claims, error) {
 	c, err := g.inner.Verify(ctx, raw)
 	if err != nil {
@@ -55,8 +62,11 @@ func (g *ReplayGuard) Verify(ctx context.Context, raw string) (Claims, error) {
 	if err != nil {
 		return Claims{}, err
 	}
-	if err := g.store.Claim(ctx, jti, exp); err != nil {
+	switch err := g.store.Claim(ctx, jti, exp); {
+	case errors.Is(err, ErrTokenReplayed):
 		return Claims{}, fmt.Errorf("%w: %w", ErrInvalidToken, err)
+	case err != nil:
+		return Claims{}, fmt.Errorf("%w: %w", ErrReplayStoreUnavailable, err)
 	}
 	return c, nil
 }
