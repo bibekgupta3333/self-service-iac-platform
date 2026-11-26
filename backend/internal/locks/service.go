@@ -11,6 +11,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/audit"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/outbox"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
 )
 
@@ -54,7 +55,14 @@ type Store interface {
 	// Requeue points every other waiter of the stack at behind (the new holder).
 	Requeue(ctx context.Context, stackID, behind uuid.UUID) error
 	AppendAudit(ctx context.Context, e audit.Event) error
+	// Enqueue adds an outbox job in the same transaction (used by promotion hooks).
+	Enqueue(ctx context.Context, m outbox.Message) (bool, error)
 }
+
+// PromotionHook runs inside the grant transaction whenever a queued request becomes the
+// lock holder: on release, or when an expired lease is handed to the head of the queue.
+// It is the single place follow-up work for a promoted request is scheduled.
+type PromotionHook func(ctx context.Context, st Store, req RequestInfo, l Lock, by identity.Principal, correlationID string) error
 
 // Repository is the persistence port of the lock service.
 type Repository interface {
@@ -99,9 +107,16 @@ type ReleaseResult struct {
 
 // Service implements the lock use cases.
 type Service struct {
-	repo  Repository
-	clock platform.Clock
-	lease time.Duration
+	repo      Repository
+	clock     platform.Clock
+	lease     time.Duration
+	onPromote PromotionHook
+}
+
+// OnPromote registers the hook run for every promoted request.
+func (s *Service) OnPromote(h PromotionHook) *Service {
+	s.onPromote = h
+	return s
 }
 
 // NewService returns a Service. lease <= 0 means DefaultLease.
@@ -212,6 +227,11 @@ func (s *Service) grant(ctx context.Context, st Store, a auditor, req RequestInf
 	if err := a.append(ctx, "lock.acquired", payload); err != nil {
 		return Lock{}, err
 	}
+	if promoted && s.onPromote != nil {
+		if err := s.onPromote(ctx, st, req, l, a.by, a.correlationID); err != nil {
+			return Lock{}, fmt.Errorf("promotion hook for %s: %w", req.ShortID, err)
+		}
+	}
 	return l, nil
 }
 
@@ -237,41 +257,51 @@ func (s *Service) Heartbeat(ctx context.Context, cmd TokenCommand) (Lock, error)
 func (s *Service) Release(ctx context.Context, cmd TokenCommand) (ReleaseResult, error) {
 	var res ReleaseResult
 	err := s.repo.InTx(ctx, func(st Store) error {
-		current, teamID, err := s.holderCheck(ctx, st, cmd)
-		if err != nil {
-			return err
-		}
-		if err := st.Delete(ctx, cmd.StackID); err != nil {
-			return fmt.Errorf("delete lock: %w", err)
-		}
-		now := s.clock.Now()
-		a := auditor{st: st, by: cmd.By, correlationID: cmd.CorrelationID, stackID: cmd.StackID, teamID: teamID, at: now}
-		if err := a.append(ctx, "lock.released", map[string]any{"request_id": current.RequestID,
-			"fencing_token": current.FencingToken}); err != nil {
-			return err
-		}
-		res.Released = *current
-
-		waiters, err := st.Waiters(ctx, cmd.StackID)
-		if err != nil {
-			return fmt.Errorf("read queue: %w", err)
-		}
-		next, ok := NextInQueue(waiters, cmd.RequestID)
-		if !ok {
-			return nil
-		}
-		req, err := st.Request(ctx, next.RequestID)
-		if err != nil {
-			return err
-		}
-		l, err := s.grant(ctx, st, a, req, nil, true)
-		if err != nil {
-			return err
-		}
-		res.Promoted = &l
-		return nil
+		var err error
+		res, err = s.ReleaseIn(ctx, st, cmd)
+		return err
 	})
 	return res, err
+}
+
+// ReleaseIn is Release inside a caller's transaction (a request reaching a terminal status
+// releases its lock in the same transaction as the transition). The caller must not have
+// locked rows of requests on the stack before this call: it takes the stacks row first.
+func (s *Service) ReleaseIn(ctx context.Context, st Store, cmd TokenCommand) (ReleaseResult, error) {
+	var res ReleaseResult
+	current, teamID, err := s.holderCheck(ctx, st, cmd)
+	if err != nil {
+		return res, err
+	}
+	if err := st.Delete(ctx, cmd.StackID); err != nil {
+		return res, fmt.Errorf("delete lock: %w", err)
+	}
+	now := s.clock.Now()
+	a := auditor{st: st, by: cmd.By, correlationID: cmd.CorrelationID, stackID: cmd.StackID, teamID: teamID, at: now}
+	if err := a.append(ctx, "lock.released", map[string]any{"request_id": current.RequestID,
+		"fencing_token": current.FencingToken}); err != nil {
+		return res, err
+	}
+	res.Released = *current
+
+	waiters, err := st.Waiters(ctx, cmd.StackID)
+	if err != nil {
+		return res, fmt.Errorf("read queue: %w", err)
+	}
+	next, ok := NextInQueue(waiters, cmd.RequestID)
+	if !ok {
+		return res, nil
+	}
+	req, err := st.Request(ctx, next.RequestID)
+	if err != nil {
+		return res, err
+	}
+	l, err := s.grant(ctx, st, a, req, nil, true)
+	if err != nil {
+		return res, err
+	}
+	res.Promoted = &l
+	return res, nil
 }
 
 func (s *Service) holderCheck(ctx context.Context, st Store, cmd TokenCommand) (*Lock, uuid.UUID, error) {

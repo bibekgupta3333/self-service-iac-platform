@@ -73,8 +73,8 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 | [~] 4.5 | Request service + state machine + `Idempotency-Key` (create kind done) | 2 | 4.2 |
 | [x] 4.6 | Platform per-stack lock, fencing token, queueing (`queued_behind`) (admin force-release on `/v1/stacks/{id}/lock` lands with RBAC, 4.4) | 1 | 4.5 |
 | [x] 4.7 | Config generator: templates (main/backend/versions/providers/`iacp.stack.json`), golden tests | 2 | 4.3 |
-| [ ] 4.8 | GitHub App client: branch, commit, PR, labels, workflow_dispatch | 1.5 | 2.5 |
-| [ ] 4.9 | Webhook ingester (HMAC, delivery dedupe) → SQS → worker status updates | 1.5 | 4.5 |
+| [~] 4.8 | GitHub App client: branch, commit, PR, labels, workflow_dispatch (Publisher port, `githubapp` and `localgit` adapters, publish on create via the outbox done; live use waits for the App registration in 2.5) | 1.5 | 2.5 |
+| [~] 4.9 | Webhook ingester (HMAC, delivery dedupe) → SQS → worker status updates (Postgres outbox + in-process worker instead of SQS per ADR-0009; `pull_request` and `workflow_run` mapped; review, `check_run`, `push` and installation events pending) | 1.5 | 4.5 |
 | [x] 4.10 | OIDC JWT verifier for `POST /v1/runs` and `/v1/internal/*` (verifier, allow-lists, run provenance, `POST /v1/runs`, `jti` replay protection in `oidc_jti` shared by replicas) | 1 | 4.1 |
 | [x] 4.11 | Audit writer with hash chain + `/audit/verify` | 0.5 | 4.2 |
 

@@ -15,6 +15,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/inputschema"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/locks"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/outbox"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
 )
 
@@ -92,12 +93,23 @@ type Store interface {
 	AppendAudit(ctx context.Context, e audit.Event) error
 	// Locks returns the stack-lock store bound to the same transaction.
 	Locks() locks.Store
+	GetRequestByShortID(ctx context.Context, shortID string) (*Request, error)
+	// LockRequest loads the request FOR UPDATE.
+	LockRequest(ctx context.Context, id uuid.UUID) (*Request, error)
+	// UpdateRequest writes r's mutable fields if the stored status is still from;
+	// otherwise it returns a concurrent_update conflict.
+	UpdateRequest(ctx context.Context, r *Request, from Status) error
+	// Enqueue adds an outbox job in the same transaction.
+	Enqueue(ctx context.Context, m outbox.Message) (bool, error)
 }
 
 // StackLocker takes the per-stack platform lock inside the request-creation transaction
 // (implemented by locks.Service).
 type StackLocker interface {
 	AcquireIn(ctx context.Context, st locks.Store, cmd locks.AcquireCommand) (locks.Result, error)
+	// ReleaseIn frees the lock held by a request reaching a terminal status and promotes
+	// the next waiter, in the caller's transaction.
+	ReleaseIn(ctx context.Context, st locks.Store, cmd locks.TokenCommand) (locks.ReleaseResult, error)
 }
 
 // ListFilter narrows List.
@@ -145,6 +157,8 @@ type Service struct {
 	locker   StackLocker
 	clock    platform.Clock
 	ids      platform.IDGenerator
+	// publishing enqueues request.publish jobs for requests holding the stack lock.
+	publishing bool
 }
 
 // Memberships resolves a user's role in a team (users.is_platform_admin counts as admin).
@@ -158,6 +172,14 @@ type Memberships interface {
 func NewService(repo Repository, versions VersionLookup, members Memberships, locker StackLocker,
 	clock platform.Clock, ids platform.IDGenerator) *Service {
 	return &Service{repo: repo, versions: versions, members: members, locker: locker, clock: clock, ids: ids}
+}
+
+// EnablePublishing makes Create (and lock promotion) enqueue a request.publish outbox job
+// for every request that holds the stack lock. Without it requests stay in draft, which
+// is the behaviour with IACP_PUBLISHER=none.
+func (s *Service) EnablePublishing() *Service {
+	s.publishing = true
+	return s
 }
 
 // Create validates and records a change request. With the same Idempotency-Key and
@@ -196,6 +218,11 @@ func (s *Service) Create(ctx context.Context, by identity.Principal, cmd CreateC
 		}
 		if err := st.CompleteIdempotencyKey(ctx, by.UserID, cmd.IdempotencyKey, req.ID); err != nil {
 			return fmt.Errorf("complete idempotency key: %w", err)
+		}
+		if !req.IsQueued() {
+			if err := s.enqueuePublish(ctx, st, req.ID, req.ShortID, by, cmd.CorrelationID); err != nil {
+				return err
+			}
 		}
 		res = CreateResult{Request: req}
 		return nil

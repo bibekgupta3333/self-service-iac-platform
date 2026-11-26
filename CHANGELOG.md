@@ -7,6 +7,17 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 ## [Unreleased]
 
 ### Added
+- PR publishing and GitHub webhooks (WBS 4.8, 4.9):
+  - `publish.Publisher` port with pure branch naming (`iacp/<short id>`), path checks and a deterministic PR title, body (plan placeholder, request link), labels and commit message.
+  - `githubapp` adapter: App JWT → cached, repository-scoped installation token; atomic commits with the git data API; idempotent PR, labels, `workflow_dispatch`; timeouts, same-host redirects only, retries on 5xx/429 honouring `Retry-After`.
+  - `localgit` adapter (ADR-0009): commits to a local clone with git plumbing via `os/exec` argument arrays and records fake PRs, so the flow runs without a registered App.
+  - `IACP_PUBLISHER=none|local|github` (default `none`), App settings, `IACP_GITHUB_WEBHOOK_SECRET`, `IACP_PORTAL_URL`, `IACP_LOCALSTACK_ENDPOINT`, `IACP_WORKER_POLL_INTERVAL`; half configuration fails at startup.
+  - Migration 0008: `webhook_deliveries` and `outbox` with least-privilege `iacp_app` grants.
+  - `internal/outbox`: Postgres job queue and in-process worker (SKIP LOCKED, lease, backoff, dead jobs).
+  - Request creation enqueues `request.publish`; `internal/prflow` renders, commits, opens and labels the PR, then records `pr_opened` in a second transaction (fencing-token checked). Failures are audited per attempt and the last one fails the request.
+  - State machine: `pr_merged` (approved → applying) and `publish_failed` (draft → failed). Terminal transitions release the stack lock in the same transaction and publish the promoted request.
+  - `POST /v1/webhooks/github`: HMAC-SHA256 verification (fails closed), 2 MiB cap, `X-GitHub-Delivery` dedupe, pure event mapping, idempotent worker-side transitions with audit; request responses carry `github {branch, pr_number, pr_url}`.
+  - Review fixes: publishing and recording check the current lock row, not the request's stored token; every promotion (release, `DELETE …/lock`, expired-lease handoff) schedules the promoted request's publish job through one lock-service hook; outbox outcome writes are guarded by the claim's attempt number and handlers run with a deadline inside the lease; commits replace the stack directory as a whole; a final failure withdraws the unrecorded branch and PR; webhook commands carry the PR head SHA (`requests.github_head_sha`): only pushes are head-checked, and a stale push resyncs the head from GitHub (`PullRequestHead`) instead of being dropped, so closes and merges after a lost push still release the lock; events racing the PR record are retried for about 13.5 minutes; root replacement keeps `.terraform.lock.hcl` and lists only the stack subtree on GitHub; withdrawal re-reads the request and skips a recorded PR; the repository filter ignores case; the GitHub token is narrowed to contents/pull_requests/actions write, dispatch is never retried and only an existing ref is force-moved; `localgit` requires a work tree root.
 - ADR-0009: local-first development with LocalStack and the Terraform local backend until MVP exit.
 - Monorepo layout: `modules/`, `policies/`, `environments/`, `tests/`, `backend/`, `portal/`, `tools/`, `.github/`.
 - `docker-compose.yml` with LocalStack 4.4 and PostgreSQL 17, both with health checks, plus `.env.example`.

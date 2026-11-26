@@ -17,6 +17,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/catalog"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/locks"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/outbox"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
 )
 
@@ -29,6 +30,7 @@ type memState struct {
 	stacks   []NewStack
 	requests []*Request
 	events   []audit.Event
+	jobs     []outbox.Message
 }
 
 type memKey struct {
@@ -82,7 +84,8 @@ func (s memState) clone() memState {
 	for k, v := range s.keys {
 		keys[k] = v
 	}
-	return memState{keys: keys, stacks: slices.Clone(s.stacks), requests: slices.Clone(s.requests), events: slices.Clone(s.events)}
+	return memState{keys: keys, stacks: slices.Clone(s.stacks), requests: slices.Clone(s.requests), events: slices.Clone(s.events),
+		jobs: slices.Clone(s.jobs)}
 }
 
 func (m *memRepo) InTx(_ context.Context, fn func(Store) error) error {
@@ -196,6 +199,29 @@ func (m *memStore) AppendAudit(_ context.Context, e audit.Event) error {
 
 func (m *memStore) Locks() locks.Store { return nil }
 
+func (m *memStore) GetRequestByShortID(_ context.Context, shortID string) (*Request, error) {
+	for _, r := range m.s.requests {
+		if r.ShortID == shortID {
+			return r, nil
+		}
+	}
+	return nil, apperr.NotFound("request %s not found", shortID)
+}
+
+func (m *memStore) LockRequest(ctx context.Context, id uuid.UUID) (*Request, error) {
+	return m.GetRequest(ctx, id)
+}
+
+func (m *memStore) UpdateRequest(_ context.Context, r *Request, _ Status) error { return nil }
+
+func (m *memStore) Enqueue(_ context.Context, msg outbox.Message) (bool, error) {
+	if slices.ContainsFunc(m.s.jobs, func(j outbox.Message) bool { return msg.DedupeKey != "" && j.DedupeKey == msg.DedupeKey }) {
+		return false, nil
+	}
+	m.s.jobs = append(m.s.jobs, msg)
+	return true, nil
+}
+
 // fakeLocker grants every lock with an increasing token, or queues when queueBehind is set.
 type fakeLocker struct {
 	calls       []locks.AcquireCommand
@@ -214,6 +240,10 @@ func (f *fakeLocker) AcquireIn(_ context.Context, _ locks.Store, cmd locks.Acqui
 	}
 	return locks.Result{Outcome: locks.OutcomeGranted,
 		Lock: locks.Lock{StackID: cmd.StackID, RequestID: cmd.RequestID, FencingToken: int64(40 + len(f.calls))}}, nil
+}
+
+func (f *fakeLocker) ReleaseIn(context.Context, locks.Store, locks.TokenCommand) (locks.ReleaseResult, error) {
+	return locks.ReleaseResult{}, nil
 }
 
 // fakeVersions serves the sqs and lambda fixtures.
@@ -511,5 +541,55 @@ func TestListPagination(t *testing.T) {
 	}
 	if _, _, err := svc.List(ctx, ListFilter{Status: "nope"}); !hasCode(err, "bad_request") {
 		t.Fatalf("want bad_request, got %v", err)
+	}
+}
+
+func TestCreateEnqueuesPublishWhenEnabled(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name     string
+		enable   bool
+		queued   bool
+		wantJobs int
+	}{
+		{name: "publishing off keeps requests in draft", enable: false, wantJobs: 0},
+		{name: "lock holder is published", enable: true, wantJobs: 1},
+		{name: "queued request waits for the lock", enable: true, queued: true, wantJobs: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := newMemRepo()
+			locker := &fakeLocker{}
+			if tt.queued {
+				locker.queueBehind = ptr(uuid.New())
+			}
+			svc := NewService(repo, fakeVersions{}, fakeMembers{dev.UserID: RoleDeveloper}, locker, platform.FixedClock{T: t0}, &seqIDs{})
+			if tt.enable {
+				svc.EnablePublishing()
+			}
+			res, err := svc.Create(ctx, dev, createCmd(validInput(), "publish-key-01"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(repo.state.jobs) != tt.wantJobs {
+				t.Fatalf("jobs = %+v", repo.state.jobs)
+			}
+			audited := slices.ContainsFunc(repo.state.events, func(e audit.Event) bool { return e.Action == "request.publish_enqueued" })
+			if audited != (tt.wantJobs == 1) {
+				t.Fatalf("publish_enqueued audited = %v", audited)
+			}
+			if tt.wantJobs == 1 {
+				j := repo.state.jobs[0]
+				var p PublishPayload
+				if err := json.Unmarshal(j.Payload, &p); err != nil || p.RequestID != res.Request.ID ||
+					j.Topic != outbox.TopicRequestPublish || j.DedupeKey != PublishDedupeKey(res.Request.ID) || !j.AvailableAt.Equal(t0) {
+					t.Fatalf("job = %+v (%v)", j, err)
+				}
+				// A replay of the same create does not enqueue again.
+				if _, err := svc.Create(ctx, dev, createCmd(validInput(), "publish-key-01")); err != nil || len(repo.state.jobs) != 1 {
+					t.Fatalf("replay enqueued again: %d jobs, %v", len(repo.state.jobs), err)
+				}
+			}
+		})
 	}
 }

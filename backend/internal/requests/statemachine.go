@@ -44,6 +44,8 @@ const (
 	EventApplyFailed       Event = "apply_failed"       // non-transient error / plan mismatch
 	EventApplyRetry        Event = "apply_retry"        // transient error, auto-retry (max MaxApplyRetries)
 	EventReviewDismissed   Event = "review_dismissed"   // pull_request_review dismissed
+	EventPRMerged          Event = "pr_merged"          // pull_request closed with merged=true (the push to main)
+	EventPublishFailed     Event = "publish_failed"     // the publisher gave up opening the PR
 )
 
 // MaxApplyRetries caps automatic retries of a transient apply failure (docs/03 §4.1).
@@ -57,10 +59,13 @@ type edge struct {
 // transitions is the complete request state machine (docs/03 §4.1). Anything not listed
 // is invalid. Edges beyond the summary diagram, documented in the §4.1 table:
 // cancel from pr_open/plan_ready (the cancel API), and new_commit / pr_closed while
-// validating (a push or close can arrive before the validation verdict).
+// validating (a push or close can arrive before the validation verdict), pr_merged from
+// approved (the merge is the push to main that starts apply.yml), and publish_failed from
+// draft (the publisher could not open the PR after its retries).
 var transitions = map[edge]Status{
-	{StatusDraft, EventPROpened}: StatusPROpen,
-	{StatusDraft, EventCancel}:   StatusCancelled,
+	{StatusDraft, EventPROpened}:      StatusPROpen,
+	{StatusDraft, EventCancel}:        StatusCancelled,
+	{StatusDraft, EventPublishFailed}: StatusFailed,
 
 	{StatusPROpen, EventValidationStarted}: StatusValidating,
 	{StatusPROpen, EventPRClosed}:          StatusRejected,
@@ -80,6 +85,7 @@ var transitions = map[edge]Status{
 	{StatusApproved, EventPRClosed}:        StatusRejected,
 	{StatusApproved, EventApplyStarted}:    StatusApplying,
 	{StatusApproved, EventReviewDismissed}: StatusPlanReady,
+	{StatusApproved, EventPRMerged}:        StatusApplying,
 
 	{StatusApplying, EventApplySucceeded}: StatusApplied,
 	{StatusApplying, EventApplyFailed}:    StatusFailed,
