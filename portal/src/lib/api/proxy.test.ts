@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { pickHeaders, proxyTarget } from "./proxy";
+import { isSafeSegment, pickHeaders, proxyTarget } from "./proxy";
 
 describe("proxyTarget", () => {
   const base = "http://127.0.0.1:8080/";
@@ -19,13 +19,44 @@ describe("proxyTarget", () => {
     [["v2", "catalog"]],
     [["healthz"]],
     [["v1", "internal", "catalog", "index"]],
+    [["v1", "Internal", "catalog", "index"]],
+    [["v1", "INTERNAL"]],
     [["v1", "runs"]],
+    [["v1", "RUNS"]],
+    [["v1", "Runs"]],
+    [["v1", "%69nternal", "catalog", "index"]],
+    [["v1", "%2569nternal"]],
+    [["v1", "Catalog", "modules"]],
+    [["v1", "audit", "verify"]],
+    [["v1", "auth", "login"]],
+    [["v1", "webhooks"]],
     [["v1", "requests", ".."]],
+    [["v1", "requests", "."]],
+    [["v1", "catalog", "..", "internal"]],
     [["v1", "requests", "a/b"]],
+    [["v1", "requests", "%2e%2e"]],
+    [["v1", "requests", "%2F"]],
     [["v1", "requests", "a?b"]],
+    [["v1", "requests", "a#b"]],
+    [["v1", "requests", ""]],
+    [["v1", "requests", "a\\b"]],
+    [["v1", "requests", "caf\u00e9"]],
   ])("refuses %o", (segments) => {
     expect(proxyTarget(base, segments, "")).toBeNull();
   });
+});
+
+describe("isSafeSegment", () => {
+  it.each([
+    ["sqs", true],
+    ["1.0.0", true],
+    ["0d7e3a52-6c11-4f0e-b9b6-5f2f3c8d1a90", true],
+    [".", false],
+    ["..", false],
+    ["", false],
+    ["a%2Fb", false],
+    ["a:b", false],
+  ])("%s -> %s", (s, want) => expect(isSafeSegment(s)).toBe(want));
 });
 
 describe("pickHeaders", () => {
