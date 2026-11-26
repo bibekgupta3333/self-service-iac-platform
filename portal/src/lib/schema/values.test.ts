@@ -40,6 +40,14 @@ describe("parseValue", () => {
     ["11", { ok: false, error: "must be at most 10" }],
   ])("integer %s", (raw, want) => expect(parseValue(int, raw)).toEqual(want));
 
+  it("treats exclusive bounds as exclusive", () => {
+    const f = toField("f", { type: "number", exclusiveMinimum: 0, exclusiveMaximum: 1 }, false);
+    expect(f).toMatchObject({ exclusiveMinimum: 0, exclusiveMaximum: 1, minimum: undefined, maximum: undefined });
+    expect(parseValue(f, "0")).toEqual({ ok: false, error: "must be greater than 0" });
+    expect(parseValue(f, "1")).toEqual({ ok: false, error: "must be less than 1" });
+    expect(parseValue(f, "0.5")).toEqual({ ok: true, value: 0.5, empty: false });
+  });
+
   it("checks string patterns and lengths", () => {
     const s = toField("s", { type: "string", pattern: "^[a-z]+$", maxLength: 3 }, false);
     expect(parseValue(s, " abc ")).toEqual({ ok: true, value: "abc", empty: false });

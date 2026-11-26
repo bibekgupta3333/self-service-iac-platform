@@ -30,6 +30,9 @@ export interface FieldModel {
   itemPattern?: string;
   minimum?: number;
   maximum?: number;
+  /** JSON Schema 2020-12 exclusive bounds (numbers, not the draft-04 booleans). */
+  exclusiveMinimum?: number;
+  exclusiveMaximum?: number;
   minLength?: number;
   maxLength?: number;
   group: string;
@@ -138,8 +141,10 @@ export function toField(name: string, prop: Record<string, unknown>, required: b
     enumValues,
     pattern: str(prop.pattern),
     itemPattern: isRecord(prop.items) ? str(prop.items.pattern) : undefined,
-    minimum: num(prop.minimum) ?? num(prop.exclusiveMinimum),
-    maximum: num(prop.maximum) ?? num(prop.exclusiveMaximum),
+    minimum: num(prop.minimum),
+    maximum: num(prop.maximum),
+    exclusiveMinimum: num(prop.exclusiveMinimum),
+    exclusiveMaximum: num(prop.exclusiveMaximum),
     minLength: num(prop.minLength),
     maxLength: num(prop.maxLength),
     group: str(prop["x-iacp-group"]) ?? DEFAULT_GROUP,
@@ -197,6 +202,8 @@ export function constraintsOf(field: FieldModel): string[] {
   if (field.minimum !== undefined && field.maximum !== undefined) out.push(`${field.minimum}–${field.maximum}`);
   else if (field.minimum !== undefined) out.push(`≥ ${field.minimum}`);
   else if (field.maximum !== undefined) out.push(`≤ ${field.maximum}`);
+  if (field.exclusiveMinimum !== undefined) out.push(`> ${field.exclusiveMinimum}`);
+  if (field.exclusiveMaximum !== undefined) out.push(`< ${field.exclusiveMaximum}`);
   if (field.minLength !== undefined) out.push(`min length ${field.minLength}`);
   if (field.maxLength !== undefined) out.push(`max length ${field.maxLength}`);
   if (field.pattern) out.push(`pattern ${field.pattern}`);

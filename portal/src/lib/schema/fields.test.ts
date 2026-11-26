@@ -144,6 +144,14 @@ describe("display helpers", () => {
     expect(constraintsOf(fields.name!)).toEqual(["pattern ^[a-z][a-z0-9-]{2,40}$", "immutable after create"]);
     expect(constraintsOf(fields.alarm_actions!)).toEqual(["items match ^arn:"]);
     expect(constraintsOf(toField("x", { type: "integer", minimum: 5 }, false))).toEqual(["≥ 5"]);
+    expect(constraintsOf(toField("x", { type: "number", exclusiveMinimum: 0, exclusiveMaximum: 1 }, false))).toEqual([
+      "> 0",
+      "< 1",
+    ]);
+    expect(constraintsOf(toField("x", { type: "integer", minimum: 1, exclusiveMaximum: 10 }, false))).toEqual([
+      "≥ 1",
+      "< 10",
+    ]);
     expect(constraintsOf(toField("x", { enum: ["a", "b"] }, false))).toEqual(["one of a, b"]);
   });
 });

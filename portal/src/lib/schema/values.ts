@@ -57,6 +57,10 @@ function matches(pattern: string | undefined, s: string): boolean {
 function checkRange(field: FieldModel, n: number): string | undefined {
   if (field.minimum !== undefined && n < field.minimum) return `must be at least ${field.minimum}`;
   if (field.maximum !== undefined && n > field.maximum) return `must be at most ${field.maximum}`;
+  if (field.exclusiveMinimum !== undefined && n <= field.exclusiveMinimum)
+    return `must be greater than ${field.exclusiveMinimum}`;
+  if (field.exclusiveMaximum !== undefined && n >= field.exclusiveMaximum)
+    return `must be less than ${field.exclusiveMaximum}`;
   return undefined;
 }
 
