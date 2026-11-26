@@ -14,6 +14,28 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
 )
 
+type lostStore struct{ memStore }
+
+func (l *lostStore) Complete(context.Context, int64, int, time.Time) error { return ErrClaimLost }
+
+func TestHandlerDeadlineAndLostClaim(t *testing.T) {
+	store := &lostStore{}
+	store.add("t")
+	var deadline time.Time
+	w := NewWorker(store, map[string]Handler{"t": HandlerFunc(func(ctx context.Context, _ Job) error {
+		deadline, _ = ctx.Deadline()
+		return nil
+	})}, platform.SystemClock{}, Options{Lease: time.Minute, Logger: quiet()})
+	start := time.Now()
+	worked, err := w.RunOnce(context.Background())
+	if err != nil || !worked {
+		t.Fatalf("a lost claim is not a queue error: worked=%v err=%v", worked, err)
+	}
+	if d := deadline.Sub(start); deadline.IsZero() || d > 46*time.Second || d < 44*time.Second {
+		t.Fatalf("handler deadline %v after start, want 3/4 of the lease", d)
+	}
+}
+
 type memJob struct {
 	Job
 	availableAt time.Time
@@ -51,18 +73,18 @@ func (m *memStore) find(id int64) *memJob {
 	return m.jobs[id-1]
 }
 
-func (m *memStore) Complete(_ context.Context, id int64, _ time.Time) error {
+func (m *memStore) Complete(_ context.Context, id int64, _ int, _ time.Time) error {
 	m.find(id).done = true
 	return nil
 }
 
-func (m *memStore) Retry(_ context.Context, id int64, at time.Time, e string) error {
+func (m *memStore) Retry(_ context.Context, id int64, _ int, at time.Time, e string) error {
 	j := m.find(id)
 	j.availableAt, j.lastErr = at, e
 	return nil
 }
 
-func (m *memStore) Dead(_ context.Context, id int64, _ time.Time, e string) error {
+func (m *memStore) Dead(_ context.Context, id int64, _ int, _ time.Time, e string) error {
 	j := m.find(id)
 	j.dead, j.lastErr = true, e
 	return nil

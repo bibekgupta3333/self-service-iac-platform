@@ -68,14 +68,20 @@ func (f HandlerFunc) Handle(ctx context.Context, j Job) error { return f(ctx, j)
 // ErrPermanent marks a failure that retrying cannot fix (wrap it with fmt.Errorf("…: %w")).
 var ErrPermanent = errors.New("permanent failure")
 
-// Store is the queue persistence port.
+// ErrClaimLost means the job was reclaimed by another worker (this claim's lease ran out),
+// so this worker's outcome is discarded.
+var ErrClaimLost = errors.New("job claim lost")
+
+// Store is the queue persistence port. Outcome writes are guarded by the attempt number
+// returned by Claim (the claim token): they return ErrClaimLost when the job has been
+// claimed again since.
 type Store interface {
 	// Claim leases the oldest available job until now+lease and increments its attempts;
 	// nil when none is available.
 	Claim(ctx context.Context, now time.Time, lease time.Duration) (*Job, error)
-	Complete(ctx context.Context, id int64, at time.Time) error
-	Retry(ctx context.Context, id int64, availableAt time.Time, lastErr string) error
-	Dead(ctx context.Context, id int64, at time.Time, lastErr string) error
+	Complete(ctx context.Context, id int64, attempt int, at time.Time) error
+	Retry(ctx context.Context, id int64, attempt int, availableAt time.Time, lastErr string) error
+	Dead(ctx context.Context, id int64, attempt int, at time.Time, lastErr string) error
 }
 
 // Backoff is the delay before retry number attempt (1-based): 2 s doubling, capped at
@@ -104,8 +110,11 @@ func truncate(s string, n int) string {
 type Options struct {
 	PollInterval time.Duration // idle wait between polls; default 1 s
 	Lease        time.Duration // how long a claim is held; default 2 minutes
-	MaxAttempts  int           // default 6
-	Logger       *slog.Logger
+	// HandlerTimeout bounds one handler run; it must be shorter than Lease so a job is
+	// never handled after its lease could have been reclaimed. Default 3/4 of Lease.
+	HandlerTimeout time.Duration
+	MaxAttempts    int // default 6
+	Logger         *slog.Logger
 }
 
 // Worker drains the outbox.
@@ -127,6 +136,9 @@ func NewWorker(store Store, handlers map[string]Handler, clock platform.Clock, o
 	}
 	if opts.MaxAttempts <= 0 {
 		opts.MaxAttempts = 6
+	}
+	if opts.HandlerTimeout <= 0 || opts.HandlerTimeout >= opts.Lease {
+		opts.HandlerTimeout = opts.Lease * 3 / 4
 	}
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
@@ -193,19 +205,25 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	if !ok {
 		herr = fmt.Errorf("no handler for topic %q: %w", j.Topic, ErrPermanent)
 	} else {
-		herr = w.safeHandle(ctx, h, *j)
+		hctx, cancel := context.WithTimeout(ctx, w.opts.HandlerTimeout)
+		herr = w.safeHandle(hctx, h, *j)
+		cancel()
 	}
 	now := w.clock.Now()
 	switch {
 	case herr == nil:
-		err = w.store.Complete(ctx, j.ID, now)
+		err = w.store.Complete(ctx, j.ID, j.Attempts, now)
 	case errors.Is(herr, ErrPermanent) || j.Last():
 		log.Error("job failed permanently", "error", herr)
-		err = w.store.Dead(ctx, j.ID, now, truncate(herr.Error(), 2000))
+		err = w.store.Dead(ctx, j.ID, j.Attempts, now, truncate(herr.Error(), 2000))
 	default:
 		delay := Backoff(j.Attempts)
 		log.Warn("job failed, will retry", "error", herr, "retry_in", delay.String())
-		err = w.store.Retry(ctx, j.ID, now.Add(delay), truncate(herr.Error(), 2000))
+		err = w.store.Retry(ctx, j.ID, j.Attempts, now.Add(delay), truncate(herr.Error(), 2000))
+	}
+	if errors.Is(err, ErrClaimLost) {
+		log.Warn("job was reclaimed by another worker; outcome discarded")
+		return true, nil
 	}
 	if err != nil {
 		return true, fmt.Errorf("record outcome of job %d: %w", j.ID, err)

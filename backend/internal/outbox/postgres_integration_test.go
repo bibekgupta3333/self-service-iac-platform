@@ -3,6 +3,7 @@ package outbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -83,7 +84,11 @@ func TestPostgresQueue(t *testing.T) {
 	if err != nil || j == nil || j.Attempts != 2 {
 		t.Fatalf("expired lease: %+v, %v", j, err)
 	}
-	if err := store.Retry(ctx, j.ID, now.Add(10*time.Minute), "transient"); err != nil {
+	// The first claim of this job (attempt 1) lost its lease: its outcome is refused.
+	if err := store.Complete(ctx, j.ID, 1, now); !errors.Is(err, ErrClaimLost) {
+		t.Fatalf("stale claim completed the job: %v", err)
+	}
+	if err := store.Retry(ctx, j.ID, j.Attempts, now.Add(10*time.Minute), "transient"); err != nil {
 		t.Fatal(err)
 	}
 	var other int64
@@ -92,10 +97,10 @@ func TestPostgresQueue(t *testing.T) {
 			other = id
 		}
 	}
-	if err := store.Complete(ctx, other, now); err != nil {
+	if err := store.Complete(ctx, other, 1, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Dead(ctx, j.ID, now, "gave up"); err != nil {
+	if err := store.Dead(ctx, j.ID, j.Attempts, now, "gave up"); err != nil {
 		t.Fatal(err)
 	}
 	// A processed or dead job frees its dedupe key.

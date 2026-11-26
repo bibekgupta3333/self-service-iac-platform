@@ -66,21 +66,32 @@ func (s *PostgresStore) Claim(ctx context.Context, now time.Time, lease time.Dur
 	return &j, nil
 }
 
+// claimGuard limits an outcome write to the claim that ran the job: same attempt, still
+// pending.
+const claimGuard = ` WHERE id = $1 AND attempts = $2 AND processed_at IS NULL AND dead_at IS NULL`
+
+func (s *PostgresStore) finish(ctx context.Context, sql string, args ...any) error {
+	tag, err := s.pool.Exec(ctx, sql+claimGuard, args...)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrClaimLost
+	}
+	return nil
+}
+
 // Complete implements Store.
-func (s *PostgresStore) Complete(ctx context.Context, id int64, at time.Time) error {
-	_, err := s.pool.Exec(ctx, `UPDATE outbox SET processed_at = $2, locked_until = NULL, last_error = NULL WHERE id = $1`, id, at)
-	return err
+func (s *PostgresStore) Complete(ctx context.Context, id int64, attempt int, at time.Time) error {
+	return s.finish(ctx, `UPDATE outbox SET processed_at = $3, locked_until = NULL, last_error = NULL`, id, attempt, at)
 }
 
 // Retry implements Store.
-func (s *PostgresStore) Retry(ctx context.Context, id int64, availableAt time.Time, lastErr string) error {
-	_, err := s.pool.Exec(ctx, `UPDATE outbox SET available_at = $2, locked_until = NULL, last_error = $3 WHERE id = $1`,
-		id, availableAt, lastErr)
-	return err
+func (s *PostgresStore) Retry(ctx context.Context, id int64, attempt int, availableAt time.Time, lastErr string) error {
+	return s.finish(ctx, `UPDATE outbox SET available_at = $3, locked_until = NULL, last_error = $4`, id, attempt, availableAt, lastErr)
 }
 
 // Dead implements Store.
-func (s *PostgresStore) Dead(ctx context.Context, id int64, at time.Time, lastErr string) error {
-	_, err := s.pool.Exec(ctx, `UPDATE outbox SET dead_at = $2, locked_until = NULL, last_error = $3 WHERE id = $1`, id, at, lastErr)
-	return err
+func (s *PostgresStore) Dead(ctx context.Context, id int64, attempt int, at time.Time, lastErr string) error {
+	return s.finish(ctx, `UPDATE outbox SET dead_at = $3, locked_until = NULL, last_error = $4`, id, attempt, at, lastErr)
 }
