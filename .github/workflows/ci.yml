@@ -684,3 +684,36 @@ jobs:
 
       - name: build
         run: npm run build
+
+  # One aggregate status for branch protection. A job that needs `detect` is skipped
+  # when `detect` fails, and a skipped required check counts as passing, so on its
+  # own that would let a failed `detect` merge. Here `detect` must have succeeded,
+  # and every other gating job must have succeeded or been skipped by its gate.
+  # code-scanning is an upload and never gates.
+  ci-result:
+    name: ci-result
+    needs:
+      - detect
+      - actionlint
+      - terraform
+      - policy
+      - module-tests
+      - module-tests-offline
+      - module-tests-floor
+      - go
+      - terratest
+      - python
+      - portal
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require detect to succeed and every other job to succeed or skip
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key)=\(.value.result)"'
+          echo "$NEEDS" | jq -e '.detect.result == "success"' >/dev/null \
+            || { echo "::error::detect did not succeed, so the jobs that need it did not run"; exit 1; }
+          echo "$NEEDS" | jq -e 'all(.[]; .result == "success" or .result == "skipped")' >/dev/null \
+            || { echo "::error::a gating job failed or was cancelled"; exit 1; }
