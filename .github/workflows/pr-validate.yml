@@ -300,14 +300,18 @@ jobs:
               --out "$RUNNER_TEMP/sarif-upload/$tool.sarif" --external-dir "$RUNNER_TEMP/checkov-modules"
           done
 
+      # Non-gating extra: a failed upload never fails the required check. overwrite
+      # lets a re-run of this leg replace the artifact instead of failing with 409.
       - name: Keep SARIF for the code scanning upload
         if: always() && github.event.pull_request.head.repo.full_name == github.repository
+        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sarif-${{ matrix.stack.id }}
           path: ${{ runner.temp }}/sarif-upload/*.sarif
           if-no-files-found: ignore
           retention-days: 7
+          overwrite: true
 
       - id: plan
         name: terraform plan
@@ -396,7 +400,9 @@ jobs:
 
       # Only the rendered summary leaves the job (and, for the cost job, the redacted
       # plan above): tfplan and plan.json can hold sensitive values and are never
-      # uploaded or committed.
+      # uploaded or committed. Kept fatal: the comment and report jobs read it, and a
+      # missing summary is reported as failed. overwrite makes a re-run of this leg
+      # replace the artifact instead of failing with 409.
       - name: Upload plan summary
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -407,6 +413,7 @@ jobs:
             ${{ runner.temp }}/summary/summary.json
           if-no-files-found: ignore
           retention-days: 7
+          overwrite: true
 
   # Prices each stack's plan with Infracost (WBS 5.5, informational). The only job
   # that receives INFRACOST_API_KEY. It checks out nothing and runs only the pinned,

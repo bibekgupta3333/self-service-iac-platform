@@ -172,17 +172,21 @@ jobs:
             --quiet --compact \
             --output cli --output sarif --output-file-path "console,$RUNNER_TEMP/sarif/checkov.sarif"
 
-      # Fork PRs cannot upload (read-only token), so their SARIF is not kept.
+      # Fork PRs cannot upload (read-only token), so their SARIF is not kept. A
+      # non-gating extra: a failed upload never fails this job, and overwrite lets a
+      # re-run replace the artifact instead of failing with 409.
       - name: Keep SARIF for the code scanning upload
         if: >-
           always()
           && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
+        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ci-sarif
           path: ${{ runner.temp }}/sarif/*.sarif
           if-no-files-found: ignore
           retention-days: 7
+          overwrite: true
 
   # Uploads the terraform job's SARIF to code scanning (WBS 6.1). The only job with
   # security-events: write; it runs no repository code, only checkout and the
