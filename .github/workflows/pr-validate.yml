@@ -76,18 +76,20 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # The cost jobs (WBS 5.5) run only when the Infracost key is configured and the
-      # PR comes from this repository. Only whether the secret is set is read here.
+      # The cost jobs (WBS 5.5) run only when the repository variable INFRACOST_ENABLED
+      # is "true" and the PR comes from this repository. The secret is deliberately
+      # not read here: this job runs PR-checkout Python, and only the cost job gets
+      # INFRACOST_API_KEY.
       - id: cost
         name: Check the Infracost configuration
         env:
-          HAS_KEY: ${{ secrets.INFRACOST_API_KEY != '' }}
+          ENABLED: ${{ vars.INFRACOST_ENABLED }}
           SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
         run: |
-          if [ "$HAS_KEY" = "true" ] && [ "$SAME_REPO" = "true" ]; then
+          if [ "$ENABLED" = "true" ] && [ "$SAME_REPO" = "true" ]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           else
-            echo "::notice title=Infracost skipped::INFRACOST_API_KEY is not configured for this run (unset, or a fork or Dependabot PR); no cost estimate"
+            echo "::notice title=Infracost skipped::vars.INFRACOST_ENABLED is not 'true' for this run (unset, or a fork or Dependabot PR); no cost estimate"
             echo "enabled=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -421,7 +423,7 @@ jobs:
   # Prices each stack's plan with Infracost (WBS 5.5, informational). The only job
   # that receives INFRACOST_API_KEY. It checks out nothing and runs only the pinned,
   # checksum-verified Infracost binary on the redacted plan from validate, so no
-  # PR-controlled code runs in it. Skipped unless the secret is set and the PR comes
+  # PR-controlled code runs in it. Skipped unless vars.INFRACOST_ENABLED is true and the PR comes
   # from this repository; never fails the workflow. Infracost sends resource
   # attributes (types, regions, sizes) to its pricing API, not the plan file.
   cost:
@@ -476,9 +478,12 @@ jobs:
           overwrite: true
 
   # Folds the estimate into the stack's summary.json and comment.md with
-  # tools/stack_pipeline fold-cost and re-uploads them for the comment and report
-  # jobs. It runs the PR's tools/ code, so it gets no secret and no write token.
-  # Never fails the workflow; without an estimate the summary is left as it is.
+  # tools/stack_pipeline fold-cost and uploads them as summary-cost-<id>-<attempt>
+  # (a new name: the original pr-validate-<id> is never deleted or replaced, and a
+  # re-run attempt never picks up the file of an earlier one). The comment and report
+  # jobs prefer the current attempt's summary-cost artifact and fall back to the original. It runs
+  # the PR's tools/ code, so it gets no secret and no write token. Never fails the
+  # workflow; without an estimate the summary is left as it is.
   cost-summary:
     name: cost summary (${{ matrix.stack.path }})
     needs: [detect, validate, cost]
@@ -538,16 +543,17 @@ jobs:
             --cost "$RUNNER_TEMP/cost/infracost.json" | tee -a "$GITHUB_STEP_SUMMARY"
           echo "folded=true" >> "$GITHUB_OUTPUT"
 
-      - name: Replace the summary
+      # The run attempt is part of the name: the name is unique per attempt, so no
+      # overwrite is needed and an artifact of an earlier attempt is never reused.
+      - name: Upload the summary with the cost
         if: steps.fold.outputs.folded == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: pr-validate-${{ matrix.stack.id }}
+          name: summary-cost-${{ matrix.stack.id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/summary/comment.md
             ${{ runner.temp }}/summary/summary.json
           retention-days: 7
-          overwrite: true
 
   comment:
     name: sticky PR comments
@@ -566,6 +572,14 @@ jobs:
           pattern: pr-validate-*
           path: summaries
 
+      # The summary with the cost folded in (cost-summary), when there is one.
+      - name: Download the summaries with a cost
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: summary-cost-*-${{ github.run_attempt }}
+          path: summaries-cost
+
       # Create or update one comment per stack, found by its hidden marker. The
       # marker is built here from the artifact name; any marker-looking line in the
       # artifact body is dropped, so a body can never claim another stack's comment.
@@ -574,6 +588,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           shopt -s nullglob
           for dir in summaries/pr-validate-*/; do
@@ -582,6 +597,10 @@ jobs:
             if [[ ! "$id" =~ ^[a-z0-9_-]+$ ]] || [ ! -f "${dir}comment.md" ]; then
               echo "::warning::skipping malformed summary $dir"
               continue
+            fi
+            # Prefer the summary with the cost; the original is the fallback.
+            if [ -f "summaries-cost/summary-cost-${id}-${RUN_ATTEMPT}/comment.md" ]; then
+              dir="summaries-cost/summary-cost-${id}-${RUN_ATTEMPT}/"
             fi
             marker="<!-- iacp-plan:${id} -->"
             body="$RUNNER_TEMP/comment-${id}.md"
@@ -692,6 +711,23 @@ jobs:
         with:
           name: pr-validate-${{ matrix.stack.id }}
           path: ${{ runner.temp }}/summary
+
+      # Prefer the summary with the cost folded in (cost-summary); keep the original
+      # when that artifact is missing.
+      - name: Download the summary with a cost
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: summary-cost-${{ matrix.stack.id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/summary-cost
+
+      - name: Prefer the summary with the cost
+        run: |
+          if [ -f "$RUNNER_TEMP/summary-cost/summary.json" ] && [ -f "$RUNNER_TEMP/summary-cost/comment.md" ]; then
+            mkdir -p "$RUNNER_TEMP/summary"
+            cp "$RUNNER_TEMP/summary-cost/summary.json" "$RUNNER_TEMP/summary-cost/comment.md" "$RUNNER_TEMP/summary/"
+            echo "using the summary with the cost"
+          fi
 
       # head_sha is github.sha (the merge commit the OIDC token names), never the PR
       # head; request_short_id and fencing_token come from iacp.stack.json.

@@ -117,7 +117,7 @@ run "secure_defaults" {
   }
 
   assert {
-    condition     = output.iacp_metadata == { module = "lambda", version = "1.0.0" }
+    condition     = output.iacp_metadata == { module = "lambda", version = "2.0.0" }
     error_message = "iacp_metadata must report the module name and version."
   }
 }
@@ -288,6 +288,198 @@ run "rejects_not_action_extra_policy" {
   }
 
   expect_failures = [var.extra_policy_jsons]
+}
+
+run "rejects_pass_role_extra_policy" {
+  command = plan
+
+  variables {
+    artifact_s3_uri    = "s3://bucket-name/key.zip"
+    extra_policy_jsons = { pass = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = "iam:PassRole", Resource = "arn:aws:iam::000000000000:role/iacp/admin" }] }) }
+  }
+
+  expect_failures = [var.extra_policy_jsons]
+}
+
+run "rejects_lowercase_pass_role_extra_policy" {
+  command = plan
+
+  variables {
+    artifact_s3_uri    = "s3://bucket-name/key.zip"
+    extra_policy_jsons = { pass = jsonencode({ Version = "2012-10-17", Statement = { Effect = "Allow", Action = ["s3:GetObject", "iam:passrole"], Resource = ["arn:aws:s3:::b/*"] } }) }
+  }
+
+  expect_failures = [var.extra_policy_jsons]
+}
+
+run "rejects_iam_action_on_all_resources_extra_policy" {
+  command = plan
+
+  variables {
+    artifact_s3_uri    = "s3://bucket-name/key.zip"
+    extra_policy_jsons = { iam-read = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["iam:GetRole"], Resource = "*" }] }) }
+  }
+
+  expect_failures = [var.extra_policy_jsons]
+}
+
+run "accepts_scoped_iam_read_and_deny_pass_role" {
+  command = plan
+
+  variables {
+    artifact_s3_uri = "s3://bucket-name/key.zip"
+    extra_policy_jsons = {
+      iam-read = jsonencode({ Version = "2012-10-17", Statement = [
+        { Effect = "Allow", Action = ["iam:GetRole"], Resource = "arn:aws:iam::000000000000:role/iacp/orders-*" },
+        { Effect = "Deny", Action = "iam:PassRole", Resource = "*" },
+      ] })
+    }
+  }
+
+  assert {
+    condition     = keys(aws_iam_role_policy.extra) == ["iam-read"]
+    error_message = "Scoped IAM reads and Deny statements must be accepted."
+  }
+}
+
+run "rejects_pass_role_question_mark_wildcard" {
+  command = plan
+
+  variables {
+    artifact_s3_uri    = "s3://bucket-name/key.zip"
+    extra_policy_jsons = { bad = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["iam:Pass?ole"], Resource = "arn:aws:iam::123456789012:role/iacp/admin" }] }) }
+  }
+
+  expect_failures = [var.extra_policy_jsons]
+}
+
+run "rejects_pass_role_leading_question_mark" {
+  command = plan
+
+  variables {
+    artifact_s3_uri    = "s3://bucket-name/key.zip"
+    extra_policy_jsons = { bad = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["iam:?assRole"], Resource = "arn:aws:iam::123456789012:role/iacp/admin" }] }) }
+  }
+
+  expect_failures = [var.extra_policy_jsons]
+}
+
+run "rejects_pass_role_question_mark_service" {
+  command = plan
+
+  variables {
+    artifact_s3_uri    = "s3://bucket-name/key.zip"
+    extra_policy_jsons = { bad = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["i?m:PassRole"], Resource = "arn:aws:iam::123456789012:role/iacp/admin" }] }) }
+  }
+
+  expect_failures = [var.extra_policy_jsons]
+}
+
+run "rejects_pass_role_prefix_wildcard" {
+  command = plan
+
+  variables {
+    artifact_s3_uri    = "s3://bucket-name/key.zip"
+    extra_policy_jsons = { bad = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["iam:Pass*"], Resource = "arn:aws:iam::123456789012:role/iacp/admin" }] }) }
+  }
+
+  expect_failures = [var.extra_policy_jsons]
+}
+
+run "rejects_pass_role_regex_spelling" {
+  command = plan
+
+  variables {
+    artifact_s3_uri    = "s3://bucket-name/key.zip"
+    extra_policy_jsons = { bad = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["iam:(Pass)Role"], Resource = "arn:aws:iam::123456789012:role/iacp/admin" }] }) }
+  }
+
+  expect_failures = [var.extra_policy_jsons]
+}
+
+run "rejects_iam_read_on_account_wildcard_arn" {
+  command = plan
+
+  variables {
+    artifact_s3_uri    = "s3://bucket-name/key.zip"
+    extra_policy_jsons = { bad = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["iam:GetRole"], Resource = "arn:aws:iam::*:*" }] }) }
+  }
+
+  expect_failures = [var.extra_policy_jsons]
+}
+
+run "rejects_iam_read_on_wildcard_account" {
+  command = plan
+
+  variables {
+    artifact_s3_uri    = "s3://bucket-name/key.zip"
+    extra_policy_jsons = { bad = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["iam:GetRole"], Resource = "arn:aws:iam::*:role/x" }] }) }
+  }
+
+  expect_failures = [var.extra_policy_jsons]
+}
+
+run "rejects_iam_read_on_account_all_resources" {
+  command = plan
+
+  variables {
+    artifact_s3_uri    = "s3://bucket-name/key.zip"
+    extra_policy_jsons = { bad = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["iam:GetRole"], Resource = "arn:aws:iam::123456789012:*" }] }) }
+  }
+
+  expect_failures = [var.extra_policy_jsons]
+}
+
+run "rejects_iam_read_on_all_resources_service_question_mark" {
+  command = plan
+
+  variables {
+    artifact_s3_uri    = "s3://bucket-name/key.zip"
+    extra_policy_jsons = { bad = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["i?m:GetRole"], Resource = "*" }] }) }
+  }
+
+  expect_failures = [var.extra_policy_jsons]
+}
+
+run "rejects_iam_read_on_all_resources_prefix" {
+  command = plan
+
+  variables {
+    artifact_s3_uri    = "s3://bucket-name/key.zip"
+    extra_policy_jsons = { bad = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["iam:Get*"], Resource = "*" }] }) }
+  }
+
+  expect_failures = [var.extra_policy_jsons]
+}
+
+run "rejects_iam_read_without_resources" {
+  command = plan
+
+  variables {
+    artifact_s3_uri    = "s3://bucket-name/key.zip"
+    extra_policy_jsons = { bad = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["iam:GetRole"] }] }) }
+  }
+
+  expect_failures = [var.extra_policy_jsons]
+}
+
+run "accepts_scoped_iam_read_with_question_mark_resource" {
+  command = plan
+
+  variables {
+    artifact_s3_uri = "s3://bucket-name/key.zip"
+    extra_policy_jsons = {
+      iam-read = jsonencode({ Version = "2012-10-17", Statement = [
+        { Effect = "Allow", Action = ["iam:GetRole", "iam:List*"], Resource = ["arn:aws:iam::123456789012:role/iacp/orders-*", "arn:aws:iam::123456789012:role/iacp/team-?"] },
+        { Effect = "Deny", Action = "iam:Pass?ole", Resource = "*" },
+      ] })
+    }
+  }
+
+  assert {
+    condition     = keys(aws_iam_role_policy.extra) == ["iam-read"]
+    error_message = "Scoped IAM reads and Deny statements must be accepted."
+  }
 }
 
 run "accepts_read_prefix_wildcard" {

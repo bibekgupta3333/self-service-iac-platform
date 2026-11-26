@@ -14,6 +14,12 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
   - `.github/workflows/ttl-reaper.yml` (hourly and dispatch with `dry_run`; OIDC only, `id-token: write` on its one job, skipped with a notice while `IACP_API_URL` is empty) running the new `tools/ttl_reaper` (pure planning, per-run teardown cap, one failing stack does not stop the pass).
   - 24 h warning recorded as audit `ttl.warned` and, with the GitHub App publisher (new optional `publish.Commenter`), a comment on the stack's pull request through an outbox job; audit-only with the local publisher.
   - Not done: auto-approval of the destroy PR (`ttl_auto_approve.rego`), EventBridge Scheduler, email/Slack/portal notifications, TTL in `iacp.stack.json` and resource tags.
+- Portal lifecycle: live request status, stacks, update and destroy (WBS 7.4, 7.5, 7.6):
+  - the request page follows `GET /v1/requests/{id}/events` through the existing proxy path with `StatusStream`, a fetch-based reader (so a 401, 404 or 429 `too_many_streams` is seen as such, which `EventSource` hides): `Last-Event-ID` resume (the first connection sends `0` to replay the whole history), exponential backoff with equal jitter, a stop on `end`, cleanup on unmount, and a polling fallback when the stream is not an event stream or keeps failing. Pure SSE parser and events-to-timeline reducer, unit tested; the history list, pull request link and a polite live region come from them. The 5-second `AutoRefresh` is removed.
+  - `/stacks` (filters team, environment and status in a plain GET form; keyset paging with the API cursor) and `/stacks/{id}` (status, health wording, outputs exactly as returned, latest request with link, details), a Stacks nav entry and a home card.
+  - update: `/stacks/{id}/update` reuses the schema-driven `RequestForm`, prefilled from the spec of the request that carries the stack's current spec (the API has no spec on the stack itself); without one the form says it starts from module defaults. An update that drops resources (`resources_removed`) needs an explicit checkbox acknowledgement, which sends `allow_removals`.
+  - destroy: a modal `<dialog>` that warns that merging the destroy PR removes the infrastructure, requires the exact stack name and a justification, and sends a payload-bound `Idempotency-Key`. `stack_busy`, `destroy_pending`, `stack_destroyed`, 404 and 403 get plain explanations.
+  - actions are shown disabled, with the reason, from the caller's roles in `GET /v1/me` (a pure mirror of the RBAC matrix) and the stack's state; dev auth assumes the user may act and lets the API answer.
 - GitHub OAuth login, sessions and RBAC (WBS 4.4, core of 8.6):
   - `IACP_AUTH_MODE=github`: authorization-code flow with `state` and S256 PKCE (`/v1/auth/login`, `/v1/auth/callback`), a `GitHubIdentity` port with an `httptest`-tested adapter (fixed hosts, no cross-host redirects, timeouts, size caps), org-membership gate, fail-closed config
   - server-side sessions (`iacp_session`, hashed in the new `sessions` table, absolute and sliding idle expiry, logout and disablement revoke, fresh id on every login), per-session `X-CSRF-Token` on unsafe methods, `GET /v1/me` (also in dev mode), `POST /v1/auth/logout`
@@ -227,10 +233,21 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 - `security-events: write` is granted only to the `code-scanning` upload jobs, which run no PR code; fork and Dependabot PRs skip the upload. Stack SARIF paths always stay inside the repository, and a run's own `automationDetails` is dropped so a PR cannot pick its category. `INFRACOST_API_KEY` is passed only to the `cost` job, which runs no PR code.
 
 ### Fixed
+- Portal request form: focus moved to the error summary in a microtask that could run before the first error's summary existed, so the first failed submit left focus on the button. It now moves in an effect.
 - The catalog index accepted the category `data`, which `module.yaml` cannot carry, and rejected `database` and `cache`, which it can. It now accepts exactly the categories in `modules/_shared/module.schema.json`, so the `dynamodb` manifest indexes.
 
 ### Changed
 - `AGENTS.md`: local-first rules, the 70/30 object-oriented and functional coding style, and the small-commit, reviewed-PR workflow.
+- Review follow-ups for the tools and CI:
+  - SARIF paths with `%`, a backslash or a drive letter go to the stack's `main.tf`; the smoke endpoint check rejects backslashes and userinfo.
+  - `cost-input` builds the Infracost plan from an allow-list of the fields Infracost reads (unknown keys, `resource_drift`, variable defaults and literal expressions are dropped) instead of a deny-list.
+  - `ci.yml` strips `automationDetails` and `versionControlProvenance` from the TFLint and Checkov SARIF with `jq` into a separate directory that is the only one uploaded (fails closed, no PR code or pip install in that step).
+  - `cost-summary` uploads `summary-cost-<id>-<run attempt>` instead of overwriting `pr-validate-<id>`; `comment` and `report` prefer it and fall back to the original.
+  - The Infracost switch is the repository variable `INFRACOST_ENABLED=true`; `detect` no longer reads the secret.
+  - New `module-tests-floor` job and `make module-test-floor`: the offline module suites run on each module's minimum provider versions (`tools.provider_floor`).
+  - `tools.required_checks` (`make required-checks-check`) fails when a required status check is not a job name; `main-branch.json` now requires the module test, provider floor, Terratest and semver gate jobs and the new `ci-result` aggregate (a failed `detect` cannot pass by skipping the jobs that need it); the tool also fails on an empty list and on a required name shared by two jobs.
+  - `modules/lambda` 2.0.0 and `modules/ecs-service` 2.0.0 (breaking): `extra_policy_jsons` rejects `iam:PassRole` in any wildcard spelling (`iam:Pass?ole`, `i?m:PassRole`) and `iam:` actions on `Resource "*"` or a wildcard account such as `arn:aws:iam::*:*`; ecs-service 1.0.0 accepted the `?` spellings. See the module CHANGELOGs for upgrade notes.
+  - The provider floor job also asserts that `terraform init` selected exactly each floor (`tools.provider_floor verify`), and `make module-test-floor` finds the same suites as CI.
 
 ### Removed
 - The compiled `backend/api` binary (8.7 MB) is no longer tracked; Go build outputs under `backend/` and `tests/` are ignored.
