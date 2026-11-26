@@ -443,6 +443,9 @@ func createdPayload(req *Request, stack StackRef, in CreateInput) map[string]any
 	if in.Kind == KindDestroy {
 		p["confirm_stack_name"] = in.ConfirmStackName
 	}
+	if in.RollbackOf != "" {
+		p["rollback_of"] = in.RollbackOf
+	}
 	return p
 }
 
