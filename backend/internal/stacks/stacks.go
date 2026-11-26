@@ -26,6 +26,16 @@ type RequestRef struct {
 	CreatedAt time.Time
 }
 
+// LockInfo is the platform lock currently held on a stack (docs/06 §3). The fencing token
+// is deliberately absent: it authorizes pipeline reports, so it is for the pipeline only.
+type LockInfo struct {
+	RequestID      uuid.UUID
+	RequestShortID string
+	Holder         string
+	AcquiredAt     time.Time
+	ExpiresAt      time.Time
+}
+
 // Stack is a stack as the API shows it.
 type Stack struct {
 	ID             uuid.UUID
@@ -35,6 +45,8 @@ type Stack struct {
 	Path           string
 	Region         string
 	Status         requests.StackStatus
+	Health         requests.StackHealth // what the post-apply smoke test said; unknown before one ran
+	Lock           *LockInfo            // nil when no request holds the stack
 	IsEphemeral    bool
 	ExpiresAt      *time.Time
 	Outputs        json.RawMessage // the non-sensitive outputs of the last apply
