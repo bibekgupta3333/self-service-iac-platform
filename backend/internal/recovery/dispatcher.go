@@ -142,10 +142,17 @@ func (d *Dispatcher) claim(ctx context.Context, p RetryPayload, correlationID st
 			if err := st.FinishDispatch(ctx, t.ID, p.RetryNumber, DispatchSkipped, reason, now); err != nil {
 				return err
 			}
-			return appendRequestAudit(ctx, st, now, t, "request.apply_retry_skipped", correlationID, map[string]any{
+			if err := appendRequestAudit(ctx, st, now, t, "request.apply_retry_skipped", correlationID, map[string]any{
 				"short_id": t.ShortID, "retry_number": p.RetryNumber, "reason": reason, "status": t.Status,
 				"retry_count": t.RetryCount,
-			})
+			}); err != nil {
+				return err
+			}
+			if reason != DecisionLockLost {
+				return nil // the request moved on by itself
+			}
+			// Still applying, but nothing will apply it: fail it like the failed run would have.
+			return st.FailApply(ctx, t.ID, p.RetryNumber, reason, correlationID)
 		}
 		if reason := SkipReason(t, p.RetryNumber, lock); reason != "" {
 			return skip(reason)
@@ -165,6 +172,9 @@ func (d *Dispatcher) claim(ctx context.Context, p RetryPayload, correlationID st
 			}
 			if res.Outcome == locks.OutcomeQueued {
 				return fmt.Errorf("stack lock of %s was not granted back: %w", t.ShortID, outbox.ErrPermanent)
+			}
+			if err := st.SetFencingToken(ctx, t.ID, res.Lock.FencingToken); err != nil {
+				return err
 			}
 		}
 		claimed = true
@@ -192,7 +202,14 @@ func (d *Dispatcher) finish(ctx context.Context, t Target, n int, dispatch publi
 		if detail != "" {
 			payload["error"] = detail
 		}
-		return appendRequestAudit(fctx, st, now, t, action, correlationID, payload)
+		if err := appendRequestAudit(fctx, st, now, t, action, correlationID, payload); err != nil {
+			return err
+		}
+		if derr == nil {
+			return nil
+		}
+		// The retry will not run: fail the request (stack failed, lock released).
+		return st.FailApply(fctx, t.ID, n, DispatchFailed, correlationID)
 	})
 }
 

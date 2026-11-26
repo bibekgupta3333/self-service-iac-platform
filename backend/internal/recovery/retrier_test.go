@@ -23,6 +23,8 @@ import (
 // memStore is an in-memory RetryStore. InTx works on a copy and keeps it only when fn
 // succeeds, so a failed transaction leaves no trace, like Postgres.
 type memStore struct {
+	failed   []string // FailApply reasons
+	token    int64    // SetFencingToken
 	target   Target
 	lock     *locks.Lock
 	waiting  bool
@@ -46,6 +48,7 @@ func (m *memStore) clone() *memStore {
 		c.retries[k] = v
 	}
 	c.jobs, c.events = append([]outbox.Message(nil), m.jobs...), append([]audit.Event(nil), m.events...)
+	c.failed = append([]string(nil), m.failed...)
 	return &c
 }
 
@@ -77,6 +80,15 @@ func (m *memStore) TargetByID(_ context.Context, id uuid.UUID) (Target, error) {
 func (m *memStore) CurrentLock(context.Context, uuid.UUID) (*locks.Lock, error) { return m.lock, nil }
 func (m *memStore) HasWaiters(context.Context, uuid.UUID) (bool, error)         { return m.waiting, nil }
 func (m *memStore) LockStore() locks.Store                                      { return nil }
+func (m *memStore) SetFencingToken(_ context.Context, _ uuid.UUID, token int64) error {
+	m.token = token
+	return nil
+}
+func (m *memStore) FailApply(_ context.Context, _ uuid.UUID, _ int, reason, _ string) error {
+	m.failed = append(m.failed, reason)
+	m.target.Status = requests.StatusFailed
+	return nil
+}
 
 // fakeLocker grants (or queues) the lock without a store.
 type fakeLocker struct {
@@ -89,7 +101,7 @@ func (f *fakeLocker) AcquireIn(_ context.Context, _ locks.Store, cmd locks.Acqui
 	if f.outcome == "" {
 		f.outcome = locks.OutcomeGranted
 	}
-	return locks.Result{Outcome: f.outcome}, nil
+	return locks.Result{Outcome: f.outcome, Lock: locks.Lock{RequestID: cmd.RequestID, FencingToken: 99}}, nil
 }
 
 func runKey(r RunRef) string { return fmt.Sprintf("%d/%d", r.RunID, r.Attempt) }
@@ -362,9 +374,13 @@ func TestDispatcherDispatchesOnce(t *testing.T) {
 	if repo.s.retries[1] != DispatchDispatched {
 		t.Fatalf("state %s", repo.s.retries[1])
 	}
-	// The lock was free (apply.yml released it), so it was taken back for the request.
-	if len(locker.calls) != 1 || locker.calls[0].RequestID != tgt.ID || locker.calls[0].StackID != tgt.StackID {
-		t.Fatalf("relock calls %+v", locker.calls)
+	// The lock was free (apply.yml released it), so it was taken back for the request,
+	// and the request records the new lease's token.
+	if len(locker.calls) != 1 || locker.calls[0].RequestID != tgt.ID || locker.calls[0].StackID != tgt.StackID || repo.s.token != 99 {
+		t.Fatalf("relock calls %+v, token %d", locker.calls, repo.s.token)
+	}
+	if len(repo.s.failed) != 0 {
+		t.Fatalf("a dispatched retry must not fail the request: %v", repo.s.failed)
 	}
 	if a := repo.s.actions(); a[len(a)-1] != "request.apply_retry_dispatched" {
 		t.Fatalf("audit %v", a)
@@ -388,6 +404,10 @@ func TestDispatcherNeverRetriesAFailedDispatch(t *testing.T) {
 	}
 	if a := repo.s.actions(); a[len(a)-1] != "request.apply_retry_dispatch_failed" {
 		t.Fatalf("audit %v", a)
+	}
+	// Nothing will apply the request now: it fails.
+	if len(repo.s.failed) != 1 || repo.s.failed[0] != DispatchFailed {
+		t.Fatalf("failed %v", repo.s.failed)
 	}
 	if err := d.Handle(context.Background(), job); err != nil || len(pub.dispatches) != 1 {
 		t.Fatalf("a failed dispatch is never sent again: %v, %d", err, len(pub.dispatches))
@@ -416,7 +436,17 @@ func TestDispatcherSkipsWhenTheRequestMovedOn(t *testing.T) {
 			if len(pub.dispatches) != 0 || repo.s.retries[1] != DispatchSkipped {
 				t.Fatalf("dispatches %d, state %s", len(pub.dispatches), repo.s.retries[1])
 			}
-			last := repo.s.events[len(repo.s.events)-1]
+			// A request that still waits for a retry that will not come is failed; one that
+			// moved on by itself is left alone.
+			if wantFail := tc.reason == DecisionLockLost; wantFail != (len(repo.s.failed) == 1) {
+				t.Fatalf("failed %v for %s", repo.s.failed, tc.reason)
+			}
+			var last audit.Event
+			for _, e := range repo.s.events {
+				if e.Action == "request.apply_retry_skipped" {
+					last = e
+				}
+			}
 			var p map[string]any
 			_ = json.Unmarshal(last.Payload, &p)
 			if last.Action != "request.apply_retry_skipped" || p["reason"] != tc.reason {

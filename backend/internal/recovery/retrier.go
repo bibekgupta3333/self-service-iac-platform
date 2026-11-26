@@ -86,6 +86,12 @@ type RetryStore interface {
 	HasWaiters(ctx context.Context, stackID uuid.UUID) (bool, error)
 	// LockStore is the stack-lock store bound to the same transaction.
 	LockStore() locks.Store
+	// SetFencingToken records the token of a lease granted back to the request.
+	SetFencingToken(ctx context.Context, requestID uuid.UUID, token int64) error
+	// FailApply fails an applying request whose retry cannot run (the lock moved on, the
+	// dispatch failed): apply_failed, stack failed, lock released, all audited, through the
+	// request lifecycle (requests.ApplyIn) in the same transaction.
+	FailApply(ctx context.Context, requestID uuid.UUID, retryNumber int, reason string, correlationID string) error
 	// InsertFailure records a classified failure; false when the run was already recorded.
 	InsertFailure(ctx context.Context, f FailureRecord) (bool, error)
 	// IncrementRetry moves retry_count from → from+1 on a request that is still applying
@@ -155,6 +161,20 @@ func (r *Retrier) DisableRetries() *Retrier {
 func (r *Retrier) OnApplyFailure(ctx context.Context, f FailedApply) (Outcome, error) {
 	var out Outcome
 	err := r.repo.InTx(ctx, func(st RetryStore) error {
+		var err error
+		out, err = r.decideIn(ctx, st, f)
+		return err
+	})
+	if err != nil {
+		return Outcome{}, err
+	}
+	return out, nil
+}
+
+// decideIn is OnApplyFailure inside the caller's transaction.
+func (r *Retrier) decideIn(ctx context.Context, st RetryStore, f FailedApply) (Outcome, error) {
+	var out Outcome
+	err := func() error {
 		t, err := st.TargetByShortID(ctx, f.RequestShortID)
 		if apperr.IsKind(err, apperr.KindNotFound) {
 			out.Ignored = "unknown_request"
@@ -207,7 +227,7 @@ func (r *Retrier) OnApplyFailure(ctx context.Context, f FailedApply) (Outcome, e
 			return nil
 		}
 		return r.schedule(ctx, st, now, t, plan, *rec.RetryAt, f)
-	})
+	}()
 	if err != nil {
 		return Outcome{}, err
 	}

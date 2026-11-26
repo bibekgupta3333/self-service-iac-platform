@@ -59,7 +59,7 @@ func TestPostgresRetryLifecycle(t *testing.T) {
 	pool, reqID, _, token := seedApplying(t)
 	ctx := context.Background()
 	w := audit.NewWriter(platform.SystemClock{}, platform.RandomIDs{})
-	repo := NewPostgresRepository(pool, w)
+	repo := lifecycleRepo(pool, w)
 	clock := platform.FixedClock{T: time.Now().UTC().Truncate(time.Microsecond)}
 	retrier := NewRetrier(repo, clock, platform.RandomIDs{})
 	failure := FailedApply{RequestShortID: "req-7k3p9x", StackPath: itStackPath, FencingToken: &token,
@@ -168,7 +168,7 @@ func TestPostgresRetryLifecycle(t *testing.T) {
 func TestPostgresDispatchFailureIsRecordedAndFinal(t *testing.T) {
 	pool, reqID, _, token := seedApplying(t)
 	ctx := context.Background()
-	repo := NewPostgresRepository(pool, audit.NewWriter(platform.SystemClock{}, platform.RandomIDs{}))
+	repo := lifecycleRepo(pool, audit.NewWriter(platform.SystemClock{}, platform.RandomIDs{}))
 	clock := platform.FixedClock{T: time.Now().UTC().Truncate(time.Microsecond)}
 	f := FailedApply{RequestShortID: "req-7k3p9x", StackPath: itStackPath, FencingToken: &token, Run: RunRef{RunID: 1, Attempt: 1},
 		Stage: "apply", Message: "dial tcp: i/o timeout"}

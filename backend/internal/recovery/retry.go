@@ -31,6 +31,12 @@ const (
 	DecisionRetriesDisabled    = "retries_disabled"
 )
 
+// FailureRetryNotRun is the failure_reason of a request whose scheduled retry could not
+// run (the stack lock went to another request, or the dispatch failed).
+const (
+	FailureRetryNotRun = "retry_not_run"
+)
+
 // retryStages are the stages a transient failure may be retried from: before or during
 // terraform apply. The lock claim is one of them (state-lock contention), the smoke test
 // and the reports are not (they run after the change and a retry would apply nothing new).

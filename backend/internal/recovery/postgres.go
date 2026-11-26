@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -20,9 +21,24 @@ import (
 
 // PostgresRepository implements RetryRepository and History with pgx.
 type PostgresRepository struct {
-	pool  *pgxpool.Pool
-	tx    *db.TxRunner
-	audit *audit.Writer
+	pool    *pgxpool.Pool
+	tx      *db.TxRunner
+	audit   *audit.Writer
+	applier func(tx pgx.Tx) requests.Applier
+}
+
+// WithLifecycle lets FailApply move requests through the request lifecycle
+// (requests.ApplyDriver.ForTx). Without it FailApply refuses.
+func (r *PostgresRepository) WithLifecycle(forTx func(tx pgx.Tx) requests.Applier) *PostgresRepository {
+	r.applier = forTx
+	return r
+}
+
+// StoreFor implements TxStores: a RetryStore bound to an existing transaction.
+func (r *PostgresRepository) StoreFor(tx pgx.Tx) RetryStore { return r.store(tx) }
+
+func (r *PostgresRepository) store(tx pgx.Tx) *pgStore {
+	return &pgStore{tx: tx, audit: r.audit, applier: r.applier}
 }
 
 var (
@@ -73,12 +89,44 @@ func (r *PostgresRepository) AppliedSpecs(ctx context.Context, stackID uuid.UUID
 
 // InTx implements RetryRepository.
 func (r *PostgresRepository) InTx(ctx context.Context, fn func(RetryStore) error) error {
-	return r.tx.InTx(ctx, func(tx pgx.Tx) error { return fn(&pgStore{tx: tx, audit: r.audit}) })
+	return r.tx.InTx(ctx, func(tx pgx.Tx) error { return fn(r.store(tx)) })
 }
 
 type pgStore struct {
-	tx    pgx.Tx
-	audit *audit.Writer
+	tx      pgx.Tx
+	audit   *audit.Writer
+	applier func(tx pgx.Tx) requests.Applier
+}
+
+func (s *pgStore) SetFencingToken(ctx context.Context, requestID uuid.UUID, token int64) error {
+	if _, err := s.tx.Exec(ctx, `UPDATE requests SET fencing_token = $2 WHERE id = $1`, requestID, token); err != nil {
+		return fmt.Errorf("record fencing token: %w", err)
+	}
+	return nil
+}
+
+// noRetry declines every retry: a request recovery gives up on must fail, not retry again.
+type noRetry struct{}
+
+func (noRetry) RetryIn(context.Context, *requests.Request, requests.ApplyProgress, string) (bool, error) {
+	return false, nil
+}
+
+func (s *pgStore) FailApply(ctx context.Context, requestID uuid.UUID, retryNumber int, reason, correlationID string) error {
+	if s.applier == nil {
+		return fmt.Errorf("fail request %s: no request lifecycle configured", requestID)
+	}
+	detail, err := json.Marshal(map[string]any{"stage": "retry", "retry_number": retryNumber, "reason": reason})
+	if err != nil {
+		return fmt.Errorf("encode failure detail: %w", err)
+	}
+	_, err = s.applier(s.tx).Apply(ctx, requests.ApplyInput{RequestID: requestID, By: recoveryPrincipal, CorrelationID: correlationID,
+		Retry: noRetry{}, Progress: requests.ApplyProgress{Phase: requests.PhaseFailed, Run: requests.RunRef{Stage: "retry"},
+			FailureReason: FailureRetryNotRun, FailureDetail: detail}})
+	if err != nil {
+		return fmt.Errorf("fail request %s: %w", requestID, err)
+	}
+	return nil
 }
 
 // target locks the stack row first, then the request row: the order every stack-lock
@@ -203,7 +251,7 @@ func (s *pgStore) AppendAudit(ctx context.Context, e audit.Event) error {
 
 // InSurgeryTx implements SurgeryRepository.
 func (r *PostgresRepository) InSurgeryTx(ctx context.Context, fn func(SurgeryStore) error) error {
-	return r.tx.InTx(ctx, func(tx pgx.Tx) error { return fn(&pgStore{tx: tx, audit: r.audit}) })
+	return r.tx.InTx(ctx, func(tx pgx.Tx) error { return fn(r.store(tx)) })
 }
 
 func (s *pgStore) StackByPath(ctx context.Context, path string) (SurgeryStack, error) {
