@@ -300,6 +300,22 @@ describe("StatusStream", () => {
     expect(h.time.armed()).toBe(0);
   });
 
+  it("kicks the watchdog on any bytes, also on a frame that is still incomplete", async () => {
+    let armed = 0;
+    const schedule = () => {
+      armed += 1;
+      return () => undefined;
+    };
+    const h = harness(async () => sseResponse(['id: 9\nevent: status\ndata: {"seq":9', ',"status":"'], { hold: true }), {
+      schedule,
+    });
+    const done = h.stream.start();
+    await vi.waitFor(() => expect(armed).toBe(3)); // armed at the start, then once per chunk
+    expect(h.events).toEqual([]);
+    h.stream.close();
+    await done;
+  });
+
   it("counts a watchdog cut with nothing received as a failure", async () => {
     const open = vi.fn(async () => sseResponse([], { hold: true }));
     const h = harness(open, { maxFailures: 2 });

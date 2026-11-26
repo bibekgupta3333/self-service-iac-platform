@@ -273,11 +273,12 @@ export class StatusStream {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
-        const parsed = parser.push(decoder.decode(value, { stream: true }));
-        if (parsed.frames.length > 0 || parsed.comments > 0 || parsed.dropped > 0) {
+        // Any bytes prove the connection is alive, also a large frame still trickling in.
+        if (value.byteLength > 0) {
           received = true;
           attempt.watchdog.kick();
         }
+        const parsed = parser.push(decoder.decode(value, { stream: true }));
         for (const frame of parsed.frames) {
           if (frame.id !== undefined) this.lastEventId = frame.id;
           const event = decodeFrame(frame);
