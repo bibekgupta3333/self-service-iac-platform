@@ -66,14 +66,19 @@ const (
 	ExitChanges = 2
 )
 
-// ClassifyExit maps a `terraform plan -refresh-only -detailed-exitcode` exit code to a
-// result: 0 is no drift, 2 is drift, 1 is a failed check (not drift, docs/06 §4). Any other
+// ClassifyExit maps a `terraform plan -refresh-only -detailed-exitcode` exit code and the
+// number of drifted resources its plan lists to a result: 0 is no drift, 2 is drift, 1 is a
+// failed check (not drift, docs/06 §4). A refresh-only plan also exits 2 when only output
+// values would change; with no drifted resource that is not drift, so it is clean. Any other
 // code is not a terraform outcome. Pure.
-func ClassifyExit(code int) (Result, bool) {
+func ClassifyExit(code, drifted int) (Result, bool) {
 	switch code {
 	case ExitClean:
 		return ResultClean, true
 	case ExitChanges:
+		if drifted == 0 {
+			return ResultClean, true
+		}
 		return ResultDrifted, true
 	case ExitError:
 		return ResultError, true
@@ -203,12 +208,13 @@ func Validate(r Report) []apperr.FieldError {
 	if !shaRe.MatchString(r.GitHub.HeadSHA) {
 		add("/github/head_sha", "pattern", "must be 40 lowercase hex characters")
 	}
-	want, known := ClassifyExit(r.TerraformExitCode)
+	want, known := ClassifyExit(r.TerraformExitCode, r.Summary.Drifted)
 	switch {
 	case !known:
 		add("/terraform_exit_code", "enum", "must be 0, 1 or 2 (terraform plan -detailed-exitcode)")
 	case r.Result != want:
-		add("/result", "mismatch", fmt.Sprintf("exit code %d means %q, not %q", r.TerraformExitCode, want, r.Result))
+		add("/result", "mismatch", fmt.Sprintf("exit code %d with %d drifted resources means %q, not %q",
+			r.TerraformExitCode, r.Summary.Drifted, want, r.Result))
 	}
 	if r.PlanHash != "" && !hashRe.MatchString(r.PlanHash) {
 		add("/plan_hash", "pattern", "must be 64 lowercase hex characters")

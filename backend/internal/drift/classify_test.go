@@ -8,13 +8,20 @@ import (
 )
 
 func TestClassifyExit(t *testing.T) {
-	for code, want := range map[int]Result{0: ResultClean, 1: ResultError, 2: ResultDrifted} {
-		if got, ok := ClassifyExit(code); !ok || got != want {
-			t.Errorf("ClassifyExit(%d) = %q, %v; want %q", code, got, ok, want)
+	for _, tt := range []struct {
+		code, drifted int
+		want          Result
+	}{
+		{0, 0, ResultClean}, {1, 0, ResultError}, {2, 3, ResultDrifted},
+		// A refresh-only plan exits 2 for output-only changes too: that is not drift.
+		{2, 0, ResultClean},
+	} {
+		if got, ok := ClassifyExit(tt.code, tt.drifted); !ok || got != tt.want {
+			t.Errorf("ClassifyExit(%d, %d) = %q, %v; want %q", tt.code, tt.drifted, got, ok, tt.want)
 		}
 	}
 	for _, code := range []int{-1, 3, 137, 255} {
-		if _, ok := ClassifyExit(code); ok {
+		if _, ok := ClassifyExit(code, 0); ok {
 			t.Errorf("ClassifyExit(%d) is a terraform outcome", code)
 		}
 	}
@@ -112,12 +119,13 @@ func TestValidate(t *testing.T) {
 		{name: "valid drifted", base: validReport()},
 		{name: "valid clean", base: clean},
 		{name: "valid error", base: failed},
+		{name: "exit 2 with only output changes is clean", base: clean, mutate: func(r *Report) { r.TerraformExitCode = ExitChanges }},
 		{name: "bad stack path", base: validReport(), mutate: func(r *Report) { r.StackPath = "../etc" }, pointer: "/stack_path"},
 		{name: "no run id", base: validReport(), mutate: func(r *Report) { r.GitHub.RunID = 0 }, pointer: "/github/run_id"},
 		{name: "short sha", base: validReport(), mutate: func(r *Report) { r.GitHub.HeadSHA = "abc" }, pointer: "/github/head_sha"},
 		{name: "exit code not terraform", base: validReport(), mutate: func(r *Report) { r.TerraformExitCode = 3 }, pointer: "/terraform_exit_code"},
 		{name: "result disagrees with exit code", base: validReport(), mutate: func(r *Report) { r.Result = ResultClean }, pointer: "/result"},
-		{name: "drifted without a count", base: validReport(), mutate: func(r *Report) { r.Summary = Summary{} }, pointer: "/summary/drifted"},
+		{name: "drifted without a count", base: validReport(), mutate: func(r *Report) { r.Summary = Summary{} }, pointer: "/result"},
 		{name: "updated plus deleted exceed drifted", base: validReport(), mutate: func(r *Report) { r.Summary.Updated = 5 }, pointer: "/summary"},
 		{name: "negative count", base: validReport(), mutate: func(r *Report) { r.Summary.Deleted = -1 }, pointer: "/summary"},
 		{name: "drifted without plan hash", base: validReport(), mutate: func(r *Report) { r.PlanHash = "" }, pointer: "/plan_hash"},
