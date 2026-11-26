@@ -38,6 +38,20 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
   - hash-chained audit log computed in Go (ADR-0010), with a bounded `/v1/audit/verify`
   - distroless nonroot Dockerfile and an opt-in `backend` compose service
 - Make targets `go-integration`, `generator-update` and `api`.
+
+- PR validation pipeline (WBS 2.6, 5.1, 5.2 partial, 5.4):
+  - `tools/stack_pipeline`, tested with pytest:
+    - `detect` maps changed files to `environments/<env>/<team>/<stack>/` roots and emits a JSON matrix. It skips deleted roots and enforces the 20-stack and dependency-edge guard rails. A pipeline change re-validates every stack.
+    - `context` builds the conftest data from `iacp.stack.json`.
+    - `summary` renders the sticky PR comment and a JSON payload with a normalised plan hash.
+    - `verify-pins` checks that published module tags resolve to the recorded commit. It serves unpublished tags from a local mirror, but only for commits already on `main`.
+  - Smoke stack `environments/development/platform/smoke/`, rendered by the generator: `modules/s3` pinned to `modules/s3/v1.0.0`, LocalStack endpoints, local backend, `iacp:*` default tags, and a lock file for linux and darwin.
+  - `.github/workflows/pr-validate.yml`:
+    - Jobs: `detect`, then a per-stack matrix against LocalStack, then sticky comments, then a single `pr-validate-result` check.
+    - Matrix steps: fmt, module pins, init, validate, TFLint, Checkov, plan, `show -json`, conftest, and a hermetic apply/re-plan/destroy round trip.
+    - Only the comment job holds `pull-requests: write`.
+    - Per-stack concurrency groups; provider and TFLint plugin caches. The API report is a `TODO(WBS 4.10)`.
+  - Make targets `stack-detect`, `stack-plan`, `stack-apply`, `stack-destroy` and `stack-clean`.
 - Module registry MVP (WBS 3.1–3.5):
   - `modules/_shared/module.schema.json`, the JSON Schema for `module.yaml`.
   - `tools/manifest_validator`: schema, inputs-schema and variables.tf parity checks. Pytest suite; run it with `make validate-manifests`.

@@ -45,7 +45,7 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 | [ ] 2.3 | *(Deferred by ADR-0009)* Bootstrap Terraform: state bucket (SSE-KMS, versioning, TLS-only), CMK | 1 | 2.1 |
 | [ ] 2.4 | *(Deferred by ADR-0009)* GitHub OIDC provider + `iacp-plan` / `iacp-apply` roles + `iacp-boundary` (dev, staging) | 1 | 2.3 |
 | [ ] 2.5 | GitHub setup: repo rulesets, GitHub App registration, Environments, `iacp-approver` user | 1 | 2.1 |
-| [ ] 2.6 | Smoke stack `environments/development/platform/smoke/` plans against LocalStack (OIDC once ADR-0009 ends) | 0.5 | 2.2 |
+| [x] 2.6 | Smoke stack `environments/development/platform/smoke/` plans against LocalStack (OIDC once ADR-0009 ends); generator-rendered, applies in a hermetic CI round trip | 0.5 | 2.2 |
 | [x] 2.7 | ADR-0009: local-first development (LocalStack + Terraform local backend) | 0.5 | 1 |
 
 **Exit:** `docker compose up` is healthy, and the smoke stack plans in CI against LocalStack with no real credentials.
@@ -83,10 +83,10 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 ## 5. Automation pipeline — M2/M3
 | ID | Task | Est | Dep |
 |----|------|-----|-----|
-| [ ] 5.1 | Changed-stack detection + matrix | 0.5 | 2.1 |
-| [ ] 5.2 | `pr-validate.yml`: fmt, validate, plan (plan role), PR comment, report to API | 2 | 2.4, 4.10 |
+| [x] 5.1 | Changed-stack detection + matrix (`tools/stack_pipeline detect`) | 0.5 | 2.1 |
+| [~] 5.2 | `pr-validate.yml`: fmt, validate, plan (plan role), PR comment, report to API (LocalStack instead of the plan role per ADR-0009; API report pending 4.10; SARIF and Infracost not yet) | 2 | 2.4, 4.10 |
 | [ ] 5.3 | `apply.yml`: lock claim, re-plan, plan-hash verify, apply (apply role), outputs report | 2 | 5.2, 4.6 |
-| [ ] 5.4 | Concurrency groups per stack, caching (providers, plugins) | 0.5 | 5.2 |
+| [x] 5.4 | Concurrency groups per stack, caching (providers, plugins) | 0.5 | 5.2 |
 | [ ] 5.5 | Infracost step + PR comment (informational in MVP) | 1 | 5.2 |
 | [ ] 5.6 | Reusable `.github/actions/iacp-report` composite action | 1 | 5.2 |
 | [ ] 5.7 | Smoke tests / Terratest post-apply for ephemeral envs | 1 | 3.5, 5.3 |

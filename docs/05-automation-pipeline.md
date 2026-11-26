@@ -86,13 +86,16 @@ environments/development/payments/orders-store/
 }
 ```
 
-Detection algorithm (`.github/scripts/changed-stacks.sh`, used by `pr-validate.yml` and `apply.yml`):
+While local-first ([ADR-0009](adr/0009-local-first-localstack-and-local-backend.md)), the generator writes a smaller `iacp.stack.json` (`backend`, `depends_on`, `environment`, `fencing_token`, `lifecycle`, `modules` with each instance's release tag and resolved commit SHA, `region`, `request_id`, `stack`, `team`; see `environments/development/platform/smoke/iacp.stack.json`). Account, ephemeral and TTL fields arrive with multi-account support and WBS 8.4.
+
+Detection algorithm (`python -m tools.stack_pipeline detect`, used by `pr-validate.yml` and later `apply.yml`):
 
 1. `git diff --name-only <base>...<head> -- environments/` (PR: merge base vs. head; push: `github.event.before..github.event.after`).
 2. Map each path to its stack root by taking the first four segments (`environments/<env>/<team>/<stack>`).
 3. Deduplicate; keep roots that still contain `iacp.stack.json`. Roots that were deleted (cleanup after destroy) are skipped — their state is already empty.
-4. Emit a JSON matrix: `[{ "path": "...", "env": "...", "account_id": "...", "stack_id": "...", "desired_state": "...", "ephemeral": false }]`, built from each `iacp.stack.json`.
-5. Guard rails: fail if more than 20 stacks changed (generator emits at most one stack per request; bulk changes require the `iacp/bulk` label and platform-team approval). Fail if two changed stacks have a `depends_on` edge between them — the backend serialises dependent stacks into separate requests (DAG ordering, see [06-lifecycle-management.md](06-lifecycle-management.md#7-dependency-management)).
+4. Emit a JSON matrix built from each `iacp.stack.json`, whose identity must match its directory: `[{ "id": "development-platform-smoke", "path": "environments/development/platform/smoke", "environment": "...", "team": "...", "stack": "...", "region": "...", "lifecycle": "active", "backend": "local" }]` (`account_id`, `desired_state` and `ephemeral` join the entry when the stack file carries them). `git diff --no-renames` reports a moved stack as a delete plus an add.
+5. Guard rails: fail if more than 20 stacks changed (generator emits at most one stack per request; bulk changes require the `iacp/bulk` label and platform-team approval). Fail if two changed stacks have a `depends_on` edge between them — the backend serialises dependent stacks into separate requests (DAG ordering, see [06-lifecycle-management.md](06-lifecycle-management.md#7-dependency-management)). `depends_on` entries may name a stack as `<env>/<team>/<stack>`, by its slug id, or by its path.
+6. A change to the pipeline itself (`.github/workflows/pr-validate.yml`, `tools/stack_pipeline/`) re-validates every stack (`--full-run-prefix`); the 20-stack limit applies to change sets, not to these full runs.
 
 Changes outside `environments/` do not plan stacks: `modules/**` triggers `module-release.yml`; `policies/**` triggers `opa test` / `conftest verify` and Checkov custom-check unit tests; `backend/**` and `portal/**` have their own app CI.
 
@@ -134,6 +137,8 @@ runs:
 ```
 
 ### 4.2 `pr-validate.yml`
+
+The YAML below is the target design with OIDC roles and the platform API. The workflow in the repository today is the local-first version described in [Local-first implementation](#local-first-implementation-current) after the notes.
 
 ```yaml
 name: pr-validate
@@ -335,6 +340,29 @@ Notes:
 - `-lock=false` on PR plans: plans are read-only and must not contend with an apply; the platform-level lock already prevents concurrent mutating requests on the same stack.
 - The approved plan hash is stored by the API in `plan_summaries.plan_hash` keyed by `(request_id, head_sha)`. A new push to the PR invalidates the previous hash.
 - Branch protection requires `pr-validate-result`, not each matrix leg, so check names stay stable.
+
+#### Local-first implementation (current)
+
+`.github/workflows/pr-validate.yml` follows the design above with these differences while [ADR-0009](adr/0009-local-first-localstack-and-local-backend.md) is in effect:
+
+| Area | Target design | Today |
+|---|---|---|
+| AWS access | `iacp-plan` role through OIDC | LocalStack service container, dummy `test`/`test` credentials, generated LocalStack provider endpoints and the `local` backend; no `id-token: write` |
+| Triggers | `environments/**` | Also `.github/workflows/pr-validate.yml` and `tools/stack_pipeline/**`, which re-validate every stack |
+| Module fetch | Published `modules/<name>/vX.Y.Z` tag | `verify-pins` step first (below) |
+| Checkov | `checkov -d . --download-external-modules true` | Same, with `--skip-check CKV_TF_1`: stacks pin exact release tags (enforced by `iacp.forbidden.module_source`), and `verify-pins` checks the tag-to-commit binding that CKV_TF_1 protects |
+| Policy context | `GET /v1/internal/budget-context` | `tools.stack_pipeline context`, built from the path-checked `iacp.stack.json`: environment, team, stack, no exceptions (WBS 6.4 replaces it) |
+| Apply | Only in `apply.yml` | A hermetic round trip in the same job: apply the plan to the job's throwaway LocalStack, require an empty `-detailed-exitcode` re-plan, then destroy. Nothing outside the job is touched |
+| PR comment | `marocchino/sticky-pull-request-comment` in the matrix job | The matrix job uploads `comment.md` / `summary.json`. A separate `comment` job, the only job with `pull-requests: write`, upserts one comment per stack by a hidden `<!-- iacp-plan:<id> -->` marker rebuilt from the artifact name. Fork PRs are skipped (read-only token); their summary stays in the job summary |
+| Artifacts | `tfplan`, `plan.json`, SARIF, Infracost | Only the rendered summary; `tfplan` and `plan.json` can hold sensitive values and never leave the job. SARIF (6.1) and Infracost (5.5) come later |
+| API report | `iacp-report` action (`plan_ready` / `plan_failed`) | `TODO(WBS 4.10)` in the workflow; the JSON summary is already the payload shape |
+
+**Module pins before tags exist.** Module-release (WBS 3.6) has not published any `modules/*` tag yet. A local relative source would be denied by `iacp.forbidden.module_source`, which cannot be waived, so stacks keep the generator's exact pinned git source. `python -m tools.stack_pipeline verify-pins <stack>` runs before `terraform init`:
+
+- **Published tag:** the tag on `origin` must resolve to the commit recorded in `iacp.stack.json`, or the step fails.
+- **Unpublished tag:** the recorded commit must already be on `origin/main`, and its `modules/<name>/module.yaml` must declare exactly that version. The step then pushes that one commit as the tag into a throwaway bare mirror, and routes the repository URL (with and without `.git`) to the mirror through `GIT_CONFIG_*` `insteadOf` environment variables. No git config file is changed.
+
+The plan JSON therefore carries the real pinned source, and every policy is evaluated unchanged. Code from the PR branch is never served as a module, and the bootstrap stops applying once the tag is published. `make stack-plan` runs the same sequence locally.
 
 ### 4.3 `apply.yml`
 
@@ -734,13 +762,16 @@ For **development** stacks, the API auto-approves on behalf of the request when 
 | What | Mechanism | Key | Notes |
 |---|---|---|---|
 | Terraform providers | `TF_PLUGIN_CACHE_DIR` + `actions/cache` | OS + hash of stack `.terraform.lock.hcl` | Generator writes lock files with `terraform providers lock -platform=linux_amd64 -platform=darwin_arm64`, so `-lockfile=readonly` verifies checksums even from cache |
-| TFLint plugins | `actions/cache` on `~/.tflint.d/plugins` | hash of `.tflint.hcl` | |
+| TFLint plugins | `TFLINT_PLUGIN_DIR` + `actions/cache` | OS + TFLint version + hash of `.tflint.hcl` | |
+| Python tools (Checkov, `tools/stack_pipeline`) | `actions/setup-python` pip cache | `policies/checkov/requirements.txt` | |
 | Go modules (Terratest) | `actions/setup-go` built-in cache | `tests/go.sum` | |
 | Checkov / conftest / Infracost binaries | Pre-built runner image `ghcr.io/acme/self-service-iac-platform-ci@sha256:...` (optional) | image digest | Cuts ~40s per job |
 | Terraform modules (Git) | Not cached | — | Always fetched by tag so the SHA integrity check in [04-module-registry.md](04-module-registry.md#8-how-consumers-pin-versions) is meaningful |
 | Infracost pricing | Infracost Cloud Pricing API cache | — | Self-hosted pricing API is an option for air-gapped setups |
 
 Additional performance rules: matrix fan-out only over changed stacks; `max-parallel` caps AWS API pressure; PR concurrency cancels superseded plans; typical PR wall time target is under 4 minutes for a single stack.
+
+Concurrency groups: `pr-validate-<pr>` for the whole run, and `iacp-stack-<id>-plan-pr<pr>` per matrix leg. Both cancel in progress, so a new push replaces stale plans of the same stack. `apply.yml` (WBS 5.3) will use a non-cancelling `iacp-stack-<id>` group so applies to one stack queue rather than overlap.
 
 ## 7. Terratest: `modules/s3` against LocalStack
 
