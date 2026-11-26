@@ -26,8 +26,9 @@ type PostgresRepository struct {
 }
 
 var (
-	_ RetryRepository = (*PostgresRepository)(nil)
-	_ History         = (*PostgresRepository)(nil)
+	_ RetryRepository   = (*PostgresRepository)(nil)
+	_ History           = (*PostgresRepository)(nil)
+	_ SurgeryRepository = (*PostgresRepository)(nil)
 )
 
 // NewPostgresRepository returns a PostgresRepository.
@@ -191,4 +192,28 @@ func (s *pgStore) Enqueue(ctx context.Context, m outbox.Message) (bool, error) {
 func (s *pgStore) AppendAudit(ctx context.Context, e audit.Event) error {
 	_, err := s.audit.Append(ctx, s.tx, e)
 	return err
+}
+
+// InSurgeryTx implements SurgeryRepository.
+func (r *PostgresRepository) InSurgeryTx(ctx context.Context, fn func(SurgeryStore) error) error {
+	return r.tx.InTx(ctx, func(tx pgx.Tx) error { return fn(&pgStore{tx: tx, audit: r.audit}) })
+}
+
+func (s *pgStore) StackByPath(ctx context.Context, path string) (SurgeryStack, error) {
+	var st SurgeryStack
+	err := s.tx.QueryRow(ctx, `SELECT id, team_id FROM stacks WHERE path = $1`, path).Scan(&st.ID, &st.TeamID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SurgeryStack{}, &apperr.Error{Kind: apperr.KindNotFound, Code: "stack_not_found", Message: fmt.Sprintf("no stack at %s", path)}
+	}
+	if err != nil {
+		return SurgeryStack{}, fmt.Errorf("query stack: %w", err)
+	}
+	return st, nil
+}
+
+func (s *pgStore) Recorded(ctx context.Context, action, correlationID string) (bool, error) {
+	var found bool
+	err := s.tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM audit_events WHERE action = $1 AND correlation_id = $2)`,
+		action, correlationID).Scan(&found)
+	return found, err
 }
