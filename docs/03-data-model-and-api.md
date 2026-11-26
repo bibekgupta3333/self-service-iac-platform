@@ -786,7 +786,7 @@ If the change spans several dependent stacks, the backend splits it into **seque
 }
 ```
 
-**Update** — same shape with `"kind": "update"`, `"stack_id"` instead of team/env/stack/region/ephemeral (sending those is `422 not_allowed`: they are fixed once the stack exists), and the full desired `resources` list (declarative; removed resources are destroyed and shown in the plan). The new inputs and versions are validated like a create's. The publisher renders over the stack root and keeps `.terraform.lock.hcl`. `if_match_spec_version` is not implemented yet.
+**Update** — same shape with `"kind": "update"`, `"stack_id"` instead of team/env/stack/region/ephemeral (sending those is `422 not_allowed`: they are fixed once the stack exists), and the full desired `resources` list (declarative; removed resources are destroyed and shown in the plan). The new inputs and versions are validated like a create's. The publisher renders over the stack root and keeps `.terraform.lock.hcl`. An update that omits resources of the stack's newest live spec (the latest create or update that is not failed, rejected or cancelled) is refused with `422 resources_removed`, naming them, unless it sends `"allow_removals": true`. That stops a form built from an older spec from silently deleting what a newer request added; plan review remains the second guard. `if_match_spec_version` is not implemented: the removal check is the cheaper guard that works before applied specs are tracked.
 
 **Upgrade** — `POST /v1/requests`
 
@@ -801,7 +801,7 @@ If the change spans several dependent stacks, the backend splits it into **seque
 
 The API validates existing inputs against the target version's schema, applies manifest-declared input renames (`migrations` in `module.yaml`), and rejects with `422 upgrade_requires_input_changes` listing fields if manual edits are needed. Major upgrades require `"acknowledge_breaking": true`.
 
-**Destroy** — `{"kind": "destroy", "stack_id": "…", "justification": "Feature retired", "confirm_stack_name": "order-events"}`. `justification` is required and `confirm_stack_name` must equal the stack's name (`422 mismatch`); `resources` must be omitted. The generator writes a destroy marker (`iacp.stack.json` `"lifecycle": "destroy"`) and empties `main.tf` module blocks (the stored spec has `"resources": []`), so `pr-validate.yml` and `apply.yml` plan and apply the destruction through the normal pipeline with no special mode; the PR body says that merging destroys the stack. Production destroys require maintainer + `prevent_destroy`-protected resources need a prior update request to lift protection. The cleanup PR and the `destroyed` status belong to WBS 7.6.
+**Destroy** — `{"kind": "destroy", "stack_id": "…", "justification": "Feature retired", "confirm_stack_name": "order-events"}`. `justification` is required and `confirm_stack_name` must equal the stack's name (`422 mismatch`); `resources` must be omitted. The generator writes a destroy marker (`iacp.stack.json` `"lifecycle": "destroy"`) and empties `main.tf` module blocks (the stored spec has `"resources": []`), so `pr-validate.yml` and `apply.yml` plan and apply the destruction through the normal pipeline with no special mode; the PR body says that merging destroys the stack. Production destroys require maintainer + `prevent_destroy`-protected resources need a prior update request to lift protection. The cleanup PR and the `destroyed` status belong to WBS 7.6. `request.created` records the justification and the confirmed stack name in the audit chain. While local-first (ADR-0009) the stack's Terraform state is throw-away per job, so a destroy plans and applies nothing; it only changes real infrastructure with remote state (and `allow_stateful_destroy` is not implemented). A destroy root has no module calls, so `terraform init` writes no `.terraform/modules/modules.json`; `verify-modules` accepts that when `iacp.stack.json` pins no modules, and the rest of `pr-validate.yml` and `apply.yml` (validate, TFLint, Checkov, plan, conftest, summary, reports, apply, smoke "nothing to check") was run against the golden destroy root.
 
 **What a stack accepts.** Update and destroy are checked against the stack, by the pure `requests.CheckStackAllowsKind`, first before the transaction and again inside it with the stack row locked:
 
@@ -810,6 +810,8 @@ The API validates existing inputs against the target version's schema, applies m
 | `active`, `drifted`, `failed` | accepted (a failed stack is open to fix-forward and destroy) |
 | `provisioning`, `updating`, `destroying` | `409 stack_busy`: an apply is in flight |
 | `destroyed` | `409 stack_destroyed` |
+
+A caller with no role in the stack's team gets the same `404 stack_not_found` as for an unknown `stack_id`, so existence is not revealed. **Update and destroy are inert end to end until WBS 5.3's apply reports move the stack's status:** nothing writes `stacks.status` after a create yet, so a real stack stays `provisioning` and answers `409 stack_busy` (the tests seed `active`). Wiring the `/v1/runs` apply stage to the request and stack status is part of 5.3 (it needs the request transitions too).
 
 A stack with an open `destroy` request also refuses further update and destroy requests (`409 destroy_pending`). Anything else queues behind the lock holder exactly like a create (`queued_behind`, publish on promotion). Request creation does not change the stack status; the apply reports do (`requests.StackStatusWhileApplying` and `StackStatusAfterApply` are the table WBS 5.3 applies). Idempotency, the audit chain (`request.created`) and the role rules are the same as for a create. `upgrade` stays `unsupported_kind` until the applied-spec and input-migration pieces it needs exist.
 
@@ -829,7 +831,7 @@ data: {"request_id":"…","status":"applied"}
 
 ```
 
-`end` (no id) is sent once the request is terminal and the server closes the stream: the client closes its `EventSource` instead of reconnecting. A `: heartbeat` comment goes out every 15 s while idle, and the stream closes after 5 minutes without an `end`, which the client answers by reconnecting with `Last-Event-ID`. Authorization is checked before the first byte (a non-member gets the same `404` as an unknown request, as problem+json) and again on every poll, so a revoked member's stream ends. Each write extends its own deadline, so the server-wide `WriteTimeout` does not cut the stream.
+`end` (no id) is sent once the request is terminal and the server closes the stream: the client closes its `EventSource` instead of reconnecting. A reconnect whose `Last-Event-ID` is already the terminal seq (or past it) gets `end` at once. A `: heartbeat` comment goes out every 15 s while idle, and the stream closes after 5 minutes without an `end`, which the client answers by reconnecting with `Last-Event-ID`. Authorization is checked before the first byte (a non-member gets the same `404` as an unknown request, as problem+json) and again on every poll, so a revoked member's stream ends. Each write extends its own deadline, so the server-wide `WriteTimeout` does not cut the stream. Each user may hold 5 streams and the process 500; beyond that the answer is `429 too_many_streams` with `Retry-After`. The server's shutdown signal ends every stream at once. Authorization follows the user's team membership, not the browser session, so logging out does not cut an open stream before its next reconnect.
 
 **Request detail** — `GET /v1/requests/{id}` (abridged)
 
@@ -971,8 +973,9 @@ Per pipeline on `/runs`: `validate` ← `pr-validate.yml` on `pull_request`; `ap
 |---|---|
 | no stack at the path | `404 stack_not_found` |
 | no lock, or the lease has expired | `404 no_active_request` |
-| the holder is not `approved` or `applying` | `409 request_not_approved` (`applying` is accepted because the `pr_merged` webhook can trail the push that starts `apply.yml`) |
-| `head_sha` differs from the recorded `merge_commit_sha` | `409 merge_commit_mismatch` (a merge not recorded yet passes) |
+| the holder is not `approved` or `applying` | `409 request_not_approved` |
+| no merge commit is recorded for the holder (the `pr_merged` webhook, which also moves it to `applying`, has not arrived, or the PR is still open) | `409 merge_not_recorded`, retryable. Whether or not `head_sha` is sent, no lock credential or hash is handed out for an unmerged change; otherwise an `apply.yml` run could release the lock of an open request. The tools client retries it 6 times, 5 s apart, to cover the webhook lag |
+| `head_sha` differs from the recorded `merge_commit_sha` | `409 merge_commit_mismatch` |
 
 The route class is `apply.yml` only, from main, on `push` or `workflow_dispatch`. `pr-validate.yml` does not get it: it needs neither ids nor tokens (it reads its request id and fencing token from `iacp.stack.json`), and the response is the credential for the stack lock plus the hash an apply is verified against, which a workflow file under a PR author's control must never read. `tools.stack_pipeline lock acquire --stack-path … [--head-sha …]` calls it when the UUIDs are not passed, and writes `stack_id`, `request_id` and `approved_plan_hash` to the step outputs for the release and the plan-hash check. The earlier `approvals`/`author`/`allow_stateful_destroy` fields for the pre-apply OPA gate are not returned: that gate reads the budget context.
 

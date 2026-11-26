@@ -70,7 +70,7 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 | [x] 4.2 | DB migrations for all core tables (incl. hash-chained `audit_events`, `locks`) | 1.5 | 4.1 |
 | [x] 4.3 | Catalog service: `GET /v1/catalog/modules`, `/versions`, index endpoint | 1 | 4.2 |
 | [~] 4.4 | Auth: GitHub OAuth login, sessions/JWT, team sync → memberships, RBAC middleware (membership check on create done) | 2 | 4.2 |
-| [x] 4.5 | Request service + state machine + `Idempotency-Key` (create, update and destroy kinds; `upgrade`, `reconcile` and `rollback` are rejected until their own tasks) | 2 | 4.2 |
+| [x] 4.5 | Request service + state machine + `Idempotency-Key` (create, update and destroy kinds; `upgrade`, `reconcile` and `rollback` are rejected until their own tasks; update and destroy only work end to end once 5.3's apply reports set the stack status, because nothing moves a stack out of `provisioning` yet) | 2 | 4.2 |
 | [x] 4.6 | Platform per-stack lock, fencing token, queueing (`queued_behind`) (admin force-release on `/v1/stacks/{id}/lock` lands with RBAC, 4.4) | 1 | 4.5 |
 | [x] 4.7 | Config generator: templates (main/backend/versions/providers/`iacp.stack.json`), golden tests | 2 | 4.3 |
 | [~] 4.8 | GitHub App client: branch, commit, PR, labels, workflow_dispatch (Publisher port, `githubapp` and `localgit` adapters, publish on create via the outbox done; live use waits for the App registration in 2.5) | 1.5 | 2.5 |
