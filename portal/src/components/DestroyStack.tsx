@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import { type FormEvent, type SyntheticEvent, useEffect, useRef, useState } from "react";
 
 import type { ApiClient } from "@/lib/api/client";
 import { isApiError } from "@/lib/api/errors";
@@ -62,6 +62,9 @@ export function DestroyStack({ stack, state, client, newIdempotencyKey, onCreate
   const [submitting, setSubmitting] = useState(false);
   const [sent, setSent] = useState<KeyedPayload | null>(null);
   const [focusTick, setFocusTick] = useState(0);
+  // Synchronous double-submit guard: state updates land only after the next render, so two
+  // quick submits would both pass a check on `submitting`.
+  const inFlight = useRef(false);
 
   // Focus moves to the error summary after React has rendered it.
   useEffect(() => {
@@ -79,12 +82,34 @@ export function DestroyStack({ stack, state, client, newIdempotencyKey, onCreate
     nameRef.current?.focus();
   };
 
+  // A dismissed confirmation starts empty next time: the typed name must be typed again.
+  const reset = () => {
+    setConfirmName("");
+    setJustification("");
+    setErrors({});
+    setFailure(null);
+  };
+
   const close = () => {
+    if (inFlight.current) return;
     const dialog = dialogRef.current;
     if (dialog?.open) {
       if (typeof dialog.close === "function") dialog.close();
       else dialog.removeAttribute("open");
     }
+    reset();
+    triggerRef.current?.focus();
+  };
+
+  // Escape fires `cancel` before `close`; while a request is in flight the dialog stays open.
+  const onCancel = (e: SyntheticEvent<HTMLDialogElement>) => {
+    if (inFlight.current) e.preventDefault();
+  };
+
+  const onClose = () => {
+    // A browser may still close the dialog on a second Escape after the first `cancel` was
+    // prevented; keep the fields (and the error summary to come) while the submit is in flight.
+    if (!inFlight.current) reset();
     triggerRef.current?.focus();
   };
 
@@ -99,6 +124,7 @@ export function DestroyStack({ stack, state, client, newIdempotencyKey, onCreate
 
   async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    if (inFlight.current) return;
     const invalid = validateDestroy(stack.name, { confirmName, justification });
     if (Object.keys(invalid).length > 0) {
       problems(invalid, null);
@@ -107,6 +133,7 @@ export function DestroyStack({ stack, state, client, newIdempotencyKey, onCreate
     // Same payload-bound key as the create form: a retry of the same body is replayed by the API.
     const keyed = keyFor(sent, payloadText, newIdempotencyKey ?? (() => crypto.randomUUID()));
     setSent(keyed);
+    inFlight.current = true;
     setSubmitting(true);
     setErrors({});
     setFailure(null);
@@ -140,6 +167,7 @@ export function DestroyStack({ stack, state, client, newIdempotencyKey, onCreate
         problems({}, { kind, title: "Request failed", detail: String(err), general: [] });
       }
     } finally {
+      inFlight.current = false;
       setSubmitting(false);
     }
   }
@@ -173,7 +201,8 @@ export function DestroyStack({ stack, state, client, newIdempotencyKey, onCreate
         ref={dialogRef}
         aria-labelledby="destroy-title"
         aria-describedby="destroy-warning"
-        onClose={() => triggerRef.current?.focus()}
+        onCancel={onCancel}
+        onClose={onClose}
         className="m-auto w-[min(92vw,38rem)] rounded-lg border border-slate-300 bg-white p-0 shadow-xl backdrop:bg-slate-900/50"
       >
         <form onSubmit={onSubmit} noValidate className="space-y-4 p-6">
@@ -307,7 +336,8 @@ export function DestroyStack({ stack, state, client, newIdempotencyKey, onCreate
             <button
               type="button"
               onClick={close}
-              className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium hover:bg-slate-100"
+              disabled={submitting}
+              className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
             >
               Cancel
             </button>
