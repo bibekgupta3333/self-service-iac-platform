@@ -39,6 +39,8 @@ type AuthMode string
 const (
 	// AuthModeDev authenticates every caller as a fixed local developer.
 	AuthModeDev AuthMode = "dev"
+	// AuthModeGitHub authenticates browser users with GitHub OAuth and server-side sessions.
+	AuthModeGitHub AuthMode = "github"
 )
 
 // Config is the fully resolved backend configuration.
@@ -65,6 +67,8 @@ type Config struct {
 	MetricsToken string
 	// OIDC configures GitHub Actions OIDC verification; disabled when Audience is empty.
 	OIDC OIDCConfig
+	// GitHub configures GitHub OAuth login and sessions (IACP_AUTH_MODE=github).
+	GitHub GitHubAuthConfig
 }
 
 // DefaultOIDCIssuer is the GitHub Actions token issuer.
@@ -139,15 +143,20 @@ func Load(lookup LookupFunc) (Config, error) {
 	oidc, err := loadOIDC(get)
 	errs = append(errs, err)
 	cfg.OIDC = oidc
+	gh, err := loadGitHubAuth(get, cfg.AuthMode)
+	errs = append(errs, err)
+	cfg.GitHub = gh
 	switch cfg.AuthMode {
 	case AuthModeDev:
 		if cfg.AppDBPassword == "" {
 			cfg.AppDBPassword = DevAppDBPassword // matches DefaultAppDatabaseURL
 		}
+	case AuthModeGitHub:
+		// The runtime database password must come from the environment: no dev default.
 	case "":
-		errs = append(errs, fmt.Errorf("%sAUTH_MODE must be set explicitly (supported: dev)", Prefix))
+		errs = append(errs, fmt.Errorf("%sAUTH_MODE must be set explicitly (supported: dev, github)", Prefix))
 	default:
-		errs = append(errs, fmt.Errorf("%sAUTH_MODE: unsupported value %q (supported: dev)", Prefix, cfg.AuthMode))
+		errs = append(errs, fmt.Errorf("%sAUTH_MODE: unsupported value %q (supported: dev, github)", Prefix, cfg.AuthMode))
 	}
 	if cfg.InternalToken != "" && len(cfg.InternalToken) < MinInternalTokenLen {
 		errs = append(errs, fmt.Errorf("%sINTERNAL_TOKEN must be at least %d characters", Prefix, MinInternalTokenLen))
