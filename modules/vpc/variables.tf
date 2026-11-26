@@ -137,14 +137,13 @@ variable "enable_nat_gateway" {
 }
 
 variable "single_nat_gateway" {
-  description = "Share one NAT gateway (in the first zone) between all private subnets instead of one per zone. Cheaper, but private egress then depends on one zone. Must be false in production."
+  description = "Share one NAT gateway (in the first zone) between all private subnets instead of one per zone. Cheaper, but private egress then depends on one zone. Null (the default) shares one gateway in development and staging and uses one per zone in production, where true is rejected."
   type        = bool
-  default     = true
-  nullable    = false
+  default     = null
 
   validation {
-    condition     = !(var.single_nat_gateway && var.environment == "production" && var.enable_nat_gateway != false)
-    error_message = "Production VPCs with NAT need one NAT gateway per zone: set single_nat_gateway = false."
+    condition     = !(var.single_nat_gateway == true && var.environment == "production" && var.enable_nat_gateway != false)
+    error_message = "Production VPCs with NAT need one NAT gateway per zone, so single_nat_gateway = true is not allowed in production. Leave it null (one gateway per zone) or set it to false."
   }
 }
 

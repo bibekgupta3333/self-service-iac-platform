@@ -76,5 +76,5 @@ resource "aws_route" "private_nat" {
 
   route_table_id         = aws_route_table.private[each.key].id
   destination_cidr_block = "0.0.0.0/0"
-  nat_gateway_id         = aws_nat_gateway.this[var.single_nat_gateway ? local.azs[0] : each.key].id
+  nat_gateway_id         = aws_nat_gateway.this[local.single_nat ? local.azs[0] : each.key].id
 }

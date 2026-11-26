@@ -65,9 +65,9 @@ inputs:
       x-iacp-ui: toggle
       x-iacp-group: Egress
     single_nat_gateway:
-      type: boolean
-      default: true
-      description: Share one NAT gateway between zones. Must be false in production when NAT is on.
+      type: [boolean, "null"]
+      default: null
+      description: Share one NAT gateway between zones. Null shares one outside production and uses one per zone in production, where true is rejected.
       x-iacp-ui: toggle
       x-iacp-group: Egress
     flow_log_traffic_type:
@@ -121,6 +121,11 @@ outputs:
   - { name: kms_key_arn, description: KMS key ARN of the flow log group, wireable: true }
   - { name: iacp_metadata, description: Module name and version, wireable: false }
 
+# baseline_monthly_usd is the development default (no NAT): the flow log key and
+# log ingestion. NAT gateways cost about 33 USD a month each plus data processing
+# (us-east-1), so the defaults come to about 34 USD in staging (one shared
+# gateway) and about 67 USD in production with the default two zones (one per
+# zone), or about 100 USD with three.
 cost:
   baseline_monthly_usd: 1.50
   drivers:

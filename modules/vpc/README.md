@@ -34,7 +34,7 @@ LocalStack configuration.
 | Default security group | Taken over with `aws_default_security_group` and stripped of every rule, so a resource placed in it by mistake can neither receive nor send traffic. |
 | Flow logs | Always on for the whole VPC (`ALL` traffic by default) to a CloudWatch log group encrypted with a customer managed key (dedicated key with rotation unless `kms_key_arn` is set), 30-day retention by default. |
 | Least privilege | The flow log role lives under `/iacp/`, always carries a permissions boundary (default `iacp-boundary`), may be assumed only by `vpc-flow-logs.amazonaws.com` for this account, and may only write to its own log group. |
-| Cost | NAT is off in development unless `enable_nat_gateway = true`, and on elsewhere. One shared NAT gateway by default; production must use one per zone. |
+| Cost | NAT is off in development unless `enable_nat_gateway = true`, and on elsewhere. `single_nat_gateway = null` (the default) shares one NAT gateway in development and staging and uses one per zone in production, where sharing is rejected. |
 | Tagging | `iacp:team`, `iacp:environment`, `iacp:stack`, `iacp:module`, `iacp:managed-by` are merged last on every taggable resource. Subnets and route tables also carry `iacp:tier = public` or `private`. |
 
 ## Addressing
@@ -48,6 +48,14 @@ so adding a zone never renumbers the others.
 
 Zones are the first `az_count` available zones in name order, unless
 `availability_zones` lists them explicitly.
+
+## Cost
+
+With the defaults, development has no NAT and costs about 1.50 USD a month
+(the flow log key and log ingestion; `baseline_monthly_usd` in `module.yaml`).
+NAT gateways cost about 33 USD a month each plus data processing (us-east-1),
+so staging (one shared gateway) comes to about 34 USD and production (one per
+zone) to about 67 USD with two zones or about 100 USD with three.
 
 ## Inputs
 
@@ -63,7 +71,7 @@ Zones are the first `az_count` available zones in name order, unless
 | `az_count` | Zones to use (1-4, at most `2^(subnet_newbits - 1)`). Ignored with `availability_zones`. | `number` | `2` | no |
 | `availability_zones` | Explicit zone names (1-4, unique) in subnet order. | `list(string)` | `[]` | no |
 | `enable_nat_gateway` | NAT egress for private subnets. Null: off in development, on elsewhere. | `bool` | `null` | no |
-| `single_nat_gateway` | One shared NAT gateway instead of one per zone. Must be false in production when NAT is on. | `bool` | `true` | no |
+| `single_nat_gateway` | One shared NAT gateway instead of one per zone. Null: shared outside production, one per zone in production. `true` is rejected in production when NAT is on. | `bool` | `null` | no |
 | `flow_log_traffic_type` | `ALL`, `ACCEPT` or `REJECT`. | `string` | `"ALL"` | no |
 | `flow_log_retention_days` | Days CloudWatch keeps flow logs (a supported retention value). | `number` | `30` | no |
 | `kms_key_arn` | Existing KMS key ARN for the flow log group. If null, a dedicated key is created. | `string` | `null` | no |

@@ -34,9 +34,10 @@ locals {
   }
 
   # NAT: off in development unless asked for; one shared gateway in the first
-  # zone, or one per zone.
+  # zone (development and staging by default), or one per zone (production).
   nat_enabled = coalesce(var.enable_nat_gateway, var.environment != "development")
-  nat_azs     = local.nat_enabled ? (var.single_nat_gateway ? [local.azs[0]] : local.azs) : []
+  single_nat  = coalesce(var.single_nat_gateway, !local.is_production)
+  nat_azs     = local.nat_enabled ? (local.single_nat ? [local.azs[0]] : local.azs) : []
 
   create_kms_key = var.kms_key_arn == null
   kms_key_arn    = local.create_kms_key ? aws_kms_key.this[0].arn : var.kms_key_arn
