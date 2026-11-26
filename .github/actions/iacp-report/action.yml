@@ -60,6 +60,12 @@ inputs:
     description: error.message for a failed stage.
     required: false
     default: ""
+  error-log:
+    description: >-
+      Path to the Terraform log of a failed stage. Its error excerpt is sent as error.message when
+      error-message is empty, so the API can classify the failure (transient, config or infra).
+    required: false
+    default: ""
   fencing-token:
     description: The stack lock's fencing token. validate defaults to iacp.stack.json.
     required: false
@@ -90,6 +96,7 @@ runs:
         IN_OUTPUTS: ${{ inputs.outputs-json }}
         IN_EXIT_CODE: ${{ inputs.terraform-exit-code }}
         IN_ERROR: ${{ inputs.error-message }}
+        IN_ERROR_LOG: ${{ inputs.error-log }}
         IN_FENCING_TOKEN: ${{ inputs.fencing-token }}
         IN_REQUEST: ${{ inputs.request-short-id }}
         IN_FAIL: ${{ inputs.fail-on-error }}
@@ -102,6 +109,7 @@ runs:
         [ -n "$IN_OUTPUTS" ] && args+=(--outputs "$IN_OUTPUTS")
         [ -n "$IN_EXIT_CODE" ] && args+=(--terraform-exit-code "$IN_EXIT_CODE")
         [ -n "$IN_ERROR" ] && args+=(--error-message "$IN_ERROR")
+        [ -n "$IN_ERROR_LOG" ] && args+=(--error-log "$IN_ERROR_LOG")
         [ -n "$IN_FENCING_TOKEN" ] && args+=(--fencing-token "$IN_FENCING_TOKEN")
         [ -n "$IN_REQUEST" ] && args+=(--request-short-id "$IN_REQUEST")
         [ "$IN_FAIL" = "true" ] || args+=(--warn-on-error)
