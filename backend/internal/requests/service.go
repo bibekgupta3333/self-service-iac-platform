@@ -124,7 +124,7 @@ type ListFilter struct {
 	AllTeams bool
 	TeamIDs  []uuid.UUID
 	Limit    int
-	After     *Cursor
+	After    *Cursor
 }
 
 // Repository is the persistence port of the request service.

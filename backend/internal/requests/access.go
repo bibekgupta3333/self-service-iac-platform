@@ -23,7 +23,9 @@ type Access struct {
 }
 
 // NewAccess returns an Access.
-func NewAccess(pool *pgxpool.Pool, teams TeamVisibility) *Access { return &Access{pool: pool, teams: teams} }
+func NewAccess(pool *pgxpool.Pool, teams TeamVisibility) *Access {
+	return &Access{pool: pool, teams: teams}
+}
 
 // Visible returns the caller's visible teams.
 func (a *Access) Visible(ctx context.Context, p identity.Principal) (identity.Visibility, error) {

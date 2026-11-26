@@ -85,6 +85,52 @@ func DesiredRoles(teams []Team, ghSlugs []string) map[uuid.UUID]rbac.Role {
 	return out
 }
 
+// derivedSlugs lists every GitHub team slug that grants a role in the team (lower case).
+func derivedSlugs(t Team) []string {
+	s := strings.ToLower(t.GitHubSlug)
+	return []string{viewerPrefix + s + viewerSuffix, s, s + maintainerSuffix}
+}
+
+// Collisions returns the platform teams whose derived role slugs overlap another team's or
+// the admin team's, with the reason. Such teams must not receive synced roles: for example
+// teams "payments" and "payments-maintainers" would make the second team's developers
+// maintainers of the first. Teams without a GitHub slug are reported too. Pure.
+func Collisions(teams []Team, adminTeam string) map[uuid.UUID]string {
+	owner := map[string]uuid.UUID{}
+	bad := map[uuid.UUID]string{}
+	if adminTeam != "" {
+		owner[strings.ToLower(adminTeam)] = uuid.Nil
+	}
+	for _, t := range teams {
+		if t.GitHubSlug == "" {
+			bad[t.ID] = "no github_team_slug"
+			continue
+		}
+		for _, s := range derivedSlugs(t) {
+			if other, taken := owner[s]; taken && other != t.ID {
+				bad[t.ID] = "role slug " + s + " collides with another team or the admin team"
+				if other != uuid.Nil {
+					bad[other] = "role slug " + s + " collides with team " + t.Slug
+				}
+				continue
+			}
+			owner[s] = t.ID
+		}
+	}
+	return bad
+}
+
+// WithoutCollisions drops the colliding teams from teams. Pure.
+func WithoutCollisions(teams []Team, bad map[uuid.UUID]string) []Team {
+	out := make([]Team, 0, len(teams))
+	for _, t := range teams {
+		if _, isBad := bad[t.ID]; !isBad {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // IsAdmin reports whether the user belongs to the admin team. Pure.
 func (m Mapping) IsAdmin(ghSlugs []string) bool {
 	if m.AdminTeam == "" {

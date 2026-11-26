@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -90,7 +91,12 @@ func (s *Syncer) syncTx(ctx context.Context, tx pgx.Tx, gu identity.GitHubUser) 
 	if err != nil {
 		return oauth.SyncResult{}, err
 	}
-	changes := Plan(current, DesiredRoles(teams, gu.TeamSlugs))
+	// Teams whose role slugs overlap another team's get no synced roles (fail closed).
+	bad := Collisions(teams, s.mapping.AdminTeam)
+	for id, why := range bad {
+		slog.Error("team sync skips a team with ambiguous GitHub slugs", "team", id, "reason", why)
+	}
+	changes := Plan(current, DesiredRoles(WithoutCollisions(teams, bad), gu.TeamSlugs))
 	bySlug := map[uuid.UUID]string{}
 	for _, t := range teams {
 		bySlug[t.ID] = t.Slug
@@ -132,6 +138,18 @@ func (s *Syncer) syncTx(ctx context.Context, tx pgx.Tx, gu identity.GitHubUser) 
 		}
 	}
 	return oauth.SyncResult{UserID: userID, Login: gu.Login, PlatformAdmin: d.Admin}, nil
+}
+
+// CheckTeams reports the platform teams whose GitHub role slugs are ambiguous; the API logs
+// them at startup so an operator fixes the data before anyone is denied a role.
+func (s *Syncer) CheckTeams(ctx context.Context) (map[uuid.UUID]string, error) {
+	var bad map[uuid.UUID]string
+	err := s.txr.InTx(ctx, func(tx pgx.Tx) error {
+		teams, err := s.teams(ctx, tx)
+		bad = Collisions(teams, s.mapping.AdminTeam)
+		return err
+	})
+	return bad, err
 }
 
 func (s *Syncer) teams(ctx context.Context, tx pgx.Tx) ([]Team, error) {

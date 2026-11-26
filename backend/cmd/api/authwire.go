@@ -61,6 +61,13 @@ func newUserAuth(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, clo
 			return userAuth{}, err
 		}
 		syncer := teamsync.NewSyncer(db.NewTxRunner(pool), auditWriter, clock, teamsync.Mapping{AdminTeam: g.AdminTeam})
+		if bad, err := syncer.CheckTeams(ctx); err != nil {
+			return userAuth{}, fmt.Errorf("check team slugs: %w", err)
+		} else {
+			for id, why := range bad {
+				logger.Error("platform team has ambiguous GitHub role slugs and will receive no synced roles", "team", id, "reason", why)
+			}
+		}
 		login := oauth.NewService(gh, states, syncer, sessions, recorder,
 			oauth.RedirectPolicy{Origins: g.RedirectAllowlist, Default: g.DefaultRedirect}, clock)
 		out.Authenticator = httpapi.NewSessionAuthenticator(sessions)
