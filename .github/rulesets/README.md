@@ -14,7 +14,11 @@ CODEOWNERS itself is generated from `.github/teams.yaml` by `python -m tools.cod
 
 Required status checks are job names. A job skipped by its `detect` gate reports
 `skipped`, which satisfies the check, so the list can include jobs that do not run on
-every PR. Keep the list in step with the `name:` of the jobs in `.github/workflows/`.
+every PR. Keep the list in step with the `name:` of the jobs in `.github/workflows/`:
+`make required-checks-check` (`python -m tools.required_checks --check`, also a pytest in CI) fails
+when a required check is not the name of a job. Not required on purpose: `detect` and the
+`code scanning` upload jobs (non-gating), and the `cost`, `cost summary`, `comment` and `report`
+jobs of `pr-validate` (informational; `pr-validate-result` is the one check for that workflow).
 
 ## Apply
 
