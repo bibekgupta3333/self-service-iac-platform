@@ -115,9 +115,10 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 - The JWKS endpoint must be https (loopback excepted) and redirects are not followed. Fetches are shared (singleflight) and detached from the caller, so a disconnecting client cannot block key refreshes.
 - When `IACP_OIDC_REPOSITORY_ID` is set every token must carry it; the API warns when it is unset.
 - `iacp_app` can only SELECT, INSERT and UPDATE `pipeline_runs`.
-- `/metrics` shares the API listener but is closed by default. It answers direct loopback peers, never a request with forwarding headers, and otherwise needs `IACP_METRICS_TOKEN`, which is separate from the internal token.
-- A replayed GitHub OIDC token gets a 401, and so does a token without `jti` or any replay-store failure. `iacp_app` has no UPDATE on `oidc_jti`.
-- Pull-request tokens can now also read the budget context, which is read-only. They still cannot take locks or index the catalog.
+- `/metrics` shares the API listener but is closed by default. It answers direct loopback peers, never a request with forwarding headers, and otherwise needs `IACP_METRICS_TOKEN`, which is separate from the internal token. Methods outside the standard set are labelled `OTHER`, so junk methods cannot add series. The loopback rule assumes no same-host proxy relays outside traffic without forwarding headers.
+- A replayed GitHub OIDC token or one without `jti` gets a 401. A replay-store outage also refuses the token, but with a retryable `503 replay_store_unavailable` and its own log line. A claim deletes only its own expired row; a background sweep purges the rest in batches of 1,000. `iacp_app` has no UPDATE on `oidc_jti`.
+- Pull-request tokens can now also read the budget context, which is read-only, for any team's stack path (an accepted exposure, documented in docs/07). They still cannot take locks or index the catalog.
+- `tools/codeowners` only counts git-tracked stack roots and rejects `platform_paths` under `/environments/<env>/`, which team rules would shadow.
 
 ### Changed
 - `AGENTS.md`: local-first rules, the 70/30 object-oriented and functional coding style, and the small-commit, reviewed-PR workflow.
