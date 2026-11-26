@@ -23,6 +23,15 @@ export default function HomePage() {
         </li>
         <li>
           <Link
+            href="/stacks"
+            className="block rounded-lg border border-slate-200 bg-white p-5 hover:border-slate-400"
+          >
+            <span className="block font-medium">Manage stacks</span>
+            <span className="mt-1 block text-sm text-slate-600">Status, outputs, updates and destroys.</span>
+          </Link>
+        </li>
+        <li>
+          <Link
             href="/requests"
             className="block rounded-lg border border-slate-200 bg-white p-5 hover:border-slate-400"
           >

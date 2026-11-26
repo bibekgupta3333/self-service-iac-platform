@@ -13,6 +13,7 @@ from typing import Any, Mapping, Sequence
 
 from .adapters import AwsCliTagReader, FileSystemStackRepository, GitCli, GitDiff
 from .api_client import ApiError, FreshCredentials, IacpApiClient, TokenSource
+from .convergence import plan_problem, residual_changes
 from .cost import fold_cost, parse_infracost, redact_plan
 from .detection import DEFAULT_MAX_STACKS, DetectionError, DetectionPolicy, DetectionResult, StackDetector
 from .models import StackMetadataError
@@ -128,6 +129,9 @@ def build_parser() -> argparse.ArgumentParser:
     smoke.add_argument("--region", default="", help="default: region in iacp.stack.json")
     smoke.add_argument("--markdown-out", type=Path)
     smoke.add_argument("--json-out", type=Path)
+
+    converged = sub.add_parser("converged", help="after apply: fail unless a re-plan is empty (emulator tag drops excepted)")
+    converged.add_argument("--plan", type=Path, required=True, help="terraform show -json of the re-plan")
 
     report = sub.add_parser("report", help="POST one stage report to $IACP_API_URL/v1/runs")
     report.add_argument("stack_dir", type=Path)
@@ -320,16 +324,33 @@ def run_fold_cost(args: argparse.Namespace) -> int:
 
 
 def run_sarif(args: argparse.Namespace) -> int:
-    meta = FileSystemStackRepository(args.repo_root).load_dir(args.stack_dir)
     doc = _read_json(args.input)
     if doc is None:
         raise SarifError(f"{args.input} is missing or is not JSON")
+    meta = FileSystemStackRepository(args.repo_root).load_dir(args.stack_dir)
     # Both spellings: a tool may print the resolved path (/private/tmp on macOS).
     dirs = [str(p) for d in args.external_dir for p in dict.fromkeys((Path(d), Path(d).resolve()))]
     out = rebase_sarif(doc, meta.ref.path, dirs, str(Path(args.repo_root).resolve()))
     args.out.write_text(json.dumps(out, indent=1) + "\n", encoding="utf-8")
     print(f"{meta.ref.path}: {result_count(out)} SARIF result(s) -> {args.out}")
     return 0
+
+
+def run_converged(args: argparse.Namespace) -> int:
+    doc = _read_json(args.plan)
+    if not isinstance(doc, dict):
+        raise ValueError(f"missing or not a JSON object: --plan {args.plan}")
+    problem = plan_problem(doc)
+    if problem:
+        raise ValueError(f"--plan {args.plan}: {problem}")
+    residual = residual_changes(doc)
+    for line in residual:
+        print(f"not converged: {line}")
+    if residual:
+        print(f"::error title=Stack is not idempotent::{annotation(f'{len(residual)} change(s) left after apply')}")
+    else:
+        print("converged: the re-plan is empty")
+    return 1 if residual else 0
 
 
 def run_smoke(args: argparse.Namespace) -> int:
@@ -521,6 +542,7 @@ COMMANDS = {
     "fold-cost": run_fold_cost,
     "sarif": run_sarif,
     "smoke": run_smoke,
+    "converged": run_converged,
     "report": run_report,
     "lock": run_lock,
 }

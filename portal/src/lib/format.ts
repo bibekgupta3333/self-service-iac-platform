@@ -15,6 +15,16 @@ export function formatDateTime(iso: string | null | undefined): string {
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`;
 }
 
+/** httpsUrl returns url when it is an absolute https URL, otherwise null (never link anything else). Pure. */
+export function httpsUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    return new URL(url).protocol === "https:" ? url : null;
+  } catch {
+    return null;
+  }
+}
+
 /** categoriesOf lists the distinct module categories, sorted. Pure. */
 export function categoriesOf(modules: readonly { category: string }[]): string[] {
   return [...new Set(modules.map((m) => m.category).filter(Boolean))].sort();

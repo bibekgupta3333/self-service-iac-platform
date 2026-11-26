@@ -210,6 +210,18 @@ class TestSmokeTester:
         assert "state only" in result.render_markdown()
         assert result.to_dict()["unprobed_types"] == ["aws_lambda_event_source_mapping"]
 
+    def test_emulator_untagged_types_are_reported_not_checked(self):
+        alarm = {"address": "aws_cloudwatch_metric_alarm.a", "mode": "managed", "type": "aws_cloudwatch_metric_alarm",
+                 "values": {"arn": "arn:aws:cloudwatch:us-east-1:0:alarm:a", "tags_all": {}}}
+        state = {"values": {"root_module": {"resources": [alarm]}}}
+        result = SmokeTester(FakeReader({})).run(metadata("development", "platform", "smoke"), {}, {}, state)
+        assert result.ok and result.empty and result.emulator_untagged == ("aws_cloudwatch_metric_alarm",)
+        assert "LocalStack does not keep them" in result.render_markdown()
+        assert result.to_dict()["emulator_untagged_types"] == ["aws_cloudwatch_metric_alarm"]
+        strict = SmokeTester(FakeReader({}), emulator_untagged=frozenset()).run(
+            metadata("development", "platform", "smoke"), {}, {}, state)
+        assert not strict.ok
+
     def test_probe_without_identifier_fails(self):
         state = {"values": {"root_module": {"resources": [
             {"address": "aws_lambda_function.f", "mode": "managed", "type": "aws_lambda_function",
@@ -269,6 +281,16 @@ class TestAwsCliTagReader:
         with pytest.raises(SmokeConfigError):
             AwsCliTagReader(endpoint, "us-east-1", run)
         assert run.cmd is None
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        ["http://evil.com\\@localhost:4566", "http://localhost\\.evil.com", "http://user@localhost:4566",
+         "http://user:pw@localhost:4566", "http://:pw@localhost:4566", "http://evil.com@localhost:4566",
+         "http://@localhost:4566"],
+    )
+    def test_refuses_backslash_and_userinfo(self, endpoint):
+        with pytest.raises(SmokeConfigError):
+            local_endpoint(endpoint)
 
     @pytest.mark.parametrize(
         "endpoint",

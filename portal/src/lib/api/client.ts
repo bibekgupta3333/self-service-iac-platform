@@ -6,14 +6,16 @@ import type { AuthProvider } from "@/lib/auth/provider";
 
 import { ApiError, parseProblem } from "./errors";
 import type {
-  CreateRequestInput,
   CreateRequestResult,
   ModuleFilter,
   ModuleSummary,
   ModuleVersion,
   Page,
   RequestFilter,
+  RequestInput,
   RequestSummary,
+  StackFilter,
+  StackSummary,
   VersionSummary,
 } from "./types";
 
@@ -114,7 +116,7 @@ export class ApiClient {
    * createRequest posts a request. idempotencyKey must stay the same for retries of the same
    * form submission; the backend replays the original request for a repeated key and body.
    */
-  async createRequest(input: CreateRequestInput, idempotencyKey: string): Promise<CreateRequestResult> {
+  async createRequest(input: RequestInput, idempotencyKey: string): Promise<CreateRequestResult> {
     const { data, response } = await this.send<RequestSummary>("POST", "/v1/requests", {
       body: input,
       headers: { "Idempotency-Key": idempotencyKey },
@@ -139,6 +141,58 @@ export class ApiClient {
 
   async getRequest(id: string): Promise<RequestSummary> {
     return (await this.send<RequestSummary>("GET", `/v1/requests/${seg(id)}`)).data;
+  }
+
+  // ---- stacks ----
+
+  async listStacks(filter: StackFilter = {}): Promise<Page<StackSummary>> {
+    return (
+      await this.send<Page<StackSummary>>("GET", "/v1/stacks", {
+        query: {
+          team: filter.team,
+          env: filter.env,
+          status: filter.status,
+          limit: filter.limit,
+          cursor: filter.cursor,
+        },
+      })
+    ).data;
+  }
+
+  async getStack(id: string): Promise<StackSummary> {
+    return (await this.send<StackSummary>("GET", `/v1/stacks/${seg(id)}`)).data;
+  }
+
+  /**
+   * openRequestEvents opens GET /v1/requests/{id}/events and returns the response with its
+   * body unread, for the caller to stream. It throws ApiError for any non-2xx answer (429
+   * too_many_streams, 401, 404, ...) and for transport failures. lastEventId resumes the
+   * stream after that audit seq.
+   */
+  async openRequestEvents(id: string, opts: { lastEventId?: string; signal?: AbortSignal } = {}): Promise<Response> {
+    const headers: Record<string, string> = {
+      Accept: "text/event-stream",
+      ...(await this.auth.requestHeaders("GET")),
+      ...(opts.lastEventId !== undefined ? { "Last-Event-ID": opts.lastEventId } : {}),
+    };
+    const url = buildUrl(this.baseUrl, `/v1/requests/${seg(id)}/events`);
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, {
+        ...this.init,
+        method: "GET",
+        headers,
+        credentials: this.auth.credentials,
+        signal: opts.signal,
+      });
+    } catch (err) {
+      throw ApiError.network(err);
+    }
+    if (!response.ok) {
+      const decoded = await readJson(response);
+      throw new ApiError(parseProblem(response.status, decoded, response.headers.get("X-Request-Id") ?? undefined));
+    }
+    return response;
   }
 
   // ---- transport ----

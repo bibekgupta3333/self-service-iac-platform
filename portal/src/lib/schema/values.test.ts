@@ -3,10 +3,45 @@ import { describe, expect, it } from "vitest";
 import { SchemaAdapter } from "./adapter";
 import { toField } from "./fields";
 import { lambdaSchema, sqsSchema } from "./fixtures";
-import { clearBehaviour, emptyValueFor, initialValues, parseValue, toInputs, toText } from "./values";
+import { clearBehaviour, emptyValueFor, initialValues, parseValue, toInputs, toText, unknownInputs, valuesFromInputs } from "./values";
 
 const sqs = new SchemaAdapter({ module: "sqs", version: "1.0.0", inputs_schema: sqsSchema });
 const lambda = new SchemaAdapter({ module: "lambda", version: "1.0.0", inputs_schema: lambdaSchema });
+
+describe("valuesFromInputs / unknownInputs", () => {
+  const stored = {
+    name: "orders",
+    fifo: true,
+    visibility_timeout_seconds: 60,
+    kms_key_arn: null,
+    alarm_actions: ["arn:aws:sns:us-east-1:123456789012:a"],
+    tags: { env: "dev" },
+    removed_in_new_schema: 1,
+  };
+
+  it("shows stored values and falls back to defaults for the rest", () => {
+    expect(valuesFromInputs(sqs.fields, stored)).toEqual({
+      name: "orders",
+      fifo: true,
+      tags: "env=dev",
+      visibility_timeout_seconds: "60",
+      alarm_actions: "arn:aws:sns:us-east-1:123456789012:a",
+      max_receive_count: "5",
+      kms_key_arn: "",
+    });
+    expect(valuesFromInputs(sqs.fields, {})).toEqual(initialValues(sqs.fields));
+  });
+
+  it("round-trips through toInputs without changing what was stored", () => {
+    const { inputs, errors } = toInputs(sqs.fields, valuesFromInputs(sqs.fields, { name: "orders", visibility_timeout_seconds: 60 }));
+    expect(errors).toEqual({});
+    expect(inputs).toEqual({ name: "orders", visibility_timeout_seconds: 60 });
+  });
+
+  it("lists stored names the schema does not have", () => {
+    expect(unknownInputs(sqs.fields, stored)).toEqual(["removed_in_new_schema"]);
+  });
+});
 
 describe("toText / initialValues", () => {
   it("seeds controls from defaults", () => {

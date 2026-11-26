@@ -15,6 +15,7 @@ The Self-Service IaC Platform is a self-service Infrastructure-as-Code platform:
 | 06 | [Lifecycle management](06-lifecycle-management.md) | Upgrades, state, locking, drift, recovery, TTL, dependencies, audit, RBAC, budgets |
 | 07 | [Security & policy](07-security-and-policy.md) | Threat model, IAM, OPA/Checkov policies, RBAC matrix |
 | 08 | [MVP roadmap](08-mvp-roadmap.md) | Phased delivery plan, acceptance criteria, metrics |
+| 09 | [Observability](09-observability.md) | Platform dashboard and alarms, metric mapping, thresholds, runbook |
 | — | [Architecture decisions](adr/README.md) | ADRs for the key design choices |
 | — | [Diagrams](diagrams/README.md) | Python sources and rendered images |
 

@@ -427,7 +427,7 @@ Actions jobs call the Platform API with an OIDC token requested with audience `h
 
 ## 8. Observability
 
-Structured JSON logs (`log/slog`) with `request_id`, `iacp_request_id`, `stack_id`, `team`, `trace_id`. Logs to CloudWatch Logs (`/iacp/api`, `/iacp/worker`, `/iacp/portal`), 30-day retention, subscription to log-archive via Firehose. Traces via ADOT sidecar → X-Ray. Custom metrics via Embedded Metric Format, namespace `the platform`.
+Structured JSON logs (`log/slog`) with `request_id`, `iacp_request_id`, `stack_id`, `team`, `trace_id`. Logs to CloudWatch Logs (`/iacp/api`, `/iacp/worker`, `/iacp/portal`), 30-day retention, subscription to log-archive via Firehose. Traces via ADOT sidecar → X-Ray. Custom metrics via Embedded Metric Format, namespace `IACP/Platform`. The MVP slice (one dashboard and the queue alarms, WBS 7.7) is the `development/platform/observability` stack; its panels, thresholds, response steps and the metrics the backend still has to emit are in [09-observability.md](09-observability.md).
 
 **Dashboards**
 
@@ -450,6 +450,8 @@ Structured JSON logs (`log/slog`) with `request_id`, `iacp_request_id`, `stack_i
 | RDS free storage | < 15 % | P2 |
 | RDS connections | > 80 % max | P2 |
 | SQS `iacp-events` oldest message age | > 300 s | P2 |
+| SQS `iacp-events` visible messages | > 100 | P2 |
+| SQS `iacp-github-outbound` oldest message age or visible messages | > 300 s or > 100 | P2 |
 | DLQ `iacp-events-dlq` visible | > 0 | P2 |
 | GitHub API rate remaining | < 10 % | P2 |
 | Webhook signature failures | > 10 / 5 min | P2 (security) |

@@ -48,6 +48,7 @@ describe("RequestForm", () => {
     expect(within(alert).getByText("Please fix the highlighted fields")).toBeInTheDocument();
     expect(within(alert).getByRole("link", { name: "Team" })).toHaveAttribute("href", "#field-team");
     expect(within(alert).getByRole("link", { name: "name" })).toHaveAttribute("href", "#field-input-name");
+    expect(alert).toHaveFocus(); // the first error moves focus to the summary too
     expect(screen.getByLabelText(/^Team/)).toHaveAttribute("aria-invalid", "true");
     expect(client.createRequest).not.toHaveBeenCalled();
   });
