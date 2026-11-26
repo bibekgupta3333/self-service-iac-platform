@@ -38,7 +38,7 @@ internal/
   outbox/                Postgres job queue (outbox table): Enqueue in the producer's tx, Worker with lease/backoff
   prflow/                request.publish handler: render → commit on iacp/<short id> → PR → record pr_opened
   recovery/              docs/06 §5: pure Classify / PlanRetry / Backoff / SelectRollbackTarget / ValidateSurgeryReport;
-                         Retrier (run observer → apply_retry + outbox job), Dispatcher (re-dispatch apply.yml once),
+                         Retrier (requests.RetryPolicy in the apply-report tx → apply_retry + outbox job), Dispatcher (re-dispatch apply.yml once, else fail),
                          RollbackService (POST /v1/stacks/{id}/rollback), SurgeryRecorder (state.surgery audit), Postgres repo
   webhooks/              pure VerifySignature and Map (event → command), Ingester (dedupe + enqueue), Applier
   audit/                 pure hash chain (CanonicalJSON, ChainHash, VerifyChain), Writer, Verifier
