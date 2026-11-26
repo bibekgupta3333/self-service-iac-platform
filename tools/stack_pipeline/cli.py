@@ -281,6 +281,11 @@ def run_verify_modules(args: argparse.Namespace) -> int:
     meta = FileSystemStackRepository(args.repo_root).load_dir(args.stack_dir)
     manifest = Path(args.stack_dir) / MANIFEST
     data = _read_json(manifest)
+    if data is None and not meta.modules:
+        # terraform init writes no modules.json for a root with no module calls (a destroy
+        # root). With nothing pinned, a missing manifest can only mean there is nothing to check.
+        print(f"{meta.ref.key}: no module calls and no pins; nothing to verify")
+        return 0
     if data is None:
         raise PinError(f"{manifest} is missing or unreadable; run terraform init first")
     verifier = ModuleInstallVerifier(GitCli(args.repo_root), args.repo_url)
