@@ -296,8 +296,11 @@ jobs:
           for tool in tflint checkov; do
             raw="$RUNNER_TEMP/sarif/$tool.raw.sarif"
             if [ ! -s "$raw" ]; then echo "no $tool SARIF (the scan did not run)"; continue; fi
+            # Invalid SARIF is refused by `sarif`, so no file is written for that tool
+            # and the other tool is still prepared.
             python -m tools.stack_pipeline --repo-root "$GITHUB_WORKSPACE" sarif . --in "$raw" \
-              --out "$RUNNER_TEMP/sarif-upload/$tool.sarif" --external-dir "$RUNNER_TEMP/checkov-modules"
+              --out "$RUNNER_TEMP/sarif-upload/$tool.sarif" --external-dir "$RUNNER_TEMP/checkov-modules" \
+              || { rm -f "$RUNNER_TEMP/sarif-upload/$tool.sarif"; echo "::warning title=Invalid SARIF::$tool SARIF is not uploaded"; }
           done
 
       # Non-gating extra: a failed upload never fails the required check. overwrite
