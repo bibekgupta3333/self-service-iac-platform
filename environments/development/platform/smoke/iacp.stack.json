@@ -7,7 +7,7 @@
   "modules": {
     "smoke_bucket": {
       "ref": "modules/s3/v1.0.0",
-      "sha": "06f693046b8ac13caed9b4c2b23a260299ee76d2"
+      "sha": "681144aafe3b9b0f00601aa921ab681905ab9edb"
     }
   },
   "region": "us-east-1",
