@@ -4,6 +4,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -75,8 +76,23 @@ func allowedMethods(r chi.Routes, path string) []string {
 	return fp.Filter(probeMethods, func(m string) bool { return r.Match(chi.NewRouteContext(), m, path) })
 }
 
-// NewRouter builds the HTTP handler tree.
+// Validate reports a configuration the router refuses to start with. Without a policy
+// table every user route would be open to any authenticated caller, so a missing table is
+// an error rather than a silent "no checks".
+func (d Deps) Validate() error {
+	if len(d.Policies) == 0 {
+		return errors.New("httpapi: no route policy table supplied (Deps.Policies); refusing to serve user routes without RBAC")
+	}
+	return nil
+}
+
+// NewRouter builds the HTTP handler tree. It panics when Deps.Validate fails: a router
+// without its access policies must never serve (callers check Validate first to report the
+// error normally).
 func NewRouter(d Deps) http.Handler {
+	if err := d.Validate(); err != nil {
+		panic(err)
+	}
 	r := chi.NewRouter()
 	// accessLog wraps recoverer so requests that panic are still logged with their 500.
 	r.Use(requestContext(d.Logger))
@@ -135,9 +151,7 @@ func NewRouter(d Deps) http.Handler {
 			if d.DenialAudit != nil {
 				user.Use(auditDenials(d.DenialAudit, d.DenialLimiter))
 			}
-			if len(d.Policies) > 0 {
-				user.Use(authorize(d.Policies, d.Roles))
-			}
+			user.Use(authorize(d.Policies, d.Roles))
 			if d.Catalog != nil {
 				d.Catalog.Routes(user)
 			}

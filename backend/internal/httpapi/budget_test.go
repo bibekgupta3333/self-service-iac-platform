@@ -31,7 +31,7 @@ func (f *fakeBudgetContext) Context(_ context.Context, path string) (budgets.Doc
 }
 
 func budgetRouter(svc BudgetContextService) http.Handler {
-	return NewRouter(Deps{Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DevAuthenticator{Principal: devPrincipal},
+	return NewRouter(Deps{Policies: testPolicies(), Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DevAuthenticator{Principal: devPrincipal},
 		Internal:         AnyAuthenticator{NewOIDCAuthenticator(fakeTokenVerifier{}), NewTokenAuthenticator(testInternalToken, releaseBot)},
 		Ready:            okPinger{},
 		InternalHandlers: []RouteRegistrar{NewBudgetContextHandler(svc)},

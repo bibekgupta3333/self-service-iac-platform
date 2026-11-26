@@ -126,7 +126,7 @@ func run() error {
 		return err
 	}
 
-	handler := httpapi.NewRouter(httpapi.Deps{
+	deps := httpapi.Deps{
 		Logger:   logger,
 		Auth:     ua.Authenticator,
 		Internal: internalAuth,
@@ -152,7 +152,11 @@ func run() error {
 		PipelineHandlers: []httpapi.RouteRegistrar{httpapi.NewRunHandler(runs.NewService(runs.NewPostgresRepository(pool), clock))},
 		Metrics:          newMetrics(pool),
 		MetricsAccess:    httpapi.NewMetricsAccess(cfg.MetricsToken),
-	})
+	}
+	if err := deps.Validate(); err != nil {
+		return err
+	}
+	handler := httpapi.NewRouter(deps)
 
 	return serve(ctx, newServer(cfg.HTTPAddr, handler), cfg.ShutdownTimeout)
 }
