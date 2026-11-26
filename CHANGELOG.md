@@ -60,7 +60,7 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
   - Pytest suite (209 tests, including temporary git repositories, a fake HTTP server and an opt-in `IACP_INTEGRATION=1` test against a running API).
   - `.github/workflows/module-release.yml`:
     - It runs on every PR, so the `semver gate result` check always reports. PRs that don't touch modules or the tooling get an empty matrix without installing Python.
-    - On pushes to `main`, it creates any missing tags and GitHub releases (also retrying tags that have no release), then calls the catalog index, which is skipped with a notice until `IACP_API_URL` and `IACP_INTERNAL_TOKEN` are configured.
+    - On pushes to `main` (or a manual `workflow_dispatch` on `main`), it creates any missing tags and GitHub releases (also retrying tags that have no release), then calls the catalog index, which is skipped with a notice until `IACP_API_URL` and `IACP_INTERNAL_TOKEN` are configured.
     - Steps run with bash `pipefail`, and annotated tags are peeled to their commit before indexing.
     - Actions are pinned by SHA, and only the release job has `contents: write`.
     - The first merge to `main` creates `modules/{s3,sqs,lambda}/v1.0.0`.
