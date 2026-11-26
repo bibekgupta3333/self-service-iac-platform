@@ -36,16 +36,19 @@ func (r *PostgresRepository) InTx(ctx context.Context, fn func(Store) error) err
 
 var _ Memberships = (*PostgresRepository)(nil)
 
-// RoleIn implements Memberships. Platform admins count as team admins.
-func (r *PostgresRepository) RoleIn(ctx context.Context, teamID, userID uuid.UUID) (Role, error) {
+// RoleInTeam implements Memberships. Platform admins count as team admins; disabled or
+// unknown users have no role.
+func (r *PostgresRepository) RoleInTeam(ctx context.Context, teamSlug string, userID uuid.UUID) (Role, error) {
 	var role string
 	err := r.pool.QueryRow(ctx, `
-		SELECT CASE WHEN u.is_platform_admin THEN 'admin' ELSE coalesce(m.role::text, '') END
-		FROM users u
-		LEFT JOIN memberships m ON m.user_id = u.id AND m.team_id = $1
-		WHERE u.id = $2 AND u.disabled_at IS NULL`, teamID, userID).Scan(&role)
+		SELECT coalesce(
+		         (SELECT CASE WHEN u.is_platform_admin THEN 'admin' ELSE coalesce(m.role::text, '') END
+		          FROM users u
+		          LEFT JOIN memberships m ON m.user_id = u.id AND m.team_id = t.id
+		          WHERE u.id = $2 AND u.disabled_at IS NULL), '')
+		FROM teams t WHERE t.slug = $1`, teamSlug, userID).Scan(&role)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return RoleNone, nil
+		return RoleNone, apperr.NotFound("team %q not found", teamSlug)
 	}
 	if err != nil {
 		return RoleNone, fmt.Errorf("query membership: %w", err)

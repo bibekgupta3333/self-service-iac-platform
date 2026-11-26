@@ -139,8 +139,9 @@ type Service struct {
 
 // Memberships resolves a user's role in a team (users.is_platform_admin counts as admin).
 type Memberships interface {
-	// RoleIn returns RoleNone when the user is not a member.
-	RoleIn(ctx context.Context, teamID, userID uuid.UUID) (Role, error)
+	// RoleInTeam returns RoleNone when the user is not a member, and an apperr NotFound
+	// error when the team does not exist.
+	RoleInTeam(ctx context.Context, teamSlug string, userID uuid.UUID) (Role, error)
 }
 
 // NewService returns a request Service.
@@ -159,8 +160,16 @@ func (s *Service) Create(ctx context.Context, by identity.Principal, cmd CreateC
 		return CreateResult{}, &apperr.Error{Kind: apperr.KindUnauthenticated, Code: "unauthenticated",
 			Message: "requests must be created by a user"}
 	}
+	// Read-only checks that use other connections (membership, catalog) run before the
+	// transaction. Inside it, the request only uses its own connection; otherwise callers
+	// holding a transaction and waiting for a second connection could exhaust the pool
+	// while the idempotency row lock makes them wait on each other.
+	err := s.precheck(ctx, by, cmd.Input)
+	if err != nil {
+		return CreateResult{}, err
+	}
 	var res CreateResult
-	err := s.repo.InTx(ctx, func(st Store) error {
+	err = s.repo.InTx(ctx, func(st Store) error {
 		claim := NewIdempotencyClaim(by.UserID, cmd.IdempotencyKey, cmd.RequestHash, s.clock.Now())
 		claimed, err := st.ClaimIdempotencyKey(ctx, claim)
 		if err != nil {
@@ -202,22 +211,34 @@ func (s *Service) replay(ctx context.Context, st Store, by identity.Principal, c
 	return CreateResult{Request: req, Replayed: true}, nil
 }
 
+// precheck validates the input shape, the caller's team role and the module versions and
+// their inputs. It runs outside the transaction.
+func (s *Service) precheck(ctx context.Context, by identity.Principal, in CreateInput) error {
+	if errs := ValidateShape(in); len(errs) > 0 {
+		return apperr.Invalid("validation_failed", "request is invalid", errs...)
+	}
+	role, err := s.members.RoleInTeam(ctx, in.Team, by.UserID)
+	if err != nil {
+		return fieldLookupError(err, "/team", fmt.Sprintf("unknown team %q", in.Team))
+	}
+	if need := RequiredRole(in.Kind, in.Environment); !role.AtLeast(need) {
+		return apperr.Forbidden(fmt.Sprintf("creating a %s request for team %s needs the %s role or higher", in.Kind, in.Team, need))
+	}
+	resolved, err := s.resolve(ctx, in.Resources)
+	if err != nil {
+		return err
+	}
+	if errs := ValidateResources(resolved); len(errs) > 0 {
+		return apperr.Invalid("validation_failed", fmt.Sprintf("%d resource inputs are invalid", len(errs)), errs...)
+	}
+	return nil
+}
+
 func (s *Service) create(ctx context.Context, st Store, by identity.Principal, cmd CreateCommand) (*Request, error) {
 	in := cmd.Input
-	if errs := ValidateShape(in); len(errs) > 0 {
-		return nil, apperr.Invalid("validation_failed", "request is invalid", errs...)
-	}
-
 	team, err := st.TeamBySlug(ctx, in.Team)
 	if err != nil {
 		return nil, fieldLookupError(err, "/team", fmt.Sprintf("unknown team %q", in.Team))
-	}
-	role, err := s.members.RoleIn(ctx, team.ID, by.UserID)
-	if err != nil {
-		return nil, fmt.Errorf("resolve team role: %w", err)
-	}
-	if need := RequiredRole(in.Kind, in.Environment); !role.AtLeast(need) {
-		return nil, apperr.Forbidden(fmt.Sprintf("creating a %s request for team %s needs the %s role or higher", in.Kind, in.Team, need))
 	}
 	env, err := st.EnvironmentByName(ctx, in.Environment)
 	if err != nil {
@@ -230,14 +251,6 @@ func (s *Service) create(ctx context.Context, st Store, by identity.Principal, c
 	now := s.clock.Now()
 	if errs := ValidateEnvironment(in, env, region); len(errs) > 0 {
 		return nil, apperr.Invalid("policy_preflight_denied", "request violates environment rules", errs...)
-	}
-
-	resolved, err := s.resolve(ctx, in.Resources)
-	if err != nil {
-		return nil, err
-	}
-	if errs := ValidateResources(resolved); len(errs) > 0 {
-		return nil, apperr.Invalid("validation_failed", fmt.Sprintf("%d resource inputs are invalid", len(errs)), errs...)
 	}
 
 	exists, err := st.StackExists(ctx, env.ID, team.ID, in.Stack)

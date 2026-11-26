@@ -229,9 +229,9 @@ var dev = identity.Principal{UserID: uuid.MustParse("33333333-3333-3333-3333-333
 // fakeMembers maps user id to role in teamID; unknown users have no role.
 type fakeMembers map[uuid.UUID]Role
 
-func (f fakeMembers) RoleIn(_ context.Context, team, user uuid.UUID) (Role, error) {
-	if team != teamID {
-		return RoleNone, nil
+func (f fakeMembers) RoleInTeam(_ context.Context, team string, user uuid.UUID) (Role, error) {
+	if team != "payments" {
+		return RoleNone, apperr.NotFound("team %q not found", team)
 	}
 	return f[user], nil
 }
