@@ -1,0 +1,345 @@
+package requests
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"regexp"
+
+	"github.com/google/uuid"
+
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/audit"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/locks"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/outbox"
+)
+
+// PublishPayload is the body of a request.publish outbox job.
+type PublishPayload struct {
+	RequestID uuid.UUID `json:"request_id"`
+}
+
+// PublishDedupeKey keeps one pending publish job per request. Pure.
+func PublishDedupeKey(id uuid.UUID) string { return "publish:" + id.String() }
+
+// enqueuePublish adds the request.publish job (when publishing is enabled) and audits it.
+func (s *Service) enqueuePublish(ctx context.Context, st Store, id uuid.UUID, shortID string, by identity.Principal, correlationID string) error {
+	if !s.publishing {
+		return nil
+	}
+	payload, err := json.Marshal(PublishPayload{RequestID: id})
+	if err != nil {
+		return fmt.Errorf("encode publish job: %w", err)
+	}
+	queued, err := st.Enqueue(ctx, outbox.Message{Topic: outbox.TopicRequestPublish, AggregateID: &id,
+		DedupeKey: PublishDedupeKey(id), Payload: payload, AvailableAt: s.clock.Now()})
+	if err != nil {
+		return fmt.Errorf("enqueue publish: %w", err)
+	}
+	if !queued {
+		return nil // a publish job for this request is already pending
+	}
+	return s.audit(ctx, st, by, "request.publish_enqueued", id, correlationID, map[string]any{"short_id": shortID})
+}
+
+// audit appends one request-scoped audit event.
+func (s *Service) audit(ctx context.Context, st Store, by identity.Principal, action string, requestID uuid.UUID,
+	correlationID string, payload map[string]any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode audit payload: %w", err)
+	}
+	actorType, actorID := string(by.Type), by.AuditActorID()
+	if actorType == "" {
+		actorType = audit.ActorSystem
+	}
+	if actorID == "" {
+		actorID = "iacp"
+	}
+	if err := st.AppendAudit(ctx, audit.Event{OccurredAt: s.clock.Now(), ActorType: actorType, ActorID: actorID,
+		Action: action, SubjectType: "request", SubjectID: requestID.String(), CorrelationID: correlationID,
+		Payload: body}); err != nil {
+		return fmt.Errorf("audit %s: %w", action, err)
+	}
+	return nil
+}
+
+// lockForTransition takes the stack row lock first (the order every lock operation uses,
+// so a transition that releases the lock cannot deadlock with lock acquisition or run
+// reports) and then loads the request FOR UPDATE.
+func (s *Service) lockForTransition(ctx context.Context, st Store, id uuid.UUID) (*Request, error) {
+	r, err := st.GetRequest(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := st.Locks().LockStack(ctx, r.Stack.ID); err != nil {
+		return nil, fmt.Errorf("lock stack: %w", err)
+	}
+	return st.LockRequest(ctx, id)
+}
+
+// commit persists a transition of r from status from, audits it as request.transitioned,
+// and when r became terminal releases its stack lock (promoting the next waiter, whose
+// publish job is enqueued).
+func (s *Service) commit(ctx context.Context, st Store, r *Request, from Status, event Event, by identity.Principal,
+	correlationID string, extra map[string]any) error {
+	if err := st.UpdateRequest(ctx, r, from); err != nil {
+		return err
+	}
+	payload := map[string]any{"short_id": r.ShortID, "event": event, "from": from, "to": r.Status}
+	for k, v := range extra {
+		payload[k] = v
+	}
+	if err := s.audit(ctx, st, by, "request.transitioned", r.ID, correlationID, payload); err != nil {
+		return err
+	}
+	if !r.Status.IsTerminal() || r.FencingToken == nil {
+		return nil
+	}
+	res, err := s.locker.ReleaseIn(ctx, st.Locks(), locks.TokenCommand{StackID: r.Stack.ID, RequestID: r.ID,
+		FencingToken: *r.FencingToken, By: by, CorrelationID: correlationID})
+	if apperr.IsKind(err, apperr.KindConflict) {
+		return nil // the lease was already released or taken over: nothing of ours to free
+	}
+	if err != nil {
+		return fmt.Errorf("release stack lock: %w", err)
+	}
+	if res.Promoted != nil {
+		promoted, err := st.GetRequest(ctx, res.Promoted.RequestID)
+		if err != nil {
+			return fmt.Errorf("load promoted request: %w", err)
+		}
+		return s.enqueuePublish(ctx, st, promoted.ID, promoted.ShortID, by, correlationID)
+	}
+	return nil
+}
+
+// PublishedPR is what the publisher produced for a request.
+type PublishedPR struct {
+	Publisher    string // adapter name
+	Branch       string
+	CommitSHA    string
+	TreeSHA      string
+	Number       int
+	URL          string
+	FencingToken int64 // token the files were rendered with
+}
+
+// publisherPrincipal is the actor of publisher-driven transitions.
+func publisherPrincipal(name string) identity.Principal {
+	return identity.Principal{Login: "publisher:" + name, Type: identity.ActorSystem}
+}
+
+// RecordPublished fires pr_opened and stores the branch and PR (second step of the
+// publish flow; the first, outside any transaction, wrote to the repository). Recording
+// the same PR again is a no-op, so a retried job is safe. The request must still hold
+// the lock with the token the files were rendered with.
+func (s *Service) RecordPublished(ctx context.Context, id uuid.UUID, p PublishedPR, correlationID string) (*Request, error) {
+	var out *Request
+	err := s.repo.InTx(ctx, func(st Store) error {
+		r, err := s.lockForTransition(ctx, st, id)
+		if err != nil {
+			return err
+		}
+		if r.PR != nil && r.PR.Number == p.Number && r.Status != StatusDraft {
+			out = r
+			return nil
+		}
+		if r.Status != StatusDraft {
+			return apperr.Conflict("invalid_transition", fmt.Sprintf("request %s is %s, not draft", r.ShortID, r.Status))
+		}
+		if r.FencingToken == nil || *r.FencingToken != p.FencingToken {
+			return apperr.Conflict("stale_fencing_token",
+				fmt.Sprintf("request %s no longer holds the lock its files were rendered with (token %d)", r.ShortID, p.FencingToken))
+		}
+		from := r.Status
+		if err := r.Fire(EventPROpened, s.clock.Now()); err != nil {
+			return err
+		}
+		r.PR, r.RenderedTreeSHA = &PRLink{Branch: p.Branch, Number: p.Number, URL: p.URL}, p.TreeSHA
+		if err := s.commit(ctx, st, r, from, EventPROpened, publisherPrincipal(p.Publisher), correlationID, map[string]any{
+			"publisher": p.Publisher, "branch": p.Branch, "commit_sha": p.CommitSHA, "tree_sha": p.TreeSHA,
+			"pr_number": p.Number, "pr_url": p.URL, "fencing_token": p.FencingToken,
+		}); err != nil {
+			return err
+		}
+		out = r
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// PublishFailure is one failed publish attempt.
+type PublishFailure struct {
+	Publisher string
+	Attempt   int
+	Error     string
+	// Final means the worker gives up: the request fires publish_failed and releases its lock.
+	Final bool
+}
+
+// RecordPublishFailure audits a failed publish attempt; on the final attempt a draft
+// request moves to failed (failure_reason publish_failed). A request that already left
+// draft is only audited.
+func (s *Service) RecordPublishFailure(ctx context.Context, id uuid.UUID, f PublishFailure, correlationID string) error {
+	return s.repo.InTx(ctx, func(st Store) error {
+		r, err := s.lockForTransition(ctx, st, id)
+		if err != nil {
+			return err
+		}
+		by := publisherPrincipal(f.Publisher)
+		if err := s.audit(ctx, st, by, "request.publish_failed", r.ID, correlationID, map[string]any{
+			"short_id": r.ShortID, "publisher": f.Publisher, "attempt": f.Attempt, "error": f.Error, "final": f.Final,
+		}); err != nil {
+			return err
+		}
+		if !f.Final || r.Status != StatusDraft {
+			return nil
+		}
+		from := r.Status
+		if err := r.Fire(EventPublishFailed, s.clock.Now()); err != nil {
+			return err
+		}
+		detail, err := json.Marshal(map[string]any{"publisher": f.Publisher, "attempts": f.Attempt, "error": f.Error})
+		if err != nil {
+			return fmt.Errorf("encode failure detail: %w", err)
+		}
+		r.FailureReason, r.FailureDetail = "publish_failed", detail
+		return s.commit(ctx, st, r, from, EventPublishFailed, by, correlationID, nil)
+	})
+}
+
+// GitHubEvent is a webhook-driven event for one request.
+type GitHubEvent struct {
+	RequestShortID string
+	PRNumber       int
+	Event          Event
+	MergeCommitSHA string // pr_merged only
+	DeliveryID     string // X-GitHub-Delivery, recorded in the audit payload
+	Action         string // webhook action, for the audit trail
+}
+
+// EventOutcome reports what ApplyGitHubEvent did.
+type EventOutcome struct {
+	Applied bool
+	Reason  string // why it was ignored: unknown_request, pr_mismatch, or the transition error code
+	From    Status
+	To      Status
+}
+
+var shaRe = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+// webhookPrincipal is the actor of webhook-driven changes.
+var webhookPrincipal = identity.Principal{Login: "github", Type: identity.ActorGitHubWebhook}
+
+// ApplyGitHubEvent fires a webhook-driven transition. It is idempotent: an event that is
+// not allowed in the current status (a redelivery, or a merge of an unapproved PR) is
+// audited as request.github_event_ignored and reported, not returned as an error.
+func (s *Service) ApplyGitHubEvent(ctx context.Context, e GitHubEvent) (EventOutcome, error) {
+	var out EventOutcome
+	err := s.repo.InTx(ctx, func(st Store) error {
+		found, err := st.GetRequestByShortID(ctx, e.RequestShortID)
+		if apperr.IsKind(err, apperr.KindNotFound) {
+			out.Reason = "unknown_request"
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		r, err := s.lockForTransition(ctx, st, found.ID)
+		if err != nil {
+			return err
+		}
+		out.From, out.To = r.Status, r.Status
+		ignore := func(reason string) error {
+			out.Reason = reason
+			return s.audit(ctx, st, webhookPrincipal, "request.github_event_ignored", r.ID, e.DeliveryID, map[string]any{
+				"short_id": r.ShortID, "event": e.Event, "action": e.Action, "status": r.Status, "reason": reason,
+				"delivery_id": e.DeliveryID, "pr_number": e.PRNumber,
+			})
+		}
+		if r.PR == nil || r.PR.Number != e.PRNumber {
+			return ignore("pr_mismatch")
+		}
+		from := r.Status
+		if err := r.Fire(e.Event, s.clock.Now()); err != nil {
+			if ae, ok := apperr.As(err); ok && ae.Kind == apperr.KindConflict {
+				return ignore(ae.Code)
+			}
+			return err
+		}
+		if e.Event == EventPRMerged && shaRe.MatchString(e.MergeCommitSHA) {
+			r.MergeCommitSHA = e.MergeCommitSHA
+		}
+		if err := s.commit(ctx, st, r, from, e.Event, webhookPrincipal, e.DeliveryID, map[string]any{
+			"action": e.Action, "delivery_id": e.DeliveryID, "pr_number": e.PRNumber, "merge_commit_sha": r.MergeCommitSHA,
+		}); err != nil {
+			return err
+		}
+		out = EventOutcome{Applied: true, From: from, To: r.Status}
+		return nil
+	})
+	if err != nil {
+		return EventOutcome{}, err
+	}
+	return out, nil
+}
+
+// WorkflowHint is a completed workflow run seen through a webhook. It does not move the
+// request (run reports on POST /v1/runs do, WBS 5.2/5.3); it is recorded for the timeline.
+type WorkflowHint struct {
+	RequestShortID string
+	Workflow       string // workflow file path, e.g. .github/workflows/pr-validate.yml
+	RunID          int64
+	Conclusion     string
+	HeadSHA        string
+	URL            string
+	DeliveryID     string
+}
+
+// RecordWorkflowHint audits a completed workflow run against its request. Unknown requests
+// are ignored (ok=false).
+func (s *Service) RecordWorkflowHint(ctx context.Context, h WorkflowHint) (bool, error) {
+	ok := false
+	err := s.repo.InTx(ctx, func(st Store) error {
+		r, err := st.GetRequestByShortID(ctx, h.RequestShortID)
+		if apperr.IsKind(err, apperr.KindNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		ok = true
+		return s.audit(ctx, st, webhookPrincipal, "request.workflow_run_completed", r.ID, h.DeliveryID, map[string]any{
+			"short_id": r.ShortID, "status": r.Status, "workflow": h.Workflow, "run_id": h.RunID,
+			"conclusion": h.Conclusion, "head_sha": h.HeadSHA, "url": h.URL, "delivery_id": h.DeliveryID,
+		})
+	})
+	return ok, err
+}
+
+// ErrNotPublishable is returned by PublishTarget for requests the publisher must skip.
+var ErrNotPublishable = errors.New("request is not publishable")
+
+// PublishTarget loads a request for publishing. It returns ErrNotPublishable (wrapped)
+// when the request left draft, waits behind another request, or holds no lock token.
+func (s *Service) PublishTarget(ctx context.Context, id uuid.UUID) (*Request, error) {
+	r, err := s.repo.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case r.Status != StatusDraft:
+		return r, fmt.Errorf("%w: %s is %s", ErrNotPublishable, r.ShortID, r.Status)
+	case r.IsQueued():
+		return r, fmt.Errorf("%w: %s is queued behind %s", ErrNotPublishable, r.ShortID, *r.QueuedBehind)
+	case r.FencingToken == nil:
+		return r, fmt.Errorf("%w: %s holds no stack lock", ErrNotPublishable, r.ShortID)
+	}
+	return r, nil
+}

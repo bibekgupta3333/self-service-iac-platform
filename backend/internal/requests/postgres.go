@@ -14,6 +14,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/audit"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/db"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/locks"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/outbox"
 )
 
 // PostgresRepository implements Repository with pgx.
@@ -63,34 +64,71 @@ func (r *PostgresRepository) Get(ctx context.Context, id uuid.UUID) (*Request, e
 }
 
 const requestCols = `r.id, r.short_id, r.stack_id, s.path, s.status, r.kind, r.status, r.spec, coalesce(r.justification, ''),
-	r.queued_behind, r.fencing_token, coalesce(r.approved_plan_hash, ''), r.approved_by, r.approved_at, r.retry_count, r.created_by,
-	r.created_at, r.updated_at, r.completed_at`
+	r.queued_behind, r.fencing_token, coalesce(r.approved_plan_hash, ''), r.approved_by, r.approved_at, r.retry_count,
+	r.github_branch, r.github_pr_number, r.github_pr_url, coalesce(r.rendered_tree_sha, ''), coalesce(r.merge_commit_sha, ''),
+	coalesce(r.failure_reason, ''), r.failure_detail, r.created_by, r.created_at, r.updated_at, r.completed_at`
 
 func scanRequest(row pgx.Row) (*Request, error) {
 	var (
-		q    Request
-		spec []byte
+		q        Request
+		spec     []byte
+		branch   *string
+		prNumber *int
+		prURL    *string
+		detail   []byte
 	)
 	err := row.Scan(&q.ID, &q.ShortID, &q.Stack.ID, &q.Stack.Path, &q.Stack.Status, &q.Kind, &q.Status, &spec,
-		&q.Justification, &q.QueuedBehind, &q.FencingToken, &q.ApprovedPlanHash, &q.ApprovedBy, &q.ApprovedAt, &q.RetryCount, &q.CreatedBy,
-		&q.CreatedAt, &q.UpdatedAt, &q.CompletedAt)
+		&q.Justification, &q.QueuedBehind, &q.FencingToken, &q.ApprovedPlanHash, &q.ApprovedBy, &q.ApprovedAt, &q.RetryCount,
+		&branch, &prNumber, &prURL, &q.RenderedTreeSHA, &q.MergeCommitSHA, &q.FailureReason, &detail,
+		&q.CreatedBy, &q.CreatedAt, &q.UpdatedAt, &q.CompletedAt)
 	if err != nil {
 		return nil, err
 	}
 	q.Spec = spec
+	if detail != nil {
+		q.FailureDetail = detail
+	}
+	if prNumber != nil {
+		q.PR = &PRLink{Number: *prNumber}
+		if branch != nil {
+			q.PR.Branch = *branch
+		}
+		if prURL != nil {
+			q.PR.URL = *prURL
+		}
+	}
 	return &q, nil
 }
 
 func getRequest(ctx context.Context, q db.DBTX, id uuid.UUID) (*Request, error) {
+	return queryRequest(ctx, q, `r.id = $1`, id, "")
+}
+
+// queryRequest loads one request matching where (with one argument); lockClause is
+// appended verbatim (e.g. "FOR UPDATE OF r").
+func queryRequest(ctx context.Context, q db.DBTX, where string, arg any, lockClause string) (*Request, error) {
 	req, err := scanRequest(q.QueryRow(ctx, `SELECT `+requestCols+`
-		FROM requests r JOIN stacks s ON s.id = r.stack_id WHERE r.id = $1`, id))
+		FROM requests r JOIN stacks s ON s.id = r.stack_id WHERE `+where+` `+lockClause, arg))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, apperr.NotFound("request %s not found", id)
+		return nil, apperr.NotFound("request %v not found", arg)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("query request: %w", err)
 	}
 	return req, nil
+}
+
+// TeamCostCenter returns the cost center of the team owning a stack (rendered as a tag).
+func (r *PostgresRepository) TeamCostCenter(ctx context.Context, stackID uuid.UUID) (string, error) {
+	var cc string
+	err := r.pool.QueryRow(ctx, `SELECT t.cost_center FROM stacks s JOIN teams t ON t.id = s.team_id WHERE s.id = $1`, stackID).Scan(&cc)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", apperr.NotFound("stack %s not found", stackID)
+	}
+	if err != nil {
+		return "", fmt.Errorf("query team cost center: %w", err)
+	}
+	return cc, nil
 }
 
 // List implements Repository.
@@ -231,3 +269,48 @@ func (s *pgStore) AppendAudit(ctx context.Context, e audit.Event) error {
 }
 
 func (s *pgStore) Locks() locks.Store { return locks.NewTxStore(s.tx, s.audit) }
+
+func (s *pgStore) GetRequestByShortID(ctx context.Context, shortID string) (*Request, error) {
+	return queryRequest(ctx, s.tx, `r.short_id = $1`, shortID, "")
+}
+
+func (s *pgStore) LockRequest(ctx context.Context, id uuid.UUID) (*Request, error) {
+	return queryRequest(ctx, s.tx, `r.id = $1`, id, "FOR UPDATE OF r")
+}
+
+// UpdateRequest writes the mutable fields of r, guarded by the status it was read in
+// (docs/03 §4.1 optimistic check).
+func (s *pgStore) UpdateRequest(ctx context.Context, r *Request, from Status) error {
+	var (
+		branch, url *string
+		number      *int
+		detail      []byte
+	)
+	if r.PR != nil {
+		branch, number, url = &r.PR.Branch, &r.PR.Number, &r.PR.URL
+	}
+	if len(r.FailureDetail) > 0 {
+		detail = r.FailureDetail
+	}
+	tag, err := s.tx.Exec(ctx, `UPDATE requests SET status = $3, retry_count = $4, approved_plan_hash = nullif($5, ''),
+			approved_by = $6, approved_at = $7, updated_at = $8, completed_at = $9, github_branch = $10,
+			github_pr_number = $11, github_pr_url = $12, rendered_tree_sha = nullif($13, ''),
+			merge_commit_sha = nullif($14, ''), failure_reason = nullif($15, ''), failure_detail = $16
+		WHERE id = $1 AND status = $2`,
+		r.ID, string(from), string(r.Status), r.RetryCount, r.ApprovedPlanHash, r.ApprovedBy, r.ApprovedAt, r.UpdatedAt,
+		r.CompletedAt, branch, number, url, r.RenderedTreeSHA, r.MergeCommitSHA, r.FailureReason, detail)
+	if db.IsUniqueViolation(err, "requests_pr_idx") {
+		return apperr.Conflict("pr_number_in_use", fmt.Sprintf("pull request #%d is already linked to another request", r.PR.Number))
+	}
+	if err != nil {
+		return fmt.Errorf("update request: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return apperr.Conflict("concurrent_update", fmt.Sprintf("request %s is no longer %s", r.ShortID, from))
+	}
+	return nil
+}
+
+func (s *pgStore) Enqueue(ctx context.Context, m outbox.Message) (bool, error) {
+	return outbox.Enqueue(ctx, s.tx, m)
+}
