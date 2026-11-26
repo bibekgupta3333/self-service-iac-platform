@@ -344,7 +344,8 @@ jobs:
           path: summaries
 
       # Create or update one comment per stack, found by its hidden marker. The
-      # marker is rebuilt from the artifact name, never read from the artifact body.
+      # marker is built here from the artifact name; any marker-looking line in the
+      # artifact body is dropped, so a body can never claim another stack's comment.
       - name: Upsert comments
         env:
           GH_TOKEN: ${{ github.token }}
@@ -355,12 +356,13 @@ jobs:
           for dir in summaries/pr-validate-*/; do
             id="$(basename "$dir")"
             id="${id#pr-validate-}"
-            body="${dir}comment.md"
-            if [[ ! "$id" =~ ^[a-z0-9-]+$ ]] || [ ! -f "$body" ]; then
+            if [[ ! "$id" =~ ^[a-z0-9_-]+$ ]] || [ ! -f "${dir}comment.md" ]; then
               echo "::warning::skipping malformed summary $dir"
               continue
             fi
             marker="<!-- iacp-plan:${id} -->"
+            body="$RUNNER_TEMP/comment-${id}.md"
+            { echo "$marker"; grep -v -F '<!-- iacp-plan:' "${dir}comment.md" || true; } > "$body"
             existing="$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
               --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id" | head -n1)"
             if [ -n "$existing" ]; then
