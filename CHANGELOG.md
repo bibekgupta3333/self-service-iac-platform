@@ -59,6 +59,10 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
     - Serving unpublished tags now requires `IACP_PIN_BOOTSTRAP` (`--allow-unpublished`).
     - The comment job writes the comment marker itself.
     - The workflow runs on every PR, and policy and tool-version changes re-validate every stack.
+  - After the first module releases:
+    - The smoke stack is pinned to the published `modules/s3/v1.0.0` (`681144a`).
+    - `IACP_PIN_BOOTSTRAP` is off in the workflow and Makefile; `--allow-unpublished` stays as an opt-in.
+    - Deleted-root detection counts only files tracked by git.
 - Module registry MVP (WBS 3.1–3.5):
   - `modules/_shared/module.schema.json`, the JSON Schema for `module.yaml`.
   - `tools/manifest_validator`: schema, inputs-schema, variables.tf parity and `compatibility` against `required_version`/`required_providers` checks. Pytest suite; run it with `make validate-manifests`.
