@@ -21,6 +21,7 @@ from .module_pins import DEFAULT_REPO_URL, DEFAULT_TRUSTED_REF, ModulePinVerifie
 from .plan_summary import render_markdown, summarize
 from .policy_context import build_context
 from .sarif import SarifError, rebase_sarif, result_count
+from .convergence import residual_changes
 from .smoke import SmokeTester
 from .report import (
     GitHubRun,
@@ -128,6 +129,9 @@ def build_parser() -> argparse.ArgumentParser:
     smoke.add_argument("--region", default="", help="default: region in iacp.stack.json")
     smoke.add_argument("--markdown-out", type=Path)
     smoke.add_argument("--json-out", type=Path)
+
+    converged = sub.add_parser("converged", help="after apply: fail unless a re-plan is empty (emulator tag drops excepted)")
+    converged.add_argument("--plan", type=Path, required=True, help="terraform show -json of the re-plan")
 
     report = sub.add_parser("report", help="POST one stage report to $IACP_API_URL/v1/runs")
     report.add_argument("stack_dir", type=Path)
@@ -332,6 +336,20 @@ def run_sarif(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_converged(args: argparse.Namespace) -> int:
+    doc = _read_json(args.plan)
+    if not isinstance(doc, dict):
+        raise ValueError(f"missing or not a JSON object: --plan {args.plan}")
+    residual = residual_changes(doc)
+    for line in residual:
+        print(f"not converged: {line}")
+    if residual:
+        print(f"::error title=Stack is not idempotent::{annotation(f'{len(residual)} change(s) left after apply')}")
+    else:
+        print("converged: the re-plan is empty")
+    return 1 if residual else 0
+
+
 def run_smoke(args: argparse.Namespace) -> int:
     meta = FileSystemStackRepository(args.repo_root).load_dir(args.stack_dir)
     # First: refuses an empty or non-LocalStack endpoint before anything else runs.
@@ -521,6 +539,7 @@ COMMANDS = {
     "fold-cost": run_fold_cost,
     "sarif": run_sarif,
     "smoke": run_smoke,
+    "converged": run_converged,
     "report": run_report,
     "lock": run_lock,
 }
