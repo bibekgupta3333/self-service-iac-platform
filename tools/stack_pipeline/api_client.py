@@ -28,6 +28,7 @@ from .report import api_base_url, describe_problem
 RUNS_PATH = "/v1/runs"
 LOCK_PATH = "/v1/internal/stacks/{stack_id}/lock"
 REQUEST_BY_PATH = "/v1/internal/requests/by-path"
+BUDGET_CONTEXT_PATH = "/v1/internal/budget-context"
 USER_AGENT = "iacp-stack-pipeline"
 
 
@@ -230,6 +231,19 @@ class IacpApiClient:
     def post_run(self, payload: Mapping[str, Any]) -> ApiResponse:
         """POST /v1/runs. Retried on 429/5xx: a stage report replaces its earlier entry."""
         return self._call("POST", RUNS_PATH, payload, ok=(200,))
+
+    def get_budget_context(self, stack_path: str) -> dict[str, Any]:
+        """GET /v1/internal/budget-context: the conftest --data document of a stack root. Read-only
+        and idempotent, so it is retried on 429/5xx. An answer that is not a policy context
+        (no ``iacp.context`` object) is an ApiError."""
+        if not STACK_PATH_RE.match(stack_path):
+            raise ValueError(f"stack path must look like environments/<env>/<team>/<stack>, got {stack_path!r}")
+        path = BUDGET_CONTEXT_PATH + "?" + urllib.parse.urlencode({"stack_path": stack_path})
+        body = self._call("GET", path, None, ok=(200,)).body
+        iacp = body.get("iacp")
+        if not isinstance(iacp, dict) or not isinstance(iacp.get("context"), dict):
+            raise ApiError(f"GET {BUDGET_CONTEXT_PATH}: the response is not a policy context")
+        return body
 
     def resolve_request(self, stack_path: str, head_sha: str = "", *, merge_wait_attempts: int = 6,
                         merge_wait_seconds: float = 5.0) -> ResolvedRequest:

@@ -15,11 +15,11 @@ from .adapters import AwsCliTagReader, FileSystemStackRepository, GitCli, GitDif
 from .api_client import ApiError, FreshCredentials, IacpApiClient, TokenSource
 from .cost import fold_cost, parse_infracost, redact_plan
 from .detection import DEFAULT_MAX_STACKS, DetectionError, DetectionPolicy, DetectionResult, StackDetector
-from .models import StackMetadataError
+from .models import StackMetadataError, StackRef
 from .module_install import MANIFEST, ModuleInstallVerifier, parse_manifest
 from .module_pins import DEFAULT_REPO_URL, DEFAULT_TRUSTED_REF, ModulePinVerifier, PinError, Resolution, insteadof_config
 from .plan_summary import render_markdown, summarize
-from .policy_context import build_context
+from .policy_context import ContextError, build_budget_context, build_context
 from .sarif import SarifError, rebase_sarif, result_count
 from .smoke import SmokeTester
 from .report import (
@@ -63,8 +63,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     context = sub.add_parser("context", help="write the conftest --data context for a stack")
-    context.add_argument("stack_dir", type=Path)
+    context.add_argument("stack_dir", type=Path, nargs="?",
+                         help="stack root with iacp.stack.json (not used with --budget-gate)")
     context.add_argument("--allowed-region", action="append", default=[], help="override the policy default (repeatable)")
+    context.add_argument("--budget-gate", action="store_true",
+                         help="the budget gate's context (policies/opa/budget.rego): identity from --stack-path, "
+                              "budget from --api-context, the monthly cost from --cost; a missing estimate counts")
+    context.add_argument("--stack-path", help="environments/<env>/<team>/<stack>, from the detect job (--budget-gate)")
+    context.add_argument("--cost", type=Path,
+                         help="infracost breakdown --format json output of the isolated cost job (--budget-gate); "
+                              "absent or unusable means no estimate")
+    context.add_argument("--api-context", type=Path,
+                         help="`fetch-budget-context` output (--budget-gate); absent means no budget is configured")
+
+    fetch = sub.add_parser("fetch-budget-context",
+                           help="GET /v1/internal/budget-context for a stack root and write it to a file")
+    fetch.add_argument("--stack-path", required=True, help="environments/<env>/<team>/<stack>")
+    fetch.add_argument("--out", type=Path, required=True)
+    _api_arguments(fetch)
 
     summary = sub.add_parser("summary", help="summarise a plan and policy result as Markdown and JSON")
     summary.add_argument("stack_dir", type=Path)
@@ -234,8 +250,43 @@ def run_detect(args: argparse.Namespace) -> int:
 
 
 def run_context(args: argparse.Namespace) -> int:
+    if args.budget_gate:
+        return _run_budget_context(args)
+    if args.stack_dir is None or args.stack_path or args.cost or args.api_context:
+        raise ValueError("context needs a stack directory; --stack-path, --cost and --api-context go with --budget-gate")
     meta = FileSystemStackRepository(args.repo_root).load_dir(args.stack_dir)
     print(json.dumps(build_context(meta, args.allowed_region), indent=2))
+    return 0
+
+
+def _run_budget_context(args: argparse.Namespace) -> int:
+    """The budget gate's context. It reads no file from the stack's tree: identity is the path,
+    the budget is the API's, and the estimate is the cost job's (see policy_context)."""
+    ref = StackRef.from_root(args.stack_path or "")
+    if ref is None or args.stack_dir is not None:
+        raise ValueError("--budget-gate needs --stack-path environments/<env>/<team>/<stack> and no stack directory")
+    api_document = None
+    if args.api_context is not None and args.api_context.is_file():
+        api_document = _read_json(args.api_context)
+        if not isinstance(api_document, dict):
+            raise ContextError(f"{args.api_context} is not a JSON object")
+    estimate = parse_infracost(_read_json(args.cost))
+    document = build_budget_context(ref, estimate, api_document, args.allowed_region)
+    context = document["iacp"]["context"]
+    print(json.dumps(document, indent=2))
+    sys.stderr.write(
+        f"budget gate for {ref.path}: budget {'set' if context.get('budget') else 'not set'}, "
+        f"estimate {context.get('estimated_monthly_cost_usd', 'missing')}\n"
+    )
+    return 0
+
+
+def run_fetch_budget_context(args: argparse.Namespace) -> int:
+    if _unconfigured(args, "budget context"):
+        return 0
+    document = _client(args, os.environ).get_budget_context(args.stack_path)
+    args.out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    print(f"wrote the budget context of {args.stack_path} to {args.out}")
     return 0
 
 
@@ -514,6 +565,7 @@ def _write_outputs(path: Path | None, values: Mapping[str, str]) -> None:
 COMMANDS = {
     "detect": run_detect,
     "context": run_context,
+    "fetch-budget-context": run_fetch_budget_context,
     "summary": run_summary,
     "verify-pins": run_verify_pins,
     "verify-modules": run_verify_modules,
@@ -534,7 +586,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # These can quote server responses; keep them on one line.
         print(f"error: {annotation(str(exc))}", file=sys.stderr)
         return 1
-    except (DetectionError, StackMetadataError, PinError) as exc:
+    except (DetectionError, StackMetadataError, PinError, ContextError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
