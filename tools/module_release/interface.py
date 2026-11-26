@@ -94,11 +94,13 @@ def _required_providers(settings: Mapping[str, Any]) -> dict[str, str | None]:
     providers: dict[str, str | None] = {}
     for block in blocks:
         for local_name, spec in (block.items() if isinstance(block, Mapping) else []):
+            # Terraform's implied source for a provider without one (including the
+            # legacy shorthand aws = "~> 5.0") is hashicorp/<local name>.
             if isinstance(spec, Mapping):
-                key = str(spec.get("source") or local_name)
+                key = str(spec.get("source") or f"hashicorp/{local_name}")
                 version = spec.get("version")
-            else:  # legacy shorthand: aws = "~> 5.0"
-                key, version = local_name, spec
+            else:
+                key, version = f"hashicorp/{local_name}", spec
             providers[key] = None if version is None else str(version)
     return providers
 

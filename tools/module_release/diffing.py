@@ -12,7 +12,8 @@ point of view:
   ``sensitive``.
 * Terraform and provider constraints: raising the lowest allowed major
   version is MAJOR, raising the lowest allowed minor version is MINOR, and a
-  new required provider is MINOR (see ``constraint_floor``).
+  new required provider is MINOR and a removed one (or a changed source) is
+  MAJOR (see ``constraint_floor``).
 * PATCH: any other change to release-relevant files.
 """
 
@@ -124,6 +125,8 @@ def _floor_change(subject: Subject, name: str, old: str | None, new: str | None)
 def diff_requirements(old: Interface, new: Interface) -> list[Change]:
     """Changes to ``required_version`` and ``required_providers`` constraints."""
     changes = _floor_change(Subject.TERRAFORM, "required_version", old.terraform_version, new.terraform_version)
+    for name in sorted(set(old.providers) - set(new.providers)):
+        changes.append(Change(Subject.PROVIDER, name, "required provider removed (or its source changed)", Bump.MAJOR))
     for name in sorted(set(new.providers) - set(old.providers)):
         changes.append(Change(Subject.PROVIDER, name, f"new required provider ({new.providers[name]!r})", Bump.MINOR))
     for name in sorted(set(old.providers) & set(new.providers)):

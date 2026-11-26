@@ -406,8 +406,23 @@ class TestRequirements:
     def test_legacy_shorthand_and_missing_version(self):
         result = parse_interface({"v.tf": 'terraform {\n  required_providers {\n    aws = "~> 5.0"\n'
                                           '    random = { source = "hashicorp/random" }\n  }\n}\n'})
-        assert result.providers == {"aws": "~> 5.0", "hashicorp/random": None}
+        assert result.providers == {"hashicorp/aws": "~> 5.0", "hashicorp/random": None}
         assert result.terraform_version is None
+
+    def test_object_without_source_uses_the_implied_source(self):
+        result = parse_interface({"v.tf": 'terraform {\n  required_providers {\n    aws = { version = ">= 5.0" }\n  }\n}\n'})
+        assert result.providers == {"hashicorp/aws": ">= 5.0"}
+
+    def test_shorthand_rewrite_still_sees_a_major_floor_raise(self):
+        shorthand = VERSIONS_TF.replace('aws = {\n      source  = "hashicorp/aws"\n      version = ">= 5.60, < 6.0"\n    }',
+                                        'aws = ">= 6.0"')
+        assert shorthand != VERSIONS_TF
+        assert labels(diff_interfaces(versions(), versions(shorthand))) == [("provider", "hashicorp/aws", Bump.MAJOR)]
+
+    def test_removed_provider_is_major(self):
+        removed = VERSIONS_TF.replace('source  = "hashicorp/aws"', 'source  = "acme/aws"')
+        assert labels(diff_interfaces(versions(), versions(removed))) == [
+            ("provider", "hashicorp/aws", Bump.MAJOR), ("provider", "acme/aws", Bump.MINOR)]
 
     @pytest.mark.parametrize(
         "constraint,floor",
