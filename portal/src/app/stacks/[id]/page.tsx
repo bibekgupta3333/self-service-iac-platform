@@ -6,10 +6,11 @@ import type { ReactNode } from "react";
 import { Badge } from "@/components/Badge";
 import { ErrorPanel } from "@/components/ErrorPanel";
 import { StatusBadge } from "@/components/StatusTimeline";
-import { serverApi } from "@/lib/api/server";
+import { StackActionLink } from "@/components/StackActionLink";
+import { serverApi, serverAuth } from "@/lib/api/server";
 import { attempt, isNotFound } from "@/lib/api/result";
 import { formatDateTime, requestStatusLabel, shortSha } from "@/lib/format";
-import { outputRows, stackHealth, stackStatusLabel } from "@/lib/stacks";
+import { outputRows, stackActions, stackHealth, stackStatusLabel } from "@/lib/stacks";
 
 export const dynamic = "force-dynamic";
 
@@ -27,6 +28,7 @@ export default async function StackPage({ params }: Props) {
   const s = result.data;
   const health = stackHealth(s.status);
   const outputs = outputRows(s.outputs);
+  const actions = stackActions(s, await serverAuth().capabilities());
 
   return (
     <article aria-labelledby="stack-title" className="space-y-8">
@@ -45,6 +47,25 @@ export default async function StackPage({ params }: Props) {
         </div>
         <p className="font-mono text-xs text-slate-600">{s.path}</p>
       </header>
+
+      <section aria-labelledby="actions-title" className="space-y-3">
+        <h2 id="actions-title" className="text-base font-semibold">
+          Actions
+        </h2>
+        <div className="flex flex-wrap items-start gap-4">
+          <StackActionLink
+            href={`/stacks/${encodeURIComponent(s.id)}/update`}
+            label="Update"
+            state={actions.update}
+            describedBy="update-reason"
+          />
+        </div>
+        {!actions.update.enabled && (
+          <p id="update-reason" className="text-sm text-slate-600">
+            Update unavailable: {actions.update.reason}
+          </p>
+        )}
+      </section>
 
       <section aria-labelledby="health-title" className="space-y-2 rounded-lg border border-slate-200 bg-white p-5">
         <h2 id="health-title" className="text-base font-semibold">
