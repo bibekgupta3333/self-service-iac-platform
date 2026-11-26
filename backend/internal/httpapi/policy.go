@@ -26,6 +26,9 @@ const (
 	ScopePlatform Scope = iota + 1
 	// ScopeAnyTeam requires a role in at least one team that allows the action.
 	ScopeAnyTeam
+	// ScopeAuthenticated allows any authenticated user. It is explicit, so that "no check
+	// needed" is a decision recorded in the table rather than the absence of an entry.
+	ScopeAuthenticated
 )
 
 // RoutePolicy is the RBAC requirement of one route.
@@ -34,9 +37,10 @@ type RoutePolicy struct {
 	Scope  Scope
 }
 
-// PolicyTable maps "METHOD /v1/route/{pattern}" (the chi pattern) to its policy. A route
-// without an entry needs authentication only; team- and environment-scoped checks happen in
-// the services, which call rbac.Decide with the caller's role in the target team.
+// PolicyTable maps "METHOD /v1/route/{pattern}" (the chi pattern) to its policy. A user route
+// without an entry is refused with 403 and fails TestEveryUserRouteHasAPolicy, so every new
+// route must add itself. Team- and environment-scoped checks happen in the services, which
+// call rbac.Decide with the caller's role in the target team.
 type PolicyTable map[string]RoutePolicy
 
 // DefaultPolicies covers the user routes that exist today. New routes must add themselves.
@@ -45,6 +49,17 @@ func DefaultPolicies() PolicyTable {
 		"GET /v1/audit/verify":  {Action: rbac.ActionAuditViewAll, Scope: ScopePlatform},
 		"GET /v1/requests":      {Action: rbac.ActionRead, Scope: ScopeAnyTeam},
 		"GET /v1/requests/{id}": {Action: rbac.ActionRead, Scope: ScopeAnyTeam},
+		// The catalog is shared reference data (docs/03: "any").
+		"GET /v1/catalog/modules":                           {Action: rbac.ActionRead, Scope: ScopeAuthenticated},
+		"GET /v1/catalog/modules/{name}":                    {Action: rbac.ActionRead, Scope: ScopeAuthenticated},
+		"GET /v1/catalog/modules/{name}/versions":           {Action: rbac.ActionRead, Scope: ScopeAuthenticated},
+		"GET /v1/catalog/modules/{name}/versions/{version}": {Action: rbac.ActionRead, Scope: ScopeAuthenticated},
+		// POST /v1/requests is checked in the service against the caller's role in the
+		// target team (rbac.Decide); the entry only records that the decision was made.
+		"POST /v1/requests": {Action: rbac.ActionRequestCreate, Scope: ScopeAuthenticated},
+		// The caller's own profile and session.
+		"GET /v1/me":           {Action: rbac.ActionRead, Scope: ScopeAuthenticated},
+		"POST /v1/auth/logout": {Action: rbac.ActionRead, Scope: ScopeAuthenticated},
 	}
 }
 
@@ -59,7 +74,11 @@ func authorize(table PolicyTable, roles RoleLookup) func(http.Handler) http.Hand
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			pol, ok := table[r.Method+" "+routePattern(r)]
 			if !ok {
-				next.ServeHTTP(w, r)
+				// Fail closed: a route nobody wrote a policy for is refused, and the
+				// route-coverage test fails at build time.
+				observability.Logger(r.Context()).ErrorContext(r.Context(), "route has no access policy",
+					"route", r.Method+" "+routePattern(r))
+				writeError(w, r, apperr.Forbidden("this route has no access policy"))
 				return
 			}
 			p, err := identity.FromContext(r.Context())
@@ -76,6 +95,9 @@ func authorize(table PolicyTable, roles RoleLookup) func(http.Handler) http.Hand
 }
 
 func checkPolicy(ctx context.Context, pol RoutePolicy, p identity.Principal, roles RoleLookup) error {
+	if pol.Scope == ScopeAuthenticated {
+		return nil
+	}
 	role := rbac.RoleNone
 	switch {
 	case p.PlatformAdmin:
