@@ -78,7 +78,6 @@ jobs:
           echo "modules=$modules" | tee -a "$GITHUB_OUTPUT"
 
   gate:
-    name: semver gate (${{ matrix.module }})
     needs: detect
     if: needs.detect.outputs.modules != '[]'
     runs-on: ubuntu-24.04
@@ -135,7 +134,6 @@ jobs:
           [ "$GATE" = "success" ] || [ "$GATE" = "skipped" ] || exit 1
 
   release:
-    name: release (${{ matrix.module }})
     needs: [detect, gate]
     if: github.event_name == 'push' && needs.detect.outputs.modules != '[]'
     runs-on: ubuntu-24.04
