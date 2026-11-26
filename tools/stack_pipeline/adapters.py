@@ -94,8 +94,19 @@ class FileSystemStackRepository:
         return StackMetadata.from_json(ref, data)
 
     def has_files(self, ref: StackRef) -> bool:
-        root = self.repo_root / ref.path
-        return root.is_dir() and any(p.is_file() for p in root.rglob("*"))
+        """True when git tracks any file under the root.
+
+        Only tracked files count, so an ignored leftover such as a local
+        .terraform/ or terraform.tfstate in a deleted root does not block detection.
+        """
+        out = subprocess.run(
+            ["git", "ls-files", "-z", "--", f"{ref.path}/"],
+            cwd=self.repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        return bool(out.strip("\0"))
 
     def load_dir(self, stack_dir: Path) -> StackMetadata:
         """Metadata for a stack directory given on the command line."""

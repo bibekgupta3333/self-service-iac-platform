@@ -206,9 +206,11 @@ class TestFailClosed:
         assert result.count == 0 and [r.path for r in result.skipped] == ["environments/development/platform/gone"]
 
     def test_cli_exits_non_zero_on_reviewer_cases(self, tmp_path, make_stack, capsys):
+        _git(tmp_path, "init", "-q")
         rogue = tmp_path / "environments" / "development" / "platform" / "rogue"
         rogue.mkdir(parents=True)
         (rogue / "main.tf").write_text("resource {}\n")
+        _git(tmp_path, "add", ".")
         changed = tmp_path / "changed.txt"
         changed.write_text("environments/development/platform/rogue/main.tf\n")
         rc = main(["--repo-root", str(tmp_path), "detect", "--files-from", str(changed), "--github-output", ""])
@@ -262,14 +264,37 @@ class TestFileSystemStackRepository:
         assert repo.load(SMOKE).region == "us-east-1"
         assert repo.load(StackRef("development", "platform", "empty")) is None
 
-    def test_has_files(self, tmp_path, make_stack):
+    def test_has_files_counts_tracked_files_only(self, tmp_path, make_stack):
+        _git(tmp_path, "init", "-q")
         make_stack("development", "platform", "smoke")
         empty = tmp_path / "environments" / "development" / "platform" / "empty" / "sub"
         empty.mkdir(parents=True)
+        # A deleted root that still holds ignored local leftovers.
+        gone = tmp_path / "environments" / "development" / "platform" / "gone"
+        (gone / ".terraform").mkdir(parents=True)
+        (gone / ".terraform" / "x").write_text("cache")
+        (gone / "terraform.tfstate").write_text("{}")
+        (tmp_path / ".gitignore").write_text(".terraform/\n*.tfstate\n")
+        _git(tmp_path, "add", ".")
         repo = FileSystemStackRepository(tmp_path)
         assert repo.has_files(SMOKE)
         assert not repo.has_files(StackRef("development", "platform", "empty"))  # only empty dirs
+        assert not repo.has_files(StackRef("development", "platform", "gone"))  # only ignored files
         assert not repo.has_files(StackRef("development", "platform", "missing"))
+        # A root name that is a prefix of another root does not see its files.
+        assert not repo.has_files(StackRef("development", "platform", "smo"))
+
+    def test_deleted_root_with_ignored_leftovers_is_skipped(self, tmp_path, capsys):
+        _git(tmp_path, "init", "-q")
+        gone = tmp_path / "environments" / "development" / "platform" / "gone"
+        (gone / ".terraform").mkdir(parents=True)
+        (gone / ".terraform" / "x").write_text("cache")
+        (tmp_path / ".gitignore").write_text(".terraform/\n")
+        changed = tmp_path / "changed.txt"
+        changed.write_text("environments/development/platform/gone/main.tf\n")
+        rc = main(["--repo-root", str(tmp_path), "detect", "--files-from", str(changed), "--github-output", ""])
+        assert rc == 0
+        assert json.loads(capsys.readouterr().out)["skipped"] == ["environments/development/platform/gone"]
 
     def test_invalid_json(self, tmp_path, make_stack):
         root = make_stack("development", "platform", "smoke")
