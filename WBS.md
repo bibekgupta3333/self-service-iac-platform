@@ -71,11 +71,11 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 | [x] 4.3 | Catalog service: `GET /v1/catalog/modules`, `/versions`, index endpoint | 1 | 4.2 |
 | [~] 4.4 | Auth: GitHub OAuth login, sessions/JWT, team sync → memberships, RBAC middleware (membership check on create done) | 2 | 4.2 |
 | [~] 4.5 | Request service + state machine + `Idempotency-Key` (create kind done) | 2 | 4.2 |
-| [ ] 4.6 | Platform per-stack lock, fencing token, queueing (`queued_behind`) | 1 | 4.5 |
+| [x] 4.6 | Platform per-stack lock, fencing token, queueing (`queued_behind`) (admin force-release on `/v1/stacks/{id}/lock` lands with RBAC, 4.4) | 1 | 4.5 |
 | [x] 4.7 | Config generator: templates (main/backend/versions/providers/`iacp.stack.json`), golden tests | 2 | 4.3 |
 | [ ] 4.8 | GitHub App client: branch, commit, PR, labels, workflow_dispatch | 1.5 | 2.5 |
 | [ ] 4.9 | Webhook ingester (HMAC, delivery dedupe) → SQS → worker status updates | 1.5 | 4.5 |
-| [ ] 4.10 | OIDC JWT verifier for `POST /v1/runs` and `/v1/internal/*` | 1 | 4.1 |
+| [~] 4.10 | OIDC JWT verifier for `POST /v1/runs` and `/v1/internal/*` (verifier, allow-lists, run provenance and `POST /v1/runs` done; `jti` replay cache pending) | 1 | 4.1 |
 | [x] 4.11 | Audit writer with hash chain + `/audit/verify` | 0.5 | 4.2 |
 
 **Exit:** `POST /v1/requests` opens a PR in under 10 s with golden-matching files, and the request reaches `applied` after merge.
