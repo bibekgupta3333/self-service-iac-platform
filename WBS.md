@@ -106,11 +106,11 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 ## 7. Developer portal & destroy — M4
 | ID | Task | Est | Dep |
 |----|------|-----|-----|
-| [ ] 7.1 | Next.js scaffold, GitHub login, API client, layout | 1.5 | 4.4 |
-| [ ] 7.2 | Catalog list + module detail (README, versions, inputs) | 1.5 | 4.3 |
-| [ ] 7.3 | Dynamic request form from JSON Schema (`@rjsf/core`), preview diff | 2 | 4.7 |
+| [~] 7.1 | Next.js scaffold, GitHub login, API client, layout — scaffold, `ApiClient`, proxy, layout and `AuthProvider` with the dev-mode provider done; GitHub login waits for 4.4 | 1.5 | 4.4 |
+| [~] 7.2 | Catalog list + module detail (README, versions, inputs) — list, versions, outputs and generated inputs table done; README rendering needs the README in the catalog API | 1.5 | 4.3 |
+| [~] 7.3 | Dynamic request form from JSON Schema (`@rjsf/core`), preview diff — form built by a typed renderer (see `portal/README.md`), Idempotency-Key, field-mapped errors, request preview done; generated-files diff needs `POST /v1/requests/{id}/preview` | 2 | 4.7 |
 | [ ] 7.4 | Request detail: status timeline (SSE), plan summary, cost, PR/run links | 1.5 | 4.9 |
-| [ ] 7.5 | Stacks list per team, outputs view | 1 | 4.5 |
+| [~] 7.5 | Stacks list per team, outputs view — requests list and detail with status timeline (polling) done; stacks and outputs need `GET /v1/stacks` | 1 | 4.5 |
 | [ ] 7.6 | Destroy flow: `plan -destroy` → apply → cleanup PR → `destroyed` | 1.5 | 5.3 |
 | [ ] 7.7 | Observability: CloudWatch dashboard (lead time, failure rate), alarms | 1 | 4.1 |
 

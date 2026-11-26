@@ -98,6 +98,15 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
   - RS256 only, cached JWKS with refetch on an unknown `kid` (rate limited), `iss`/`aud`/`exp`/`nbf`/`iat` with leeway, and `repository`/`repository_owner`/`repository_id`/`ref`/`job_workflow_ref` allow-lists
   - configured with `IACP_OIDC_AUDIENCE` and `IACP_OIDC_REPOSITORY` (plus optional overrides); accepted on `/v1/internal/*` next to the shared token
 - `POST /v1/runs` records run reports in the new `pipeline_runs` table (migration `0005`), checking the fencing token, the reporting run id and commit, and the workflow and trigger allowed for each pipeline. Replayed stage reports replace their entry instead of duplicating it, and reports lock the stack row before the lock row so they cannot deadlock with lock release.
+- Developer portal `portal/` (WBS 7.1–7.3, 7.5 partial):
+  - Next.js 16 App Router with strict TypeScript, Tailwind 4, ESLint and Vitest + Testing Library; exact dependency pins and a committed `package-lock.json`; Node 24 from `portal/.nvmrc`
+  - typed `ApiClient` (fetch, base URL and `AuthProvider` injected) with `ApiError` built from the backend's problem+json, including `errors[].pointer`
+  - `AuthProvider` seam with `DevAuthProvider`, matching the backend's dev auth mode (no credentials, fixed login); GitHub OAuth plugs in later
+  - same-origin proxy `/api/iacp/v1/...` for browser calls (the API sends no CORS headers), limited to user routes under `/v1`, with allow-listed headers
+  - catalog list and module detail with versions, outputs and an inputs table generated from the JSON Schema
+  - request form generated from the version's input schema by a small typed renderer, with one `Idempotency-Key` per form session, backend validation errors mapped onto fields by pointer, and a preview of the exact request
+  - requests list (All/Mine, team filter, cursor paging) and request detail with a status timeline, refreshed every 5 s until terminal
+  - CI job `portal` (npm ci, lint, typecheck, test, build) and make targets `portal-install`, `portal-dev`, `portal-test`
 
 ### Security
 - The backend fails closed: it binds to loopback by default, refuses to start without `IACP_AUTH_MODE`, keeps internal endpoints behind a constant-time token check, and enforces team membership on request creation.
