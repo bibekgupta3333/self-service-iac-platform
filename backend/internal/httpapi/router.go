@@ -4,6 +4,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -59,6 +60,9 @@ type Deps struct {
 	DenialAudit EventRecorder
 	// DenialLimiter bounds denial audit events per user (nil: DenialAuditPerMinute).
 	DenialLimiter *ratelimit.Limiter
+	// TrustedProxies are the reverse proxies whose X-Forwarded-For is believed when the
+	// client address is audited (IACP_TRUSTED_PROXIES); the zero value trusts none.
+	TrustedProxies TrustedProxies
 }
 
 // MetricsSource records requests and serves the exposition (observability.Metrics).
@@ -75,8 +79,27 @@ func allowedMethods(r chi.Routes, path string) []string {
 	return fp.Filter(probeMethods, func(m string) bool { return r.Match(chi.NewRouteContext(), m, path) })
 }
 
-// NewRouter builds the HTTP handler tree.
+// Validate reports a configuration the router refuses to start with. Without a policy
+// table every user route would be open to any authenticated caller, and without a role
+// lookup the any-team policies cannot be decided, so both are errors rather than silent
+// "no checks".
+func (d Deps) Validate() error {
+	if len(d.Policies) == 0 {
+		return errors.New("httpapi: no route policy table supplied (Deps.Policies); refusing to serve user routes without RBAC")
+	}
+	if d.Roles == nil {
+		return errors.New("httpapi: no role lookup supplied (Deps.Roles); any-team route policies cannot be enforced")
+	}
+	return nil
+}
+
+// NewRouter builds the HTTP handler tree. It panics when Deps.Validate fails: a router
+// without its access policies must never serve (callers check Validate first to report the
+// error normally).
 func NewRouter(d Deps) http.Handler {
+	if err := d.Validate(); err != nil {
+		panic(err)
+	}
 	r := chi.NewRouter()
 	// accessLog wraps recoverer so requests that panic are still logged with their 500.
 	r.Use(requestContext(d.Logger))
@@ -133,11 +156,9 @@ func NewRouter(d Deps) http.Handler {
 		v1.Group(func(user chi.Router) {
 			user.Use(requireAuth(d.Auth))
 			if d.DenialAudit != nil {
-				user.Use(auditDenials(d.DenialAudit, d.DenialLimiter))
+				user.Use(auditDenials(d.DenialAudit, d.DenialLimiter, d.TrustedProxies))
 			}
-			if len(d.Policies) > 0 {
-				user.Use(authorize(d.Policies, d.Roles))
-			}
+			user.Use(authorize(d.Policies, d.Roles))
 			if d.Catalog != nil {
 				d.Catalog.Routes(user)
 			}

@@ -28,7 +28,7 @@ import (
 const (
 	// Currency is the only supported currency: every amount column is *_usd.
 	Currency = "USD"
-	// MaxLimitUSD bounds a monthly limit (also a CHECK constraint, migration 0013).
+	// MaxLimitUSD bounds a monthly limit (also a CHECK constraint, migration 0014).
 	MaxLimitUSD = 1_000_000
 	// MinOverrideReason is the shortest reason an override may give.
 	MinOverrideReason = 20

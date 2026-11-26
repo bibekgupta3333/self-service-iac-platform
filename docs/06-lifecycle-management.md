@@ -46,6 +46,8 @@ Every lifecycle action is a **request** (`requests.kind` ∈ `create`, `update`,
 | `destroyed` | Destroy applied; directory removed; row retained for audit |
 | `failed` | Last apply failed; stack is locked to remediation requests only |
 
+The `apply.yml` run reports drive these statuses (docs/03 §4.1, WBS 5.3): the first accepted report of an approved request moves the stack to `provisioning`, `updating` or `destroying`; a succeeded run sets `active` (or `destroyed` after a destroy) and records outputs and the applied commit; a failed or cancelled run sets `failed`. Each move is audited as `stack.status_changed`. A failed post-apply smoke test does not fail the apply: the stack is `active` with `health = degraded` (shown by `GET /v1/stacks/{id}`), the team is told, and nothing is destroyed automatically. The platform lock stays visible on the stack (`lock`): the API releases it when the request ends, and if `apply.yml` reports that its own release failed, that is audited with the lock's current state and never changes the request, so an operator sees whether the stack is still held and until when.
+
 Transitions are implemented in `backend/internal/request/fsm.go` as a table-driven state machine; every transition is a single Postgres transaction that updates the row, writes `audit_events`, and enqueues follow-up work (outbox pattern → SQS).
 
 ---
@@ -413,6 +415,31 @@ A single writer (`audit.Writer`, serialised with `pg_advisory_xact_lock`) comput
 
 **Runbook — "who changed this resource?"** Search portal audit by ARN → resolves `iacp:stack-id` tag → stack timeline (requests, approvers, runs) → CloudTrail query filtered on session name `apply-<run_id>-*`. If CloudTrail shows a principal other than `iacp-apply`, it is out-of-band drift (§4).
 
+### 8.1 Following a request live (status stream and resume)
+
+The request page follows a request's lifecycle through `GET /v1/requests/{id}/events`, a Server-Sent Events feed of its status changes taken from `audit_events`. Every `status` frame's id is the audit seq, so it is also a resume point.
+
+**Server** (`backend/internal/httpapi/events.go`):
+- A first connection starts with a `snapshot` of the current status. With `Last-Event-ID: <seq>` the stream replays every change after that seq instead (`0` replays the whole history).
+- It reads the audit log every 2 s and sends a `: heartbeat` comment every 15 s.
+- It ends with an `end` frame once the request is terminal, also on a resume at the terminal seq. Without `end` it closes after a 5-minute lifetime, on server shutdown, or when the caller's session is revoked, expires or is disabled.
+- Access is checked on every poll. Each user may hold 5 open streams and the server 500 (`429 too_many_streams`).
+
+**Portal** (`StatusStream` and `RequestPoller` in `portal/src/lib/events/`):
+
+| Situation | Behaviour |
+|---|---|
+| First connection | Sends `Last-Event-ID: 0`, builds the history from the replay, then follows live. |
+| Stream closes without `end` (lifetime cap, dropped connection) | Reconnects with the id of the last frame received. A connection that delivered something starts the next attempt at least 3 s after it started, so a stream that sends one event per connection cannot loop tightly. |
+| No bytes at all (not even a heartbeat) for 45 s | The idle watchdog aborts the connection and reconnects the same way. |
+| Counting failures | A connection is a failure if it closed within 10 s without delivering an event (a heartbeat alone does not count, so a proxy that sends one heartbeat and closes ends in the polling fallback), or if the watchdog cut it with nothing received. Failed attempts back off exponentially with equal jitter (1 s base, 30 s cap). A healthy idle stream is followed for as long as the page is open. |
+| 5 failures in a row, or a `200` that is not `text/event-stream` (its body is cancelled) | Falls back to polling `GET /v1/requests/{id}` every 5 s. Polling pauses while the tab is hidden, reads at once when it is shown, and stops at a terminal status. |
+| `401`, `403`, `404` (stream or poll), `429` (stream) | Stops and says why; retrying cannot help. |
+| Oversized frame (over 256 KiB) | Dropped; the parser resynchronises at the next blank line. |
+| Repeated frame after a resume | Ignored: changes at or below the highest seq seen are duplicates. |
+| Request already terminal when the page loads | No stream and no polling; the page shows the outcome. The audit log keeps the full history. |
+| `end` | The stream stops for good. |
+
 ---
 
 ## 9. RBAC
@@ -457,7 +484,7 @@ Enforcement points: API middleware (`authz.Require(team, env, action)`), CODEOWN
 **Design.**
 
 - `budgets (team_id, environment_id, month, limit_usd, spent_usd, actual_usd, alert_thresholds={50,80,100}, hard_block=true, single_change_cap_usd=5000, override_by, override_reason, override_expires_at, override_max_delta_usd)` and `stacks.committed_monthly_usd` — see [03-data-model-and-api.md](03-data-model-and-api.md). A team admin sets a budget with `PUT /v1/teams/{slug}/budgets/{month}` (admin only, validated, audited); an environment row wins over a team-wide row.
-- In `pr-validate.yml` the `cost` job prices each stack's plan with Infracost (the only job with the key). The separate `budget` job turns that output into one number in the conftest context (`estimated_monthly_cost_usd`), fetches the team's budget from `GET /v1/internal/budget-context`, and evaluates `policies/opa/budget.rego`, running the target branch's policy and tools after a static check that no PR program can run at plan time (trust boundary in [07 §6.7](07-security-and-policy.md#67-budget-limit), decisions in [ADR-0012](adr/0012-budget-gate-inputs-and-deferrals.md)). Used is the largest of `spent_usd`, `actual_usd` and `current_committed_usd` (the committed cost of the team's other active stacks), projected is used plus the stack's estimate:
+- In `pr-validate.yml` the `cost` job prices each stack's plan with Infracost (the only job with the key). The separate `budget` job turns that output into one number in the conftest context (`estimated_monthly_cost_usd`), fetches the team's budget from `GET /v1/internal/budget-context`, and evaluates `policies/opa/budget.rego`, running the target branch's policy and tools after a static check that no PR program can run at plan time (trust boundary in [07 §6.7](07-security-and-policy.md#67-budget-limit), decisions in [ADR-0013](adr/0013-budget-gate-inputs-and-deferrals.md)). Used is the largest of `spent_usd`, `actual_usd` and `current_committed_usd` (the committed cost of the team's other active stacks), projected is used plus the stack's estimate:
   - **deny** (`iacp.budget.exceeded`) when projected is over the limit, the budget is a hard block and no override is in effect;
   - **deny** (`iacp.budget.single_change_cap`) when one stack's estimate is above the budget's single-change cap (default 5000 per month), whatever the headroom;
   - **warn** (`iacp.budget.near_limit`) from 80 percent of the limit;

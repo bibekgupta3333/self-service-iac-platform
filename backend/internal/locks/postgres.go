@@ -92,8 +92,8 @@ func (s *pgStore) LockStack(ctx context.Context, stackID uuid.UUID) (uuid.UUID, 
 
 func (s *pgStore) Request(ctx context.Context, id uuid.UUID) (RequestInfo, error) {
 	ri := RequestInfo{ID: id}
-	err := s.tx.QueryRow(ctx, `SELECT short_id, stack_id, completed_at IS NOT NULL, queued_behind FROM requests WHERE id = $1`, id).
-		Scan(&ri.ShortID, &ri.StackID, &ri.Completed, &ri.QueuedBehind)
+	err := s.tx.QueryRow(ctx, `SELECT short_id, stack_id, completed_at IS NOT NULL, queued_behind, fencing_token FROM requests WHERE id = $1`, id).
+		Scan(&ri.ShortID, &ri.StackID, &ri.Completed, &ri.QueuedBehind, &ri.FencingToken)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RequestInfo{}, apperr.NotFound("request %s not found", id)
 	}

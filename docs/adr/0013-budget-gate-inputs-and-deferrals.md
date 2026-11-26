@@ -1,4 +1,4 @@
-# ADR-0012: Budget gate inputs, what it trusts, and what is deferred
+# ADR-0013: Budget gate inputs, what it trusts, and what is deferred
 
 - Status: Accepted
 - Date: 2026-11-26

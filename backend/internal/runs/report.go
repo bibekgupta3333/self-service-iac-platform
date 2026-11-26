@@ -80,8 +80,19 @@ const (
 const FinalStage = "summary"
 
 // RunStatus derives the run status from one stage report. A passed stage only finishes
-// the run when it is the final summary; a failed or cancelled stage always does. Pure.
+// the run when it is the final summary; a failed or cancelled stage finishes it as such,
+// with two exceptions that belong to the apply pipeline's advisory stages: a failed smoke
+// test does not fail the run (the stack is applied, so the summary decides, and
+// SettleRunStatus turns a smoke-only failure into a succeeded run with a degraded stack),
+// and the release stage never finishes a run (a failed lock release happens after the
+// outcome is known). Pure.
 func RunStatus(stage string, s StageStatus) Status {
+	switch {
+	case stage == StageReleaseName:
+		return StatusInProgress
+	case stage == StageSmokeName && s == StageFailed:
+		return StatusInProgress
+	}
 	switch s {
 	case StageFailed:
 		return StatusFailed
@@ -161,6 +172,9 @@ func Validate(r Report) []apperr.FieldError {
 	if !slices.Contains([]StageStatus{StageInProgress, StagePassed, StageFailed, StageCancelled}, r.Status) {
 		add("/status", "enum", "must be one of in_progress, passed, failed, cancelled")
 	}
+	if len(r.Outputs) > 0 && !isJSONObject(r.Outputs) {
+		add("/outputs", "type", "must be a JSON object of output names to redacted values")
+	}
 	if r.Pipeline.NeedsLock() && (r.FencingToken == nil || *r.FencingToken <= 0) {
 		add("/fencing_token", "required", fmt.Sprintf("%s reports must carry the stack lock's fencing token", r.Pipeline))
 	}
@@ -168,6 +182,12 @@ func Validate(r Report) []apperr.FieldError {
 		add("/request_short_id", "required", fmt.Sprintf("%s reports must name their request", r.Pipeline))
 	}
 	return errs
+}
+
+// isJSONObject reports whether raw is a JSON object (null does not count). Pure.
+func isJSONObject(raw json.RawMessage) bool {
+	var m map[string]json.RawMessage
+	return json.Unmarshal(raw, &m) == nil && m != nil
 }
 
 // CheckProvenance matches a report against the verified OIDC identity of its caller:

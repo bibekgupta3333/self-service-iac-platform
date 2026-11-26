@@ -393,12 +393,16 @@ jobs:
       - id: roundtrip
         name: Apply round trip on LocalStack (ADR-0009)
         # Hermetic check while local-first: apply the reviewed plan to this job's
-        # throwaway LocalStack container, require an empty re-plan (exit code 2
-        # means the stack is not idempotent), then destroy. No state or resources
-        # outside the job are touched; real accounts change only through apply.yml.
+        # throwaway LocalStack container, require an empty re-plan (a change left
+        # over means the stack is not idempotent; the one tolerated difference is
+        # LocalStack dropping alarm tags, see tools/stack_pipeline/convergence.py),
+        # then destroy. No state or resources outside the job are touched; real
+        # accounts change only through apply.yml.
         run: |
           terraform apply -input=false -lock=false -no-color tfplan
-          terraform plan -input=false -lock=false -no-color -detailed-exitcode
+          terraform plan -input=false -lock=false -no-color -out="$RUNNER_TEMP/replan"
+          terraform show -json "$RUNNER_TEMP/replan" > "$RUNNER_TEMP/replan.json"
+          python -m tools.stack_pipeline --repo-root "$GITHUB_WORKSPACE" converged --plan "$RUNNER_TEMP/replan.json"
           terraform destroy -input=false -lock=false -no-color -auto-approve
 
       - name: Build plan summary

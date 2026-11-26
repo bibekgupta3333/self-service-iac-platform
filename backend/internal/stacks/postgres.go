@@ -28,10 +28,14 @@ func NewPostgresRepository(conn db.DBTX) *PostgresRepository { return &PostgresR
 const stackSelect = `
 	SELECT s.id, t.slug, e.name::text, s.name, s.path, s.region, s.status::text, s.is_ephemeral, s.expires_at,
 	       s.outputs, coalesce(s.last_applied_sha, ''), s.created_at, s.updated_at,
-	       lr.id, lr.short_id, lr.kind::text, lr.status::text, lr.created_at
+	       lr.id, lr.short_id, lr.kind::text, lr.status::text, lr.created_at,
+	       s.health,
+	       lk.request_id, lkr.short_id, lk.holder, lk.acquired_at, lk.expires_at
 	FROM stacks s
 	JOIN teams t ON t.id = s.team_id
 	JOIN environments e ON e.id = s.environment_id
+	LEFT JOIN locks lk ON lk.stack_id = s.id
+	LEFT JOIN requests lkr ON lkr.id = lk.request_id
 	LEFT JOIN LATERAL (
 	    SELECT r.id, r.short_id, r.kind, r.status, r.created_at
 	    FROM requests r WHERE r.stack_id = s.id
@@ -47,18 +51,34 @@ func scanStack(row pgx.Row) (Stack, error) {
 		reqShort           *string
 		reqKind, reqStatus *string
 		reqAt              *time.Time
+		health             string
+		lockReq            *uuid.UUID
+		lockShort, holder  *string
+		lockAt, lockExpiry *time.Time
 	)
 	err := row.Scan(&s.ID, &s.Team, &s.Environment, &s.Name, &s.Path, &s.Region, &status, &s.IsEphemeral, &s.ExpiresAt,
-		&outputs, &s.LastAppliedSHA, &s.CreatedAt, &s.UpdatedAt, &reqID, &reqShort, &reqKind, &reqStatus, &reqAt)
+		&outputs, &s.LastAppliedSHA, &s.CreatedAt, &s.UpdatedAt, &reqID, &reqShort, &reqKind, &reqStatus, &reqAt,
+		&health, &lockReq, &lockShort, &holder, &lockAt, &lockExpiry)
 	if err != nil {
 		return Stack{}, err
 	}
-	s.Status, s.Outputs = requests.StackStatus(status), outputs
+	s.Status, s.Outputs, s.Health = requests.StackStatus(status), outputs, requests.StackHealth(health)
+	if lockReq != nil {
+		s.Lock = &LockInfo{RequestID: *lockReq, RequestShortID: deref(lockShort), Holder: deref(holder),
+			AcquiredAt: *lockAt, ExpiresAt: *lockExpiry}
+	}
 	if reqID != nil {
 		s.LatestRequest = &RequestRef{ID: *reqID, ShortID: *reqShort, Kind: requests.Kind(*reqKind),
 			Status: requests.Status(*reqStatus), CreatedAt: *reqAt}
 	}
 	return s, nil
+}
+
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // List implements Repository.

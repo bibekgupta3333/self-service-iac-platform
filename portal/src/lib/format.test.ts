@@ -86,8 +86,17 @@ describe("timeline", () => {
 });
 
 describe("httpsUrl", () => {
-  it("accepts only absolute https URLs", () => {
-    expect(httpsUrl("https://example.com/o/r/pull/1")).toBe("https://example.com/o/r/pull/1");
+  it("accepts only https://github.com/ pages", () => {
+    expect(httpsUrl("https://github.com/o/r/pull/1")).toBe("https://github.com/o/r/pull/1");
+    expect(httpsUrl("https://github.com/o/r/actions/runs/42")).toBe("https://github.com/o/r/actions/runs/42");
+    expect(httpsUrl("https://example.com/o/r/pull/1")).toBeNull();
+    expect(httpsUrl("https://github.com.evil.example/o/r/pull/1")).toBeNull();
+    expect(httpsUrl("https://evil.example/github.com/o/r")).toBeNull();
+    expect(httpsUrl("https://api.github.com/repos/o/r")).toBeNull();
+    expect(httpsUrl("https://github.com:8443/o/r/pull/1")).toBeNull();
+    expect(httpsUrl("https://user:pw@github.com/o/r/pull/1")).toBeNull();
+    expect(httpsUrl("https://github.com/")).toBeNull();
+    expect(httpsUrl("http://github.com/o/r/pull/1")).toBeNull();
     expect(httpsUrl("http://example.com/x")).toBeNull();
     expect(httpsUrl("javascript:alert(1)")).toBeNull();
     expect(httpsUrl("/relative")).toBeNull();

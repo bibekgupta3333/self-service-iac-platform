@@ -130,3 +130,20 @@ func TestLoad(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadTrustedProxies(t *testing.T) {
+	base := map[string]string{"IACP_AUTH_MODE": "dev"}
+	c, err := Load(lookupFrom(base))
+	if err != nil || len(c.TrustedProxies) != 0 {
+		t.Fatalf("default must trust no proxy: %v %v", c.TrustedProxies, err)
+	}
+	base["IACP_TRUSTED_PROXIES"] = "10.0.0.0/8, 192.168.1.7 ,fd00::/8"
+	c, err = Load(lookupFrom(base))
+	if err != nil || len(c.TrustedProxies) != 3 || c.TrustedProxies[1] != "192.168.1.7" {
+		t.Fatalf("trusted proxies = %v, %v", c.TrustedProxies, err)
+	}
+	base["IACP_TRUSTED_PROXIES"] = "10.0.0.0/8,portal"
+	if _, err = Load(lookupFrom(base)); err == nil || !strings.Contains(err.Error(), "IACP_TRUSTED_PROXIES") {
+		t.Fatalf("a hostname must be refused, got %v", err)
+	}
+}

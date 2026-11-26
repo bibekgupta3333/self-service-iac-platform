@@ -7,17 +7,14 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/audit"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/db/dbtest"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/locks"
-	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/runs"
 )
 
@@ -40,8 +37,9 @@ func seedStack(t *testing.T, pool *pgxpool.Pool, shortIDs ...string) (uuid.UUID,
 	}
 	ids := make([]uuid.UUID, len(shortIDs))
 	for i, s := range shortIDs {
-		if err := pool.QueryRow(ctx, `INSERT INTO requests (short_id, stack_id, kind, spec, created_by, created_at, updated_at)
-			VALUES ($1, $2, 'update', '{}', $3, now() + $4 * interval '1 ms', now() + $4 * interval '1 ms') RETURNING id`,
+		// applying: apply reports are only accepted for requests that were approved.
+		if err := pool.QueryRow(ctx, `INSERT INTO requests (short_id, stack_id, kind, status, approved_plan_hash, spec, created_by, created_at, updated_at)
+			VALUES ($1, $2, 'update', 'applying', repeat('a', 64), '{}', $3, now() + $4 * interval '1 ms', now() + $4 * interval '1 ms') RETURNING id`,
 			s, stackID, userID, i).Scan(&ids[i]); err != nil {
 			t.Fatal(err)
 		}
@@ -57,9 +55,8 @@ func TestRecordAndReleaseDoNotDeadlock(t *testing.T) {
 	stackID, reqs := seedStack(t, pool, "req-aaaaaaaaaa", "req-bbbbbbbbbb")
 	short := map[uuid.UUID]string{reqs[0]: "req-aaaaaaaaaa", reqs[1]: "req-bbbbbbbbbb"}
 
-	writer := audit.NewWriter(platform.SystemClock{}, platform.RandomIDs{})
-	lockSvc := locks.NewService(locks.NewPostgresRepository(pool, writer), platform.SystemClock{}, time.Hour)
-	runSvc := runs.NewService(runs.NewPostgresRepository(pool), platform.SystemClock{})
+	svcs := newServices(pool)
+	lockSvc, runSvc := svcs.lock, svcs.run
 	worker := identity.Principal{Login: "internal-token", Type: identity.ActorGitHubActions}
 	for _, id := range reqs {
 		if _, err := lockSvc.Acquire(ctx, locks.AcquireCommand{StackID: stackID, RequestID: id, By: worker}); err != nil {

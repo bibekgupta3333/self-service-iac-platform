@@ -101,8 +101,9 @@ export default async function UpdateStackPage({ params, searchParams }: Props) {
           Update {stack.name}
         </h1>
         <p role="note" className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
-          The platform did not return this stack&apos;s current settings, so the form cannot start from what is deployed. Pick
-          the module to edit; the form then starts from its defaults.
+          No request carrying this stack&apos;s spec was found, so the resources it really contains are unknown. The form
+          cannot show what is deployed. If you pick a module, the form starts from that module&apos;s defaults; only the
+          platform can check the update against the stack, when you submit.
         </p>
         {modules.ok ? (
           <ul className="space-y-2">

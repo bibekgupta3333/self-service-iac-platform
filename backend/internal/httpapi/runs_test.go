@@ -88,7 +88,7 @@ func TestRunsEndToEndWithOIDC(t *testing.T) {
 		t.Fatal(err)
 	}
 	fr := &fakeRuns{}
-	h := NewRouter(Deps{Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DevAuthenticator{Principal: devPrincipal},
+	h := NewRouter(Deps{Policies: testPolicies(), Roles: noRoles{}, Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DevAuthenticator{Principal: devPrincipal},
 		Internal: AnyAuthenticator{NewOIDCAuthenticator(verifier), NewTokenAuthenticator(testInternalToken, releaseBot)},
 		Ready:    okPinger{}, PipelineHandlers: []RouteRegistrar{NewRunHandler(fr)}})
 
