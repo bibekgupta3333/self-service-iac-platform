@@ -1,0 +1,401 @@
+# Applies every stack root a push to main changes (docs/05-automation-pipeline.md
+# section 4.3). Local-first (ADR-0009): each job applies to its own LocalStack
+# service container with the dummy test/test credentials and the Terraform local
+# backend, so state and resources are thrown away when the job ends. The steps,
+# the lock and the reports are the production shape; only the backend and the
+# credentials change when the S3 backend and the iacp-apply role arrive.
+#
+#   detect -> changed stacks (tools/stack_pipeline detect, base = github.event.before),
+#             or the one stack named by workflow_dispatch
+#   apply  -> per stack, one at a time per stack (concurrency iacp-stack-<id>-apply):
+#               claim the platform stack lock (POST /v1/internal/stacks/{id}/lock)
+#               verify module pins, init, verify installed modules
+#               plan (or plan -destroy), show -json, conftest pre-apply gate
+#               report "plan"; plan-hash check against the approved hash
+#               apply, collect outputs, report "apply" and "summary"
+#               release the lock with its fencing token (always)
+#
+# While vars.IACP_API_URL is empty the lock claim and the reports are skipped with
+# a notice. Once it is set, the claim needs the stack and request UUIDs: until
+# GET /v1/internal/requests/by-path exists, only a workflow_dispatch that passes
+# them can apply, and a push fails closed instead of applying without the lock.
+name: apply
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "environments/**"
+  workflow_dispatch:
+    inputs:
+      stack_path:
+        description: Stack root to apply (environments/<env>/<team>/<stack>)
+        required: true
+        type: string
+      destroy:
+        description: Run plan -destroy and apply it (destroys the stack's resources)
+        required: false
+        type: boolean
+        default: false
+      stack_id:
+        description: Stack UUID, for the lock claim (required once IACP_API_URL is set)
+        required: false
+        type: string
+        default: ""
+      request_id:
+        description: UUID of the request that holds the stack lock (required once IACP_API_URL is set)
+        required: false
+        type: string
+        default: ""
+      approved_plan_hash:
+        description: Plan hash recorded at approval; the re-plan must match it
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  TF_IN_AUTOMATION: "1"
+  TF_INPUT: "0"
+  PYTHON_VERSION: "3.12"
+  CONFTEST_VERSION: 0.71.1
+  CONFTEST_SHA256: c3f6b2a753bd56e377a1e51a95ae3e057f926f2e9139f7d5b5dfbbaf810f7985
+  # Dummy credentials for LocalStack only; never real keys.
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  AWS_DEFAULT_REGION: us-east-1
+  # Same switch as pr-validate.yml: every pinned module tag must be published.
+  IACP_PIN_BOOTSTRAP: "false"
+
+jobs:
+  detect:
+    name: detect changed stacks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.detect.outputs.matrix }}
+      count: ${{ steps.detect.outputs.count }}
+      terraform_version: ${{ steps.versions.outputs.terraform_version }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install tool dependencies
+        run: python -m pip install --quiet "$(grep -E '^pyyaml==' tools/requirements.txt)"
+
+      - id: versions
+        name: Read tool versions
+        run: echo "terraform_version=$(cat .terraform-version)" >> "$GITHUB_OUTPUT"
+
+      # No --full-run-prefix: a pipeline change re-validates every stack in
+      # pr-validate, but apply only ever applies the stacks a push changed.
+      - id: detect
+        name: Map changed files to stack roots
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+          DISPATCH_STACK: ${{ inputs.stack_path }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # The detector validates the path (fails closed outside a stack root).
+            printf '%s/iacp.stack.json\n' "${DISPATCH_STACK%/}" \
+              | python -m tools.stack_pipeline detect --files-from - | tee "$RUNNER_TEMP/detect.json"
+            if [ "$(jq -r .count "$RUNNER_TEMP/detect.json")" != "1" ]; then
+              echo "::error::$DISPATCH_STACK is not an existing stack root"
+              exit 1
+            fi
+          else
+            base="$BEFORE_SHA"
+            if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
+              || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+              echo "::warning::push has no usable 'before' commit; diffing against the parent of $HEAD_SHA"
+              base="${HEAD_SHA}^"
+            fi
+            python -m tools.stack_pipeline detect --base "$base" --head "$HEAD_SHA" | tee "$RUNNER_TEMP/detect.json"
+          fi
+          {
+            echo "### Stacks to apply"
+            jq -r 'if .count == 0 then "No stack roots changed." else (.stacks[] | "- `\(.path)`") end' "$RUNNER_TEMP/detect.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  apply:
+    name: apply (${{ matrix.stack.path }})
+    needs: detect
+    if: needs.detect.outputs.count != '0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    # GitHub Environment per stack environment (required reviewers, OIDC subject
+    # bound to the iacp-apply role) arrives with WBS 6.6 / ADR-0009's end.
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        stack: ${{ fromJSON(needs.detect.outputs.matrix) }}
+    # One apply per stack across all runs, never cancelled mid-apply.
+    concurrency:
+      group: iacp-stack-${{ matrix.stack.id }}-apply
+      cancel-in-progress: false
+    services:
+      localstack:
+        image: localstack/localstack:4.4@sha256:b52c16663c70b7234f217cb993a339b46686e30a1a5d9279cb5feeb2202f837c
+        ports:
+          - 4566:4566
+        env:
+          SERVICES: s3,sqs,sns,lambda,iam,sts,kms,logs,cloudwatch,secretsmanager,events
+          AWS_DEFAULT_REGION: us-east-1
+        options: >-
+          --health-cmd "curl -sf http://localhost:4566/_localstack/health"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      AWS_ENDPOINT_URL: http://localhost:4566
+      STACK_ID: ${{ matrix.stack.id }}
+      STACK_PATH: ${{ matrix.stack.path }}
+      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform.d/plugin-cache
+      PYTHONPATH: ${{ github.workspace }}
+      IACP_API_URL: ${{ vars.IACP_API_URL }}
+      IACP_OIDC_AUDIENCE: ${{ vars.IACP_OIDC_AUDIENCE }}
+      DESTROY: ${{ github.event_name == 'workflow_dispatch' && inputs.destroy }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ matrix.stack.path }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Full history: module pins are checked against origin.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: ${{ needs.detect.outputs.terraform_version }}
+          terraform_wrapper: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install tool dependencies
+        working-directory: .
+        run: python -m pip install --quiet "$(grep -E '^pyyaml==' tools/requirements.txt)"
+
+      - name: Install conftest (checksum verified)
+        working-directory: .
+        run: |
+          tarball="conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSLo "$RUNNER_TEMP/$tarball" \
+            "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/${tarball}"
+          echo "${CONFTEST_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/bin" conftest
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Cache Terraform providers
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ env.TF_PLUGIN_CACHE_DIR }}
+          key: tf-providers-${{ runner.os }}-${{ hashFiles(format('{0}/.terraform.lock.hcl', matrix.stack.path)) }}
+          restore-keys: tf-providers-${{ runner.os }}-
+
+      # The lock route accepts OIDC tokens only from apply.yml / ttl-reaper.yml on
+      # main via push, workflow_dispatch or schedule (auth.RouteLocks).
+      - id: lock
+        name: Claim the platform stack lock
+        env:
+          IACP_INTERNAL_TOKEN: ${{ secrets.IACP_INTERNAL_TOKEN }}
+          LOCK_STACK_ID: ${{ inputs.stack_id }}
+          LOCK_REQUEST_ID: ${{ inputs.request_id }}
+        run: |
+          if [ -z "$IACP_API_URL" ]; then
+            echo "::notice title=Platform API not configured::stack lock not claimed for $STACK_PATH (local-first, ADR-0009)"
+            echo "claimed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -z "$LOCK_STACK_ID" ] || [ -z "$LOCK_REQUEST_ID" ]; then
+            echo "::error title=Stack lock::cannot claim the lock for $STACK_PATH: the stack and request UUIDs are" \
+              "unknown. GET /v1/internal/requests/by-path is not implemented yet; dispatch apply.yml with stack_id and request_id."
+            exit 1
+          fi
+          python -m tools.stack_pipeline lock acquire --stack-id "$LOCK_STACK_ID" --request-id "$LOCK_REQUEST_ID"
+
+      - id: pins
+        name: Verify module pins
+        run: |
+          args=(--mirror "$RUNNER_TEMP/module-mirror.git")
+          if [ "${IACP_PIN_BOOTSTRAP:-false}" = "true" ]; then args+=(--allow-unpublished); fi
+          python -m tools.stack_pipeline --repo-root "$GITHUB_WORKSPACE" verify-pins . "${args[@]}"
+
+      - id: init
+        name: terraform init (local backend)
+        run: |
+          mkdir -p "$TF_PLUGIN_CACHE_DIR"
+          terraform init -input=false -lockfile=readonly -no-color
+
+      - id: modules
+        name: Verify installed modules
+        run: python -m tools.stack_pipeline --repo-root "$GITHUB_WORKSPACE" verify-modules .
+
+      - id: plan
+        name: terraform plan${{ github.event_name == 'workflow_dispatch' && inputs.destroy && ' -destroy' || '' }}
+        run: |
+          mode=()
+          if [ "$DESTROY" = "true" ]; then mode=(-destroy); fi
+          terraform plan -input=false -no-color "${mode[@]}" -out=tfplan 2>&1 | tee "$RUNNER_TEMP/plan.txt"
+
+      - id: show
+        name: terraform show -json
+        run: terraform show -json tfplan > "$RUNNER_TEMP/plan.json"
+
+      # Pre-apply policy gate: the same OPA policies the PR passed, on the plan
+      # that is about to be applied.
+      - id: conftest
+        name: OPA policies (conftest)
+        run: |
+          python -m tools.stack_pipeline --repo-root "$GITHUB_WORKSPACE" context . > "$RUNNER_TEMP/policy-context.json"
+          status=0
+          conftest test "$RUNNER_TEMP/plan.json" \
+            --policy "$GITHUB_WORKSPACE/policies/opa" \
+            --data "$RUNNER_TEMP/policy-context.json" \
+            --output json > "$RUNNER_TEMP/conftest.json" || status=$?
+          jq -r '.[] | (.failures[]? | "deny: \(.msg)"), (.warnings[]? | "warn: \(.msg)")' "$RUNNER_TEMP/conftest.json" || true
+          exit "$status"
+
+      - id: summary
+        name: Plan summary
+        if: always() && steps.init.outcome == 'success'
+        env:
+          OUT_PINS: ${{ steps.pins.outcome }}
+          OUT_INIT: ${{ steps.init.outcome }}
+          OUT_MODULES: ${{ steps.modules.outcome }}
+          OUT_PLAN: ${{ steps.plan.outcome }}
+          OUT_SHOW: ${{ steps.show.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          out="$RUNNER_TEMP/summary"
+          mkdir -p "$out"
+          python -m tools.stack_pipeline --repo-root "$GITHUB_WORKSPACE" summary . \
+            --plan "$RUNNER_TEMP/plan.json" \
+            --conftest "$RUNNER_TEMP/conftest.json" \
+            --plan-text "$RUNNER_TEMP/plan.txt" \
+            --step "module pins=$OUT_PINS" --step "init=$OUT_INIT" --step "installed modules=$OUT_MODULES" \
+            --step "plan=$OUT_PLAN" --step "show -json=$OUT_SHOW" \
+            --commit "$GITHUB_SHA" --run-url "$RUN_URL" \
+            --markdown-out "$out/plan.md" --json-out "$out/summary.json"
+          sed 's/^### pr-validate:/### apply plan:/' "$out/plan.md" >> "$GITHUB_STEP_SUMMARY"
+
+      # fail-on-error: a 409 stale_fencing_token (another request took the lock)
+      # aborts the job before anything is applied.
+      - name: Report plan
+        if: always() && steps.summary.outcome == 'success'
+        uses: ./.github/actions/iacp-report
+        with:
+          api-url: ${{ vars.IACP_API_URL }}
+          audience: ${{ vars.IACP_OIDC_AUDIENCE }}
+          internal-token: ${{ secrets.IACP_INTERNAL_TOKEN }}
+          pipeline: apply
+          stack-path: ${{ matrix.stack.path }}
+          stage: plan
+          summary-json: ${{ runner.temp }}/summary/summary.json
+          fencing-token: ${{ steps.lock.outputs.fencing_token }}
+          fail-on-error: "true"
+
+      # What is applied is what was approved. The approved hash comes from the
+      # approval record (GET /v1/internal/requests/by-path, not implemented yet)
+      # or a workflow_dispatch input; without one the check is pending, not skipped
+      # silently. In the hermetic CI both plans start from an empty LocalStack, so
+      # the PR plan and this re-plan hash the same when nothing else changed.
+      - id: planhash
+        name: Verify the plan hash against the approved plan
+        env:
+          APPROVED_PLAN_HASH: ${{ inputs.approved_plan_hash }}
+        run: |
+          actual="$(jq -r '.plan_hash // empty' "$RUNNER_TEMP/summary/summary.json")"
+          if [ -z "$APPROVED_PLAN_HASH" ]; then
+            echo "::notice title=Plan hash check pending::no approved plan hash for $STACK_PATH (needs GET /v1/internal/requests/by-path); re-plan hash $actual"
+            exit 0
+          fi
+          if [ "$actual" != "$APPROVED_PLAN_HASH" ]; then
+            echo "::error title=plan_mismatch::the re-plan ($actual) differs from the approved plan ($APPROVED_PLAN_HASH); re-validation required"
+            exit 1
+          fi
+          echo "plan hash matches the approved plan: $actual"
+
+      - id: apply
+        name: terraform apply
+        run: |
+          set +e
+          terraform apply -input=false -no-color tfplan 2>&1 | tee "$RUNNER_TEMP/apply.log"
+          code="${PIPESTATUS[0]}"
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          exit "$code"
+
+      # Values stay in the job: only names reach the step summary, and the report
+      # replaces sensitive values with "<sensitive>". Never uploaded as an artifact.
+      - id: outputs
+        name: Collect outputs
+        if: steps.apply.outcome == 'success' && env.DESTROY != 'true'
+        run: |
+          terraform output -json > "$RUNNER_TEMP/outputs.json"
+          {
+            echo "### Outputs of \`$STACK_PATH\`"
+            jq -r 'to_entries[] | "- `\(.key)`\(if .value.sensitive then " (sensitive)" else "" end)"' "$RUNNER_TEMP/outputs.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report apply
+        if: always() && steps.apply.outcome != 'skipped'
+        uses: ./.github/actions/iacp-report
+        with:
+          api-url: ${{ vars.IACP_API_URL }}
+          audience: ${{ vars.IACP_OIDC_AUDIENCE }}
+          internal-token: ${{ secrets.IACP_INTERNAL_TOKEN }}
+          pipeline: apply
+          stack-path: ${{ matrix.stack.path }}
+          stage: ${{ env.DESTROY == 'true' && 'destroy' || 'apply' }}
+          status: ${{ steps.apply.outcome }}
+          terraform-exit-code: ${{ steps.apply.outputs.exit_code }}
+          fencing-token: ${{ steps.lock.outputs.fencing_token }}
+
+      # A passed "summary" finishes the run as succeeded; anything else as failed.
+      - name: Report summary
+        if: always() && steps.lock.outcome == 'success'
+        uses: ./.github/actions/iacp-report
+        with:
+          api-url: ${{ vars.IACP_API_URL }}
+          audience: ${{ vars.IACP_OIDC_AUDIENCE }}
+          internal-token: ${{ secrets.IACP_INTERNAL_TOKEN }}
+          pipeline: apply
+          stack-path: ${{ matrix.stack.path }}
+          stage: summary
+          status: ${{ job.status }}
+          outputs-json: ${{ steps.outputs.outcome == 'success' && format('{0}/outputs.json', runner.temp) || '' }}
+          terraform-exit-code: ${{ steps.apply.outputs.exit_code }}
+          error-message: ${{ job.status != 'success' && format('apply.yml did not finish ({0}); see the workflow run log', job.status) || '' }}
+          fencing-token: ${{ steps.lock.outputs.fencing_token }}
+
+      - name: Release the platform stack lock
+        if: always() && steps.lock.outputs.claimed == 'true'
+        env:
+          IACP_INTERNAL_TOKEN: ${{ secrets.IACP_INTERNAL_TOKEN }}
+          LOCK_STACK_ID: ${{ inputs.stack_id }}
+          LOCK_REQUEST_ID: ${{ inputs.request_id }}
+          FENCING_TOKEN: ${{ steps.lock.outputs.fencing_token }}
+        run: |
+          python -m tools.stack_pipeline lock release \
+            --stack-id "$LOCK_STACK_ID" --request-id "$LOCK_REQUEST_ID" --fencing-token "$FENCING_TOKEN"
