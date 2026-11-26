@@ -168,7 +168,7 @@ func TestInternalRoutesUseTheInternalAuthenticator(t *testing.T) {
 }
 
 func TestMethodNotAllowedIsProblemWithAllow(t *testing.T) {
-	h := newTestRouter(&fakeCatalog{versions: []catalog.ModuleVersion{sqsVersion()}}, okPinger{}, NewRequestHandler(&fakeRequests{}))
+	h := newTestRouter(&fakeCatalog{versions: []catalog.ModuleVersion{sqsVersion()}}, okPinger{}, NewRequestHandler(&fakeRequests{}, allowAllAccess{}))
 	tests := []struct {
 		method, path, allow string
 	}{

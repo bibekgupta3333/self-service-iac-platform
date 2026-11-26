@@ -138,6 +138,10 @@ func (r *PostgresRepository) List(ctx context.Context, f ListFilter) ([]*Request
 	if f.After != nil {
 		afterTS, afterID = f.After.CreatedAt, f.After.ID
 	}
+	teamIDs := f.TeamIDs
+	if teamIDs == nil {
+		teamIDs = []uuid.UUID{}
+	}
 	rows, err := r.pool.Query(ctx, `SELECT `+requestCols+`
 		FROM requests r
 		JOIN stacks s ON s.id = r.stack_id
@@ -147,8 +151,9 @@ func (r *PostgresRepository) List(ctx context.Context, f ListFilter) ([]*Request
 		  AND ($3 = '' OR r.kind::text = $3)
 		  AND ($4::uuid IS NULL OR r.created_by = $4)
 		  AND ($5::timestamptz IS NULL OR (r.created_at, r.id) < ($5, $6::uuid))
+		  AND ($8 OR s.team_id = ANY($9::uuid[]))
 		ORDER BY r.created_at DESC, r.id DESC
-		LIMIT $7`, f.Team, string(f.Status), string(f.Kind), f.CreatedBy, afterTS, afterID, f.Limit)
+		LIMIT $7`, f.Team, string(f.Status), string(f.Kind), f.CreatedBy, afterTS, afterID, f.Limit, f.AllTeams, teamIDs)
 	if err != nil {
 		return nil, fmt.Errorf("query requests: %w", err)
 	}

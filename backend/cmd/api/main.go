@@ -129,7 +129,7 @@ func run() error {
 		Ready:    pool,
 		Catalog:  httpapi.NewCatalogHandler(catalogSvc),
 		Public: []httpapi.RouteRegistrar{
-			httpapi.NewRequestHandler(requestSvc),
+			httpapi.NewRequestHandler(requestSvc, requests.NewAccess(pool, identity.NewUserStore(pool))),
 			httpapi.NewAuditHandler(audit.NewVerifier(pool)),
 			ua.Handler,
 		},

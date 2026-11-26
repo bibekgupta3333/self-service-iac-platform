@@ -278,7 +278,7 @@ func TestDevModeUnchanged(t *testing.T) {
 		Logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		Auth:        DevAuthenticator{Principal: adminDev()},
 		Ready:       okPinger{},
-		Public:      []RouteRegistrar{NewRequestHandler(&fakeRequests{byHash: map[string]*requests.Request{}}), NewAuditHandler(&fakeVerifier{})},
+		Public:      []RouteRegistrar{NewRequestHandler(&fakeRequests{byHash: map[string]*requests.Request{}}, allowAllAccess{}), NewAuditHandler(&fakeVerifier{})},
 		Policies:    DefaultPolicies(),
 		Roles:       flowRoles{role: rbac.RoleNone},
 		DenialAudit: &flowAudit{},

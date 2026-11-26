@@ -69,7 +69,7 @@ func TestGitHubLoginEndToEnd(t *testing.T) {
 	ah := &AuthHandler{Login: login, Sessions: sessions, Profiles: users, Audit: recorder, Mode: "github"}
 	h := NewRouter(Deps{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: NewSessionAuthenticator(sessions), Ready: okPinger{},
-		Public: []RouteRegistrar{ah, NewRequestHandler(&fakeRequests{byHash: nil}), NewAuditHandler(audit.NewVerifier(pool))}, PublicHandlers: []RouteRegistrar{ah.Public()},
+		Public: []RouteRegistrar{ah, NewRequestHandler(&fakeRequests{byHash: nil}, allowAllAccess{}), NewAuditHandler(audit.NewVerifier(pool))}, PublicHandlers: []RouteRegistrar{ah.Public()},
 		Policies: DefaultPolicies(), Roles: users, DenialAudit: recorder,
 	})
 	call := func(method, path string, cookies []*http.Cookie, hdr ...string) *httptest.ResponseRecorder {

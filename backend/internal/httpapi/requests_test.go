@@ -57,7 +57,7 @@ func (f *fakeRequests) List(_ context.Context, flt requests.ListFilter) ([]*requ
 
 func TestRequestHandlers(t *testing.T) {
 	svc := &fakeRequests{byHash: map[string]*requests.Request{}}
-	h := newTestRouter(&fakeCatalog{versions: []catalog.ModuleVersion{sqsVersion()}}, okPinger{}, NewRequestHandler(svc))
+	h := newTestRouter(&fakeCatalog{versions: []catalog.ModuleVersion{sqsVersion()}}, okPinger{}, NewRequestHandler(svc, allowAllAccess{}))
 	body := `{"kind":"create","team":"payments","environment":"development","stack":"order-events",
 		"resources":[{"name":"orders_queue","module":"sqs","version":"1.3.0","inputs":{"name":"orders"}}]}`
 	const key = "6a1f0c7e-2b9d-4d3e-a1c2-9f8e7d6c5b4a"

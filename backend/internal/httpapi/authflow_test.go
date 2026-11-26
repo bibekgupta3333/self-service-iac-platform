@@ -124,7 +124,7 @@ func newFlow(t *testing.T, secure bool, role rbac.Role) *flow {
 		Auth:           NewSessionAuthenticator(f.sess),
 		Ready:          okPinger{},
 		Catalog:        NewCatalogHandler(&fakeCatalog{versions: []catalog.ModuleVersion{sqsVersion()}}),
-		Public:         []RouteRegistrar{ah, NewRequestHandler(f.reqs), NewAuditHandler(&fakeVerifier{})},
+		Public:         []RouteRegistrar{ah, NewRequestHandler(f.reqs, allowAllAccess{}), NewAuditHandler(&fakeVerifier{})},
 		PublicHandlers: []RouteRegistrar{ah.Public()},
 		Policies:       DefaultPolicies(),
 		Roles:          flowRoles{role},

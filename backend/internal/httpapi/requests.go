@@ -23,11 +23,37 @@ type RequestService interface {
 	List(ctx context.Context, f requests.ListFilter) ([]*requests.Request, *requests.Cursor, error)
 }
 
-// RequestHandler serves /v1/requests.
-type RequestHandler struct{ svc RequestService }
+// RequestAccess scopes reads to the caller's teams (requests.Access).
+type RequestAccess interface {
+	Visible(ctx context.Context, p identity.Principal) (identity.Visibility, error)
+	CanView(ctx context.Context, v identity.Visibility, id uuid.UUID) (bool, error)
+}
 
-// NewRequestHandler returns a RequestHandler.
-func NewRequestHandler(svc RequestService) *RequestHandler { return &RequestHandler{svc: svc} }
+// denyAccess is the fail-closed default: nothing is visible.
+type denyAccess struct{}
+
+func (denyAccess) Visible(context.Context, identity.Principal) (identity.Visibility, error) {
+	return identity.Visibility{}, nil
+}
+
+func (denyAccess) CanView(context.Context, identity.Visibility, uuid.UUID) (bool, error) {
+	return false, nil
+}
+
+// RequestHandler serves /v1/requests.
+type RequestHandler struct {
+	svc    RequestService
+	access RequestAccess
+}
+
+// NewRequestHandler returns a RequestHandler. Reads are limited to the teams access reports
+// as visible; a nil access sees nothing.
+func NewRequestHandler(svc RequestService, access RequestAccess) *RequestHandler {
+	if access == nil {
+		access = denyAccess{}
+	}
+	return &RequestHandler{svc: svc, access: access}
+}
 
 // Routes implements RouteRegistrar.
 func (h *RequestHandler) Routes(r chi.Router) {
@@ -119,6 +145,24 @@ func (h *RequestHandler) get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, apperr.NotFound("request %q not found", chi.URLParam(r, "id")))
 		return
 	}
+	p, err := identity.FromContext(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	vis, err := h.access.Visible(r.Context(), p)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	// A request in another team is indistinguishable from one that does not exist.
+	if ok, err := h.access.CanView(r.Context(), vis, id); err != nil {
+		writeError(w, r, err)
+		return
+	} else if !ok {
+		writeError(w, r, apperr.NotFound("request %q not found", chi.URLParam(r, "id")))
+		return
+	}
 	req, err := h.svc.Get(r.Context(), id)
 	if err != nil {
 		writeError(w, r, err)
@@ -130,6 +174,18 @@ func (h *RequestHandler) get(w http.ResponseWriter, r *http.Request) {
 func (h *RequestHandler) list(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f := requests.ListFilter{Team: q.Get("team"), Status: requests.Status(q.Get("status")), Kind: requests.Kind(q.Get("kind"))}
+	// Scope to the caller's teams; ?team= can only narrow within them.
+	caller, err := identity.FromContext(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	vis, err := h.access.Visible(r.Context(), caller)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	f.AllTeams, f.TeamIDs = vis.SQLArgs()
 	if v := q.Get("limit"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 1 {

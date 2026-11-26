@@ -119,7 +119,11 @@ type ListFilter struct {
 	Status    Status
 	Kind      Kind
 	CreatedBy *uuid.UUID
-	Limit     int
+	// AllTeams and TeamIDs scope the list to the caller's visible teams (identity.Visibility).
+	// The zero value matches no team, so a caller that forgets to set them sees nothing.
+	AllTeams bool
+	TeamIDs  []uuid.UUID
+	Limit    int
 	After     *Cursor
 }
 
