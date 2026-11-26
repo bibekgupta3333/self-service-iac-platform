@@ -3,8 +3,10 @@
 # container with the dummy test/test credentials and the Terraform local backend.
 # No cloud credentials or OIDC roles are used until ADR-0009 ends.
 #
-#   detect    -> changed stacks as a JSON matrix (tools/stack_pipeline)
-#   validate  -> per stack: fmt, module pins, init, validate, TFLint, Checkov,
+#   detect    -> changed stacks as a JSON matrix (tools/stack_pipeline); fails on
+#                any environments/ path outside a valid stack root
+#   validate  -> per stack: fmt, module pins, init, installed-module check,
+#                validate, TFLint, Checkov,
 #                plan, show -json, conftest, hermetic LocalStack apply round
 #                trip; uploads the plan summary
 #   comment   -> sticky PR comment per stack (the only job that can write to the PR)
@@ -37,6 +39,11 @@ env:
   AWS_ACCESS_KEY_ID: test
   AWS_SECRET_ACCESS_KEY: test
   AWS_DEFAULT_REGION: us-east-1
+  # ADR-0009 bootstrap: serve module tags that module-release (WBS 3.6) has not
+  # published yet from a local mirror of a commit on main. Set to "false" (or
+  # delete) once every pinned tag is published; verify-pins then refuses any
+  # unpublished tag. See docs/05 section 4.2, "Module pins".
+  IACP_PIN_BOOTSTRAP: "true"
 
 jobs:
   detect:
@@ -191,17 +198,25 @@ jobs:
       - id: pins
         name: Verify module pins
         # Published tags must resolve to the commit in iacp.stack.json. Unpublished tags
-        # (before module-release, WBS 3.6) are served from a local mirror of a commit
-        # already on main; the source string, and so the policy input, is unchanged.
+        # are refused unless IACP_PIN_BOOTSTRAP is "true" (ADR-0009); then they are served
+        # from a local mirror of a commit already on main. The source string, and so the
+        # policy input, is unchanged.
         run: |
-          python -m tools.stack_pipeline --repo-root "$GITHUB_WORKSPACE" verify-pins . \
-            --mirror "$RUNNER_TEMP/module-mirror.git"
+          args=(--mirror "$RUNNER_TEMP/module-mirror.git")
+          if [ "${IACP_PIN_BOOTSTRAP:-false}" = "true" ]; then args+=(--allow-unpublished); fi
+          python -m tools.stack_pipeline --repo-root "$GITHUB_WORKSPACE" verify-pins . "${args[@]}"
 
       - id: init
         name: terraform init (local backend)
         run: |
           mkdir -p "$TF_PLUGIN_CACHE_DIR"
           terraform init -input=false -lockfile=readonly -no-color
+
+      - id: modules
+        name: Verify installed modules
+        # One-to-one match between the module calls init installed and the pins,
+        # exact pinned sources, and each fetched checkout at its recorded commit.
+        run: python -m tools.stack_pipeline --repo-root "$GITHUB_WORKSPACE" verify-modules .
 
       - id: validate
         name: terraform validate
@@ -219,8 +234,9 @@ jobs:
       - id: checkov
         name: Checkov (stack and downloaded modules)
         # CKV_TF_1 wants a commit hash in the source string. Stacks pin exact release
-        # tags (enforced by OPA iacp.forbidden.module_source) and the tag-to-commit
-        # binding is verified by the "Verify module pins" step above.
+        # tags (enforced by OPA iacp.forbidden.module_source), and the tag-to-commit
+        # binding is verified twice above: "Verify module pins" against the remote and
+        # "Verify installed modules" against what init actually fetched.
         run: |
           checkov --directory . --framework terraform \
             --download-external-modules true \
@@ -273,6 +289,7 @@ jobs:
           OUT_FMT: ${{ steps.fmt.outcome }}
           OUT_PINS: ${{ steps.pins.outcome }}
           OUT_INIT: ${{ steps.init.outcome }}
+          OUT_MODULES: ${{ steps.modules.outcome }}
           OUT_VALIDATE: ${{ steps.validate.outcome }}
           OUT_TFLINT: ${{ steps.tflint.outcome }}
           OUT_CHECKOV: ${{ steps.checkov.outcome }}
@@ -289,6 +306,7 @@ jobs:
             --conftest "$RUNNER_TEMP/conftest.json" \
             --plan-text "$RUNNER_TEMP/plan.txt" \
             --step "fmt=$OUT_FMT" --step "module pins=$OUT_PINS" --step "init=$OUT_INIT" \
+            --step "installed modules=$OUT_MODULES" \
             --step "validate=$OUT_VALIDATE" --step "tflint=$OUT_TFLINT" --step "checkov=$OUT_CHECKOV" \
             --step "plan=$OUT_PLAN" --step "show -json=$OUT_SHOW" --step "LocalStack apply round trip=$OUT_ROUNDTRIP" \
             --commit "$HEAD_SHA" --run-url "$RUN_URL" \
