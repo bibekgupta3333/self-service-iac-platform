@@ -14,6 +14,7 @@ provider "aws" {
     iam        = "http://localhost:4566"
     kms        = "http://localhost:4566"
     sns        = "http://localhost:4566"
+    lambda     = "http://localhost:4566"
     sqs        = "http://localhost:4566"
     sts        = "http://localhost:4566"
   }
@@ -105,7 +106,7 @@ run "alarms_dashboard_subscriptions" {
   variables {
     name = "tftest-mon-full"
     subscriptions = {
-      ops-queue = { protocol = "sqs", endpoint = run.setup.queue_arn, raw_message_delivery = true }
+      on-call = { protocol = "email", endpoint = "on-call@example.com" }
     }
     sqs_queue_alarms = {
       orders = { queue_name = run.setup.queue_name, oldest_message_age_seconds = 600, visible_messages_threshold = 100 }
@@ -180,7 +181,7 @@ run "alarms_dashboard_subscriptions" {
   }
 
   assert {
-    condition     = aws_sns_topic_subscription.this["ops-queue"].protocol == "sqs" && aws_sns_topic_subscription.this["ops-queue"].endpoint == run.setup.queue_arn && aws_sns_topic_subscription.this["ops-queue"].raw_message_delivery
+    condition     = aws_sns_topic_subscription.this["on-call"].protocol == "email" && aws_sns_topic_subscription.this["on-call"].endpoint == "on-call@example.com" && length(aws_lambda_permission.sns) == 0
     error_message = "Subscriptions must be created from the input."
   }
 }
@@ -239,6 +240,43 @@ run "extra_publishers" {
   }
 }
 
+run "lambda_subscription_gets_scoped_permission" {
+  command = plan
+
+  variables {
+    subscriptions = {
+      responder = { protocol = "lambda", endpoint = "arn:aws:lambda:us-east-1:000000000000:function:platform-development-responder" }
+    }
+  }
+
+  assert {
+    condition     = keys(aws_lambda_permission.sns) == ["responder"]
+    error_message = "Only lambda subscriptions may get an invoke permission."
+  }
+
+  assert {
+    condition = (
+      aws_lambda_permission.sns["responder"].principal == "sns.amazonaws.com" &&
+      aws_lambda_permission.sns["responder"].action == "lambda:InvokeFunction" &&
+      aws_lambda_permission.sns["responder"].function_name == "arn:aws:lambda:us-east-1:000000000000:function:platform-development-responder" &&
+      aws_lambda_permission.sns["responder"].source_account == "000000000000" &&
+      startswith(aws_lambda_permission.sns["responder"].statement_id, "iacp-sns-") &&
+      length(aws_lambda_permission.sns["responder"].statement_id) <= 100
+    )
+    error_message = "The invoke permission must be limited to SNS, this account and the subscribed function."
+  }
+}
+
+run "rejects_sqs_subscription" {
+  command = plan
+
+  variables {
+    subscriptions = { queue = { protocol = "sqs", endpoint = "arn:aws:sqs:us-east-1:000000000000:platform-development-jobs" } }
+  }
+
+  expect_failures = [var.subscriptions]
+}
+
 run "rejects_http_subscription" {
   command = plan
 
@@ -276,6 +314,26 @@ run "rejects_widget_with_metrics_and_markdown" {
     dashboard_widgets = [
       { title = "Both", markdown = "x", metrics = [{ namespace = "AWS/SQS", metric_name = "NumberOfMessagesSent" }] },
     ]
+  }
+
+  expect_failures = [var.dashboard_widgets]
+}
+
+run "rejects_oversize_markdown" {
+  command = plan
+
+  variables {
+    dashboard_widgets = [{ title = "Runbook", markdown = join("", [for i in range(201) : "0123456789"]) }]
+  }
+
+  expect_failures = [var.dashboard_widgets]
+}
+
+run "rejects_too_much_markdown_in_total" {
+  command = plan
+
+  variables {
+    dashboard_widgets = [for i in range(6) : { title = "Notes ${i}", markdown = join("", [for j in range(200) : "0123456789"]) }]
   }
 
   expect_failures = [var.dashboard_widgets]
