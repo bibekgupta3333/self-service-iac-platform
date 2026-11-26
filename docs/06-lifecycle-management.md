@@ -62,7 +62,7 @@ Transitions are implemented in `backend/internal/request/fsm.go` as a table-driv
 - For every `stack_resources` row the catalog computes an **upgrade path**: the list of released versions newer than the pinned one, grouped by SemVer class.
 - An upgrade is an `upgrade` request that changes only the `ref` (and, for majors, inputs) of one module instance. It produces a normal PR whose plan shows the real impact.
 
-**Upgrade-path logic** (`backend/internal/catalog/upgrade.go`):
+**Upgrade-path logic** (`backend/internal/catalog/upgrade.go`, pure, `GET /v1/catalog/modules/{name}/upgrade-path?from=`):
 
 ```text
 current = 1.2.0, available = [1.2.1, 1.3.0, 1.4.2, 2.0.0, 2.1.0]
@@ -70,7 +70,18 @@ current = 1.2.0, available = [1.2.1, 1.3.0, 1.4.2, 2.0.0, 2.1.0]
 patch  target = highest 1.2.x            -> 1.2.1
 minor  target = highest 1.x.y            -> 1.4.2
 major  target = highest overall          -> 2.1.0  (path: 1.4.2 -> 2.0.0 -> 2.1.0)
+next   = highest at most one major up    -> 2.1.0  (what one upgrade request may pin)
 ```
+
+Yanked versions are skipped, pre-releases too unless one is the explicit target. Each step is marked patch, minor or major against the step before it, and carries the version's changelog and upgrade notes ([04 §5.2](04-module-registry.md#52-semver-rules-for-infrastructure-modules)).
+
+**What is built (WBS 8.2).**
+
+- The upgrade-path API above and `kind: upgrade` requests ([03 §6.4](03-data-model-and-api.md#64-requests)): `{"stack_id", "upgrades": [{"resource", "to_version"}], "acknowledge_breaking"}`. The request keeps every resource and input of the stack's newest live spec and re-pins the named resources; it is validated like an update against the target versions (exists, not yanked, current inputs valid under the target's input schema, references to outputs still resolve). A downgrade (`not_an_upgrade`), a move across more than one major (`major_jump_too_large`) and a major without `acknowledge_breaking: true` are refused. It then takes the same lock, queue, idempotency, audit and RBAC path as an update (developer; the stack must be `active`, `drifted` or `failed`).
+- The generator renders the new pinned ref like any update; the PR body lists the moves and warns on a major.
+- Portal: the stack page lists each resource's pinned version with "Upgrade available" (or "Major upgrade available"), the path and the changelog per version. "Upgrade to X" opens a confirmation that shows the major's migration notes first and requires them to be acknowledged, then posts the request with an Idempotency-Key.
+
+Not built yet: "must step through the latest `1.x` before `2.0.0`" (only the one-major-at-a-time rule is enforced), new required inputs filled in during the upgrade (the API answers `upgrade_requires_input_changes`; set them with an update first), manifest input renames, `auto_patch`, worker suggestions, the yanked-pin `action_required` flow, `upgrade.rego`, the compatibility check against the environment's Terraform/provider pins, and `GET /stacks/{id}/upgrades` (the portal combines the spec with `upgrade-path`). `requests` has no `from_version`/`to_version` columns: the moves live in the request spec (`upgrades`) and the `request.created` audit payload.
 
 | Class | Portal behaviour | Automation | Requirements |
 |---|---|---|---|
@@ -90,7 +101,7 @@ moved {
 
 Where a migration cannot be expressed with `moved` (e.g. a resource moves between modules in different stacks), the major's `### Migration` section must describe it, and the upgrade is executed by the platform team using the state-surgery break-glass workflow (§2.3). OPA policy `upgrade.rego` denies any upgrade plan that destroys a stateful resource (`aws_s3_bucket`, `aws_db_instance`, `aws_sqs_queue`, `aws_elasticache_replication_group`, `aws_kms_key`) unless the request carries an approved `allow_replace` exception.
 
-**Data touched.** `module_versions` (read: `upgrade_notes`, `status`), `stack_resources.module_version_id` (updated on apply), `requests` (`kind='upgrade'`, `from_version`, `to_version`), `audit_events`.
+**Data touched.** `module_versions` (read: `upgrade_notes`, `changelog_md`, `status`), `stack_resources.module_version_id` (updated on apply, once applied specs are tracked), `requests` (`kind='upgrade'`, `spec.upgrades[]` with `from_version`, `to_version` and `change`), `audit_events` (`request.created` carries the same list).
 
 **Edge cases.**
 

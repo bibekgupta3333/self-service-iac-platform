@@ -134,6 +134,7 @@ CREATE TABLE module_versions (
     tf_version_range  text        NOT NULL,              -- ">= 1.10, < 2.0"
     aws_provider_range text       NOT NULL,              -- "~> 5.80"
     changelog_md      text,
+    upgrade_notes     text,                              -- migration notes (migration 0015); NULL: read from changelog_md
     status            module_status NOT NULL DEFAULT 'active',
     deprecation_note  text,
     released_by       text        NOT NULL,              -- github login of tagger
@@ -653,10 +654,10 @@ RBAC column uses team roles (see [07-security-and-policy.md](07-security-and-pol
 | GET | `/catalog/modules/{name}` | Module detail, owners, README. | any |
 | GET | `/catalog/modules/{name}/versions` | Versions (SemVer desc), status, release date. | any |
 | GET | `/catalog/modules/{name}/versions/{version}` | Manifest, `inputs_schema`, outputs, cost hints. | any |
-| GET | `/catalog/modules/{name}/upgrade-path?from=1.2.0&to=latest` | Intermediate versions, breaking flags, concatenated changelog. | any |
+| GET | `/catalog/modules/{name}/upgrade-path?from=1.2.0&to=latest` | Versions after `from` up to `to` (default `latest`), oldest first, each marked `patch`/`minor`/`major` with its changelog and upgrade notes; the patch/minor/major targets and `next`, the newest version one upgrade request may pin (example below). | any |
 | GET | `/catalog/modules/{name}/usage` | Stacks using each version (fleet view). | maintainer of owning team / admin |
 | POST | `/catalog/modules/{name}/versions/{version}/deprecate` | Mark deprecated with note. | module owner / admin |
-| POST | `/internal/catalog/index` | Index a released version: `{module, version, git_tag, commit_sha}`; backend fetches `module.yaml` at that SHA (called by `module-release.yml`). Until the GitHub client lands, the parsed manifest is sent inline. A re-index that changes owners or other metadata writes a `module.updated` audit event. | OIDC JWT: `module-release.yml@refs/heads/main` (interim: shared bearer token `IACP_INTERNAL_TOKEN`, constant-time compare; no token configured means 401) |
+| POST | `/internal/catalog/index` | Index a released version: `{module, version, git_tag, commit_sha}`; backend fetches `module.yaml` at that SHA (called by `module-release.yml`). Until the GitHub client lands, the parsed manifest is sent inline, with the optional `changelog_md` (the version's CHANGELOG section) and `upgrade_notes` (its `### Migration` or `### Upgrade notes` subsection, else `module.yaml` `upgrade.notes`), each at most 64 KiB. Both are optional, so older release tooling still passes the strict decoder. A re-index that changes owners or other metadata writes a `module.updated` audit event. | OIDC JWT: `module-release.yml@refs/heads/main` (interim: shared bearer token `IACP_INTERNAL_TOKEN`, constant-time compare; no token configured means 401) |
 
 `GET /v1/catalog/modules/sqs/versions/1.3.0`
 
@@ -693,6 +694,25 @@ RBAC column uses team roles (see [07-security-and-policy.md](07-security-and-pol
 }
 ```
 
+`GET /v1/catalog/modules/sqs/upgrade-path?from=1.2.0` (WBS 8.2)
+
+```json
+{
+  "module": "sqs", "from": "1.2.0", "to": "2.1.0", "up_to_date": false,
+  "change": "major", "majors_crossed": 1, "next": "2.1.0",
+  "targets": { "patch": "1.2.1", "minor": "1.4.2", "major": "2.1.0" },
+  "steps": [
+    { "version": "1.2.1", "git_tag": "modules/sqs/v1.2.1", "status": "active", "released_at": "…",
+      "change": "patch", "breaking": false, "changelog_md": "### Fixed\n- …", "upgrade_notes": "" },
+    { "version": "1.4.2", "change": "minor", "breaking": false, "…": "…" },
+    { "version": "2.0.0", "change": "major", "breaking": true, "upgrade_notes": "Set `dlq_name` …", "…": "…" },
+    { "version": "2.1.0", "change": "minor", "breaking": false, "…": "…" }
+  ]
+}
+```
+
+The logic is pure (`catalog.BuildUpgradePath`): steps are the usable (not yanked), released versions after `from` up to and including `to` (a pre-release only when it is `to`); each step's `change` is its SemVer class relative to the previous step. `from` must be a version in the catalog, a yanked one too. `next` is the newest step at most one major above `from`, because one upgrade request crosses at most one major. `upgrade_notes` falls back to the `### Migration` subsection of `changelog_md` for versions indexed before migration 0015. Errors: `400` without `from`, `422 validation_failed` for a malformed `from`/`to`, `404` for an unknown module or version, `422 module_version_unavailable` for a yanked `to`, `422 not_an_upgrade` for a `to` older than `from`.
+
 ### 6.3 Stacks
 
 | Method | Path | Description | RBAC |
@@ -702,7 +722,7 @@ RBAC column uses team roles (see [07-security-and-policy.md](07-security-and-pol
 | GET | `/stacks/{id}/requests` | Request history. | viewer |
 | GET | `/stacks/{id}/outputs` | Non-sensitive outputs. | viewer |
 | GET | `/stacks/{id}/files` | Current generated files (from `main`). | viewer |
-| GET | `/stacks/{id}/upgrades` | Available module upgrades per resource. | viewer |
+| GET | `/stacks/{id}/upgrades` | Available module upgrades per resource. Not built: the portal combines the stack's current spec with `upgrade-path` per resource. | viewer |
 | PATCH | `/stacks/{id}` | Change metadata only (e.g. extend `expires_at` within env max). | developer (non-prod), maintainer (prod) |
 | GET | `/stacks/{id}/lock` / DELETE `/stacks/{id}/lock` | Inspect / force-release platform lock. | viewer / admin |
 
@@ -712,7 +732,7 @@ Stacks are never created or destroyed directly; mutation is always a request.
 
 | Method | Path | Description | RBAC |
 |---|---|---|---|
-| POST | `/requests` | Create request (`kind`: create, update, destroy are implemented; upgrade, reconcile, rollback answer `422 unsupported_kind`). Requires `Idempotency-Key`. | developer (any env); maintainer to create `destroy` in production. Enforced by the `rbac` matrix from `memberships` (platform admins count as admin); denials are audited as `rbac.denied` |
+| POST | `/requests` | Create request (`kind`: create, update, upgrade, destroy are implemented; reconcile, rollback answer `422 unsupported_kind`). Requires `Idempotency-Key`. | developer (any env); maintainer to create `destroy` in production. Enforced by the `rbac` matrix from `memberships` (platform admins count as admin); denials are audited as `rbac.denied` |
 | GET | `/requests?team=&status=&kind=&mine=true` | List, limited to the caller's teams (all teams for a platform admin); `team` only narrows within them. | viewer |
 | GET | `/requests/{id}` | Detail incl. PR, pipeline runs, plan, cost, timeline. | viewer in the request's team; otherwise `404`, as if it did not exist |
 | POST | `/requests/{id}/preview` | Dry-run render: returns generated files + diff without opening a PR. | developer |
@@ -795,7 +815,7 @@ If the change spans several dependent stacks, the backend splits it into **seque
 }
 ```
 
-**Update** — same shape with `"kind": "update"`, `"stack_id"` instead of team/env/stack/region/ephemeral (sending those is `422 not_allowed`: they are fixed once the stack exists), and the full desired `resources` list (declarative; removed resources are destroyed and shown in the plan). The new inputs and versions are validated like a create's. The publisher renders over the stack root and keeps `.terraform.lock.hcl`. An update that omits resources of the stack's newest live spec (the latest create or update that is not failed, rejected or cancelled) is refused with `422 resources_removed`, naming them, unless it sends `"allow_removals": true`. That stops a form built from an older spec from silently deleting what a newer request added; plan review remains the second guard. `if_match_spec_version` is not implemented: the removal check is the cheaper guard that works before applied specs are tracked.
+**Update** — same shape with `"kind": "update"`, `"stack_id"` instead of team/env/stack/region/ephemeral (sending those is `422 not_allowed`: they are fixed once the stack exists), and the full desired `resources` list (declarative; removed resources are destroyed and shown in the plan). The new inputs and versions are validated like a create's. The publisher renders over the stack root and keeps `.terraform.lock.hcl`. An update that omits resources of the stack's newest live spec (the latest create, update or upgrade that is not failed, rejected or cancelled) is refused with `422 resources_removed`, naming them, unless it sends `"allow_removals": true`. That stops a form built from an older spec from silently deleting what a newer request added; plan review remains the second guard. `if_match_spec_version` is not implemented: the removal check is the cheaper guard that works before applied specs are tracked.
 
 **Upgrade** — `POST /v1/requests`
 
@@ -804,11 +824,22 @@ If the change spans several dependent stacks, the backend splits it into **seque
   "kind": "upgrade",
   "stack_id": "b2c1f0a9-3e4d-4c5b-8a7f-1e2d3c4b5a69",
   "upgrades": [ { "resource": "events_bucket", "to_version": "1.4.0" } ],
-  "input_migrations": "auto"
+  "acknowledge_breaking": false,
+  "justification": "pick up the lifecycle fix"
 }
 ```
 
-The API validates existing inputs against the target version's schema, applies manifest-declared input renames (`migrations` in `module.yaml`), and rejects with `422 upgrade_requires_input_changes` listing fields if manual edits are needed. Major upgrades require `"acknowledge_breaking": true`.
+Implemented in WBS 8.2 (`requests.PlanUpgrade`, `Service.prepareUpgrade`). `resources`, `allow_removals`, `confirm_stack_name` and the stack identity fields are `422 not_allowed`; `upgrades` needs 1 to 50 entries with distinct resources. Before the transaction the API reads the stack's newest live spec (`409 no_current_spec` when there is none) and builds the new resource list: each named resource keeps its module and inputs and pins `to_version`. It refuses, with field errors under `/upgrades/<i>`:
+
+- `422 unknown_resource`: the stack has no such resource;
+- `422 not_an_upgrade`: `to_version` is not newer than the pinned version (pinning an older version is an update);
+- `422 major_jump_too_large`: the move crosses more than one major (one major at a time: `1.x` → `2.y`, then `2.y` → `3.z`);
+- `422 acknowledge_breaking_required` (pointer `/acknowledge_breaking`): the move crosses a major and the body does not say `"acknowledge_breaking": true`, which the portal sends only after its confirmation shows the major's migration notes;
+- `422 module_version_unavailable`: the target is not in the catalog or is yanked;
+- `422 upgrade_requires_input_changes`: the current inputs do not validate against the target version's input schema (re-validated with the target schema, so a new required input or a tighter constraint is caught); submit an update with the new inputs first;
+- `422 invalid_ref`: another resource references an output the target version removed.
+
+Other resources pinned to a yanked version do not block the upgrade. Manifest-declared input renames (`input_migrations`) are not implemented; the strict decoder refuses the field. Inside the transaction the spec is re-read with the stack row locked: if another request changed it in between, the upgrade is `409 spec_changed`. Then the request takes the same lock, queue, idempotency and audit path as an update. The stored spec is the full resource list (so the generator renders the new `?ref=modules/<name>/vX.Y.Z` like any update; see the `upgrade` golden root) plus `upgrades: [{resource, module, from_version, to_version, change}]`, which `request.created` records too and the PR body lists in an Upgrades table (with a warning for a major). Because the recorded upgrade becomes the stack's newest spec, a retry with the same key and body would fail the precheck with `not_an_upgrade`; for an upgrade refused as invalid or conflict the API therefore probes the key in a rolled-back transaction and replays the original request when the key was used (or answers `idempotency_key_reuse` for another body).
 
 **Destroy** — `{"kind": "destroy", "stack_id": "…", "justification": "Feature retired", "confirm_stack_name": "order-events"}`. `justification` is required and `confirm_stack_name` must equal the stack's name (`422 mismatch`); `resources` must be omitted. The generator writes a destroy marker (`iacp.stack.json` `"lifecycle": "destroy"`) and empties `main.tf` module blocks (the stored spec has `"resources": []`), so `pr-validate.yml` and `apply.yml` plan and apply the destruction through the normal pipeline with no special mode; the PR body says that merging destroys the stack. Production destroys require maintainer + `prevent_destroy`-protected resources need a prior update request to lift protection. The cleanup PR and the `destroyed` status belong to WBS 7.6. `request.created` records the justification and the confirmed stack name in the audit chain. While local-first (ADR-0009) the stack's Terraform state is throw-away per job, so a destroy plans and applies nothing; it only changes real infrastructure with remote state (and `allow_stateful_destroy` is not implemented). A destroy root has no module calls, so `terraform init` writes no `.terraform/modules/modules.json`; `verify-modules` accepts that when `iacp.stack.json` pins no modules, and the rest of `pr-validate.yml` and `apply.yml` (validate, TFLint, Checkov, plan, conftest, summary, reports, apply, smoke "nothing to check") was run against the golden destroy root.
 
@@ -822,7 +853,7 @@ The API validates existing inputs against the target version's schema, applies m
 
 A caller with no role in the stack's team gets the same `404 stack_not_found` as for an unknown `stack_id`, so existence is not revealed. **Update and destroy are inert end to end until WBS 5.3's apply reports move the stack's status:** nothing writes `stacks.status` after a create yet, so a real stack stays `provisioning` and answers `409 stack_busy` (the tests seed `active`). Wiring the `/v1/runs` apply stage to the request and stack status is part of 5.3 (it needs the request transitions too).
 
-A stack with an open `destroy` request also refuses further update and destroy requests (`409 destroy_pending`). Anything else queues behind the lock holder exactly like a create (`queued_behind`, publish on promotion). Request creation does not change the stack status; the apply reports do (`requests.StackStatusWhileApplying` and `StackStatusAfterApply` are the table WBS 5.3 applies). Idempotency, the audit chain (`request.created`) and the role rules are the same as for a create. `upgrade` stays `unsupported_kind` until the applied-spec and input-migration pieces it needs exist.
+A stack with an open `destroy` request also refuses further update and destroy requests (`409 destroy_pending`). Anything else queues behind the lock holder exactly like a create (`queued_behind`, publish on promotion). Request creation does not change the stack status; the apply reports do (`requests.StackStatusWhileApplying` and `StackStatusAfterApply` are the table WBS 5.3 applies). Idempotency, the audit chain (`request.created`) and the role rules are the same as for a create. Upgrades follow the same stack-state table and role rules as updates (developer in any environment).
 
 **Status stream** — `GET /v1/requests/{id}/events` (`text/event-stream`). The feed is the request's `request.created` and `request.transitioned` audit rows, so no change is lost between polls (the DB is polled every 2 s; no broker). Each frame's `id` is the audit `seq`; `EventSource` sends it back as `Last-Event-ID` on reconnect and the stream resumes after it. Without a valid `Last-Event-ID` it starts with the current state:
 
@@ -1108,6 +1139,8 @@ All errors use RFC 9457 Problem Details (`application/problem+json`) with the pl
 | 422 | `validation_failed` | Schema/semantic validation |
 | 422 | `module_version_unavailable` | Yanked version or incompatible TF/provider range |
 | 422 | `upgrade_requires_input_changes` | See upgrade |
+| 422 | `not_an_upgrade` / `major_jump_too_large` / `acknowledge_breaking_required` | See upgrade |
+| 409 | `spec_changed` / `no_current_spec` | See upgrade |
 | 422 | `idempotency_key_reuse` | Same key, different body |
 | 422 | `policy_preflight_denied` | Fast pre-checks (region, env TTL) failed before PR |
 | 429 | `rate_limited` | With `Retry-After` |

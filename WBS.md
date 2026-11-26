@@ -120,7 +120,7 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 | ID | Task | Est | Dep |
 |----|------|-----|-----|
 | [~] 8.1 | Packages: `ecs-service` (+ALB, ECR), `postgres`, `redis`, `vpc`, `monitoring` — all five v1.0.0 done: `ecs-service`, `postgres` and `redis` with offline `terraform test` suites (LocalStack community has no ECS/RDS/ElastiCache), `vpc` and `monitoring` with LocalStack `terraform test` and Terratest; release tags and real-account verification remain | 12 | 3.6 |
-| [ ] 8.2 | Version upgrades: upgrade-path API + UI, major migration flow | 3 | 4.3, 7.2 |
+| [x] 8.2 | Version upgrades: upgrade-path API + UI, major migration flow (upgrade-path API, upgrade notes indexed from the CHANGELOG, `kind: upgrade` requests one major at a time with acknowledgement, portal path and confirmation; follow-ups in docs/06 §1: input renames, auto-patch, yanked-pin flow, `upgrade.rego`) | 3 | 4.3, 7.2 |
 | [ ] 8.3 | Drift detection: `drift.yml` 02:00 UTC, `drift_reports`, reconcile/codify/ignore | 3 | 5.2 |
 | [ ] 8.4 | TTL: EventBridge Scheduler, 24 h warning, auto destroy (non-prod), extend, hourly reaper | 3 | 7.6 |
 | [ ] 8.5 | Budgets: `budget.rego`, Infracost gating, admin override, Cost Explorer actuals | 3 | 5.5, 6.2 |
