@@ -39,6 +39,7 @@ Creating a request needs a team where the dev user has the `developer` role; the
 | `NEXT_PUBLIC_IACP_API_URL` | browser (build time) | unset | call the API directly from the browser; needs CORS on the API, which it does not send yet |
 | `NEXT_PUBLIC_IACP_AUTH_MODE` | both (build time) | `dev` | auth provider; only `dev` exists |
 | `NEXT_PUBLIC_IACP_DEV_USER` | both (build time) | `local-dev` | display label; set it to the API's `IACP_DEV_USER` |
+| `IACP_PORTAL_ORIGIN` | server | unset | public origin of the portal behind a proxy that rewrites `Host`, accepted by the proxy's same-origin check |
 
 Do not commit `.env*` files; pass variables on the command line or through your shell.
 
@@ -63,9 +64,23 @@ GitHub OAuth (WBS 4.4) replaces it with a provider that relies on the `iacp_sess
   `serverApi()` and `cache: "no-store"`; every page is dynamic.
 - **Client components** (the request form) use `browserApi()`, which goes through the
   same-origin route `src/app/api/iacp/[...path]/route.ts` because the API sends no CORS
-  headers. The proxy forwards only user routes under `/v1` (never `/v1/internal/*` or
-  `/v1/runs`), validates and re-encodes path segments, and allow-lists request and response
-  headers.
+  headers. Its rules are pure functions in `src/lib/api/proxy.ts`:
+  - **Allow-list, not deny-list.** Only the first segments the portal calls (`catalog`,
+    `requests`) are forwarded, matched exactly and case-sensitively on the segments Next.js
+    has decoded once. Every segment must be unreserved URL characters other than `.` and `..`,
+    so `Internal`, `RUNS`, `%69nternal`, encoded slashes and traversal are all refused (404).
+    Machine routes (`/v1/internal/*`, `/v1/runs`) and any route added later stay unreachable
+    until they are added on purpose.
+  - **Methods.** GET, and HEAD (answered from an upstream GET with no body). POST only on
+    `/v1/requests`. Anything else gets 405 with `Allow`.
+  - **Bodies** over 1 MiB (the backend's own cap) get 413, by `Content-Length` or while
+    streaming.
+  - **CSRF.** A POST must carry `Sec-Fetch-Site: same-origin`, or, without that header, an
+    `Origin` equal to the portal's (request URL, `Host`, or `IACP_PORTAL_ORIGIN`); otherwise
+    403. Requests with neither header come from non-browser clients and carry no ambient
+    browser credentials.
+  - **Headers.** Request and response headers are allow-listed (`Set-Cookie` and `Server` from
+    the API are dropped). `Location: /v1/...` is rewritten to `/api/iacp/v1/...`.
 - **Errors**: non-2xx responses become `ApiError`, built by the pure `parseProblem` from the
   RFC 9457 body (`code`, `detail`, `request_id`, `errors[].pointer`). Transport failures are
   `network_error`. Pages show the request id for support.
@@ -75,8 +90,8 @@ GitHub OAuth (WBS 4.4) replaces it with a provider that relies on the `iacp_sess
 The form is generated from the selected version's `inputs_schema` (JSON Schema 2020-12 from
 `module.yaml`), plus team, environment, stack name, resource name and justification.
 
-- **Renderer: a small typed renderer, not `@rjsf/core`.** rjsf 6 does support React 19, so
-  compatibility was not the reason. The reasons were:
+- **Renderer: a small typed renderer, not `@rjsf/core`** ([ADR-0011](../docs/adr/0011-portal-form-renderer.md)).
+  rjsf 6 does support React 19, so compatibility was not the reason. The reasons were:
   - The portal needs a pure schema-to-field model anyway for the 7.2 inputs table, and the same
     model drives the form.
   - Backend errors arrive as pointers (`/resources/0/inputs/<name>`) and map one-to-one onto
@@ -86,13 +101,29 @@ The form is generated from the selected version's `inputs_schema` (JSON Schema 2
     setup and adds a large bundle for a client check the backend repeats anyway.
   - Anything richer (nested objects, arrays of objects, `if`/`then`) gets a JSON editor, and
     the backend validates the full schema.
-- Only required values and values that differ from the module default are sent. Clearing a
-  nullable field whose default is not null sends `null`.
-- `POST /v1/requests` carries an `Idempotency-Key`: one UUID per form session, created on the
-  first submit and reused for retries, so a request that reached the backend is never created
-  twice.
-- Backend validation errors are mapped onto the field their pointer names. The rest (module
-  version, resource list) go to an error summary, which takes focus and links to each field.
+- Only required values and values that differ from the module default are sent. What an
+  emptied optional control sends (`clearBehaviour`, shown in each field's hint):
+  - `null` when the field is nullable and its default is not;
+  - the explicit empty value (`""`, `[]`, `{}`) when the default is non-empty and the schema
+    allows it (`minLength`, `pattern`, `minItems`, `minProperties`);
+  - otherwise nothing, so the module default applies. Numbers, booleans, enums and JSON fields
+    have no empty value other than `null`, so a non-nullable one cannot be "cleared": leaving
+    it empty keeps the default.
+- Client checks treat `exclusiveMinimum`/`exclusiveMaximum` as exclusive.
+- **Idempotency-Key** (`src/lib/request/idempotency.ts`). The key is bound to the payload it
+  was sent with:
+  - Resubmitting unchanged values reuses it, so a request that reached the backend after a
+    timeout or 5xx is replayed rather than created twice.
+  - Changing any value mints a new key, so the backend never answers
+    `422 idempotency_key_reuse` for an edit.
+  - After an ambiguous failure (network error or 5xx), the form warns that the request may
+    exist and links to `/requests?mine=true`.
+  - If `idempotency_key_reuse` does come back, the form explains it, links there too, and
+    starts over with a new key.
+- Backend validation errors are mapped onto the field their pointer names, including missing
+  required inputs, which the backend reports at `/resources/0/inputs` with the names in the
+  message. The rest (module version, resource list) go to an error summary, which takes focus
+  and links to each field.
 - **Preview** shows the exact HTTP request. A preview of the generated Terraform files needs
   `POST /v1/requests/{id}/preview` (docs/03 §6.4), which the backend does not have yet:
   follow-up.
@@ -107,6 +138,18 @@ page refreshes every 5 seconds; the SSE stream (`/v1/requests/{id}/events`) repl
 in WBS 7.4, together with PR, plan, cost and run links. A stacks list (rest of 7.5) needs
 `GET /v1/stacks`, which is not built yet.
 
+## Security headers
+
+Every response carries `Content-Security-Policy` (`src/lib/security/csp.ts`):
+- every source is `'self'`, plus the API origin when `NEXT_PUBLIC_IACP_API_URL` is set;
+- `object-src 'none'`, `frame-ancestors 'none'` and `form-action 'self'`.
+
+It also sends `X-Content-Type-Options`, `X-Frame-Options` and `Referrer-Policy`.
+
+Next.js still needs `'unsafe-inline'` for its bootstrap scripts and styles. Moving to
+per-request nonces in middleware is a follow-up. `next dev` additionally allows
+`'unsafe-eval'` and `ws:` for React Refresh.
+
 ## Layout and style
 
 ```
@@ -115,8 +158,9 @@ src/components/           presentational components; request/ holds the form
 src/lib/api/              ApiClient (I/O), types, errors, config, proxy rules, factory
 src/lib/auth/             AuthProvider + DevAuthProvider
 src/lib/schema/           pure schema -> field model, form values <-> inputs, SchemaAdapter
-src/lib/request/          pure stack-field checks, payload builder, pointer -> field mapping
-src/lib/format.ts         pure dates, labels, tones, status timeline
+src/lib/request/          pure stack-field checks, payload builder, pointer -> field mapping, Idempotency-Key rules
+src/lib/format.ts         pure dates, labels, tones, categories, status timeline
+src/lib/security/         pure Content-Security-Policy builder
 ```
 
 About 70% object-oriented, 30% functional, as in the backend. `ApiClient`, the auth providers

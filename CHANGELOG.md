@@ -102,9 +102,19 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
   - Next.js 16 App Router with strict TypeScript, Tailwind 4, ESLint and Vitest + Testing Library; exact dependency pins and a committed `package-lock.json`; Node 24 from `portal/.nvmrc`
   - typed `ApiClient` (fetch, base URL and `AuthProvider` injected) with `ApiError` built from the backend's problem+json, including `errors[].pointer`
   - `AuthProvider` seam with `DevAuthProvider`, matching the backend's dev auth mode (no credentials, fixed login); GitHub OAuth plugs in later
-  - same-origin proxy `/api/iacp/v1/...` for browser calls (the API sends no CORS headers), limited to user routes under `/v1`, with allow-listed headers
-  - catalog list and module detail with versions, outputs and an inputs table generated from the JSON Schema
-  - request form generated from the version's input schema by a small typed renderer, with one `Idempotency-Key` per form session, backend validation errors mapped onto fields by pointer, and a preview of the exact request
+  - same-origin proxy `/api/iacp/v1/...` for browser calls (the API sends no CORS headers):
+    - forwards only an allow-list of user routes (`catalog`, `requests`; POST only on `/v1/requests`), matched exactly, with no dot segments or encoded slashes
+    - allow-lists request and response headers and rewrites `Location` into the proxy prefix
+    - answers HEAD without a body, rejects other methods (405) and bodies over 1 MiB (413)
+    - rejects cross-site POSTs (403) using `Sec-Fetch-Site` or `Origin`
+  - catalog list (category filters derived from the modules) and module detail with versions, outputs and an inputs table generated from the JSON Schema
+  - Content-Security-Policy and other security headers on every response
+  - request form generated from the version's input schema by a small typed renderer ([ADR-0011](docs/adr/0011-portal-form-renderer.md)):
+    - the `Idempotency-Key` is bound to the payload: reused for unchanged retries, renewed when the values change
+    - `idempotency_key_reuse` and ambiguous failures (network error, 5xx) are explained, with a link to the user's requests
+    - backend validation errors are mapped onto fields by pointer, including missing required inputs
+    - exclusive bounds are respected, and clearing an optional field sends null or an explicit empty value where the schema allows it
+    - a preview shows the exact request
   - requests list (All/Mine, team filter, cursor paging) and request detail with a status timeline, refreshed every 5 s until terminal
   - CI job `portal` (npm ci, lint, typecheck, test, build) and make targets `portal-install`, `portal-dev`, `portal-test`
 
