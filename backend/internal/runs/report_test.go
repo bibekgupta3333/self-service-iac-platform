@@ -131,20 +131,6 @@ func TestRunStatus(t *testing.T) {
 	}
 }
 
-func TestWorkflowFile(t *testing.T) {
-	tests := map[string]string{
-		repo + "/.github/workflows/apply.yml@refs/heads/main":     "apply.yml",
-		repo + "/.github/workflows/pr-validate.yml@refs/pull/1/m": "pr-validate.yml",
-		"acme/x/workflows/apply.yml@refs/heads/main":              "",
-		"": "",
-	}
-	for in, want := range tests {
-		if got := WorkflowFile(in); got != want {
-			t.Errorf("WorkflowFile(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 func TestStageEntry(t *testing.T) {
 	at := time.Date(2026, 11, 24, 10, 0, 0, 0, time.FixedZone("x", 3600))
 	b, err := StageEntry(validReport(), at)

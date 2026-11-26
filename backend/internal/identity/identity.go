@@ -5,6 +5,7 @@ package identity
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/google/uuid"
 )
@@ -38,6 +39,25 @@ type Workflow struct {
 	EventName      string
 	RunID          int64
 	RunAttempt     int
+}
+
+// MainRef is the default branch every mutating workflow must run from.
+const MainRef = "refs/heads/main"
+
+// File is the workflow file name in JobWorkflowRef, e.g. "apply.yml" from
+// "owner/repo/.github/workflows/apply.yml@refs/heads/main"; empty if malformed. Pure.
+func (w Workflow) File() string {
+	_, rest, ok := strings.Cut(w.JobWorkflowRef, "/.github/workflows/")
+	if !ok {
+		return ""
+	}
+	file, _, _ := strings.Cut(rest, "@")
+	return file
+}
+
+// OnMain reports whether both the run's ref and the workflow definition are main. Pure.
+func (w Workflow) OnMain() bool {
+	return w.Ref == MainRef && strings.HasSuffix(w.JobWorkflowRef, "@"+MainRef)
 }
 
 // AuditActorID is the actor_id recorded in audit events.

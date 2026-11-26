@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
@@ -37,7 +36,7 @@ var workflowFiles = map[Kind]string{
 }
 
 // MainRef is the ref every mutating or scheduled pipeline must run from.
-const MainRef = "refs/heads/main"
+const MainRef = identity.MainRef
 
 // NeedsMain reports whether the pipeline must run from main (docs/03 §6.9). Pure.
 func (k Kind) NeedsMain() bool { return k != KindValidate }
@@ -174,23 +173,13 @@ func CheckProvenance(r Report, wf *identity.Workflow) error {
 		return &apperr.Error{Kind: apperr.KindForbidden, Code: "run_mismatch",
 			Message: fmt.Sprintf("report for run %d/%d sent by run %d/%d", r.GitHub.RunID, r.GitHub.RunAttempt, wf.RunID, wf.RunAttempt)}
 	}
-	if want := workflowFiles[r.Pipeline]; WorkflowFile(wf.JobWorkflowRef) != want {
+	if want := workflowFiles[r.Pipeline]; wf.File() != want {
 		return workflowNotAllowed(fmt.Sprintf("%s reports must come from %s, not %s", r.Pipeline, want, wf.JobWorkflowRef))
 	}
-	if r.Pipeline.NeedsMain() && (wf.Ref != MainRef || !strings.HasSuffix(wf.JobWorkflowRef, "@"+MainRef)) {
+	if r.Pipeline.NeedsMain() && !wf.OnMain() {
 		return workflowNotAllowed(fmt.Sprintf("%s reports must run from %s", r.Pipeline, MainRef))
 	}
 	return nil
-}
-
-// WorkflowFile extracts "apply.yml" from "owner/repo/.github/workflows/apply.yml@refs/heads/main". Pure.
-func WorkflowFile(jobWorkflowRef string) string {
-	_, rest, ok := strings.Cut(jobWorkflowRef, "/.github/workflows/")
-	if !ok {
-		return ""
-	}
-	file, _, _ := strings.Cut(rest, "@")
-	return file
 }
 
 func workflowNotAllowed(msg string) error {
