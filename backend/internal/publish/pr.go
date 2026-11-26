@@ -34,22 +34,34 @@ type PRContext struct {
 	FencingToken  int64
 	RequestURL    string // portal link to the request
 	Resources     []PRResource
+	// RollbackOf is the short id of the applied request this update restores (rollback).
+	RollbackOf string
 }
 
-// Title renders the PR title. Pure.
+// Title renders the PR title. A rollback says so and names the request it restores. Pure.
 func Title(c PRContext) string {
+	if c.RollbackOf != "" {
+		return fmt.Sprintf("iacp: rollback %s/%s/%s to %s (%s)", c.Environment, c.Team, c.Stack, c.RollbackOf, c.ShortID)
+	}
 	return fmt.Sprintf("iacp: %s %s/%s/%s (%s)", c.Kind, c.Environment, c.Team, c.Stack, c.ShortID)
 }
 
 // CommitMessage renders the commit message for the generated files. Pure.
 func CommitMessage(c PRContext) string {
+	if c.RollbackOf != "" {
+		return fmt.Sprintf("revert(%s): roll back stack %s to %s\n\nRequest: %s\nRollback-Of: %s\nFencing-Token: %d\n",
+			c.Team, c.StackPath, c.RollbackOf, c.ShortID, c.RollbackOf, c.FencingToken)
+	}
 	return fmt.Sprintf("feat(%s): %s stack %s\n\nRequest: %s\nFencing-Token: %d\n",
 		c.Team, c.Kind, c.StackPath, c.ShortID, c.FencingToken)
 }
 
-// Labels returns the PR labels, sorted. Pure.
+// Labels returns the PR labels, sorted. A rollback also carries iacp:rollback. Pure.
 func Labels(c PRContext) []string {
 	l := []string{"iacp", "iacp:env:" + c.Environment, "iacp:kind:" + c.Kind, "iacp:team:" + c.Team}
+	if c.RollbackOf != "" {
+		l = append(l, "iacp:rollback")
+	}
 	slices.Sort(l)
 	return l
 }
@@ -79,6 +91,13 @@ func Body(c PRContext) string {
 	b.WriteString("\n### Resources\n\n| Name | Module | Version |\n|---|---|---|\n")
 	for _, r := range res {
 		fmt.Fprintf(&b, "| `%s` | %s | %s |\n", cell(r.Name), cell(r.Module), cell(r.Version))
+	}
+
+	if c.RollbackOf != "" {
+		fmt.Fprintf(&b, "\n> **Rollback.** This update restores the configuration applied by %s. "+
+			"It is a configuration rollback: data a later change deleted is not recovered, and a module major "+
+			"upgrade may not be reversible. Check the plan below for destroyed or replaced data-bearing resources "+
+			"before approving.\n", cell(c.RollbackOf))
 	}
 
 	if c.Kind == "destroy" {

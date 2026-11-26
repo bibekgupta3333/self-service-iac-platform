@@ -302,6 +302,21 @@ func TestBuildStackSpec(t *testing.T) {
 	}
 }
 
+func TestPRContextCarriesTheRollbackSource(t *testing.T) {
+	r := draftRequest()
+	spec, err := DecodeSpec(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pc := PRContextFor(r, spec, "http://portal"); pc.RollbackOf != "" {
+		t.Fatalf("ordinary request: %+v", pc)
+	}
+	spec.RollbackOf = "req-4m2n8q"
+	if pc := PRContextFor(r, spec, "http://portal"); pc.RollbackOf != "req-4m2n8q" {
+		t.Fatalf("rollback: %+v", pc)
+	}
+}
+
 // TestDestroyRendersAnEmptyMarkedRoot: a destroy request names no modules, resolves none,
 // and renders a root whose iacp.stack.json says lifecycle destroy.
 func TestDestroyRendersAnEmptyMarkedRoot(t *testing.T) {

@@ -77,6 +77,7 @@ func PRContextFor(r *requests.Request, spec requests.NormalizedSpec, portalURL s
 		RequestID: r.ID.String(), ShortID: r.ShortID, Kind: string(r.Kind), Environment: spec.Environment,
 		Team: spec.Team, Stack: spec.Stack, StackPath: r.Stack.Path, Region: spec.Region,
 		Justification: r.Justification, FencingToken: token, RequestURL: portalURL + "/requests/" + r.ID.String(),
+		RollbackOf: spec.RollbackOf,
 		Resources: fp.Map(spec.Resources, func(in requests.ResourceInput) publish.PRResource {
 			return publish.PRResource{Name: in.Name, Module: in.Module, Version: in.Version}
 		}),
