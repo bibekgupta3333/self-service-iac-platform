@@ -38,6 +38,7 @@ Negative:
 - CI cannot test long-lived lifecycle behaviour (drift, TTL) until the S3-on-LocalStack backend arrives.
 - A local backend has no shared locking. The platform-level stack lock (ADR-0004 part 2) is the only concurrency guard until the S3 backend comes back.
 - The OIDC roles and S3 state bucket in ADR-0004 and ADR-0005 are deferred, not dropped.
+- `apply.yml` (WBS 5.3) runs the production steps (lock claim, re-plan, pre-apply policy gate, apply, outputs, run reports, lock release) against a fresh LocalStack and a job-local state file. So it proves that a merged stack applies from scratch, but keeps no resources or state between runs: every push re-creates the stack, and an update or destroy plans against empty state. Only the S3 backend on a long-lived LocalStack (decision 4) makes applies cumulative. The workflow is written so that only the backend, endpoint and credentials change then. See docs/05 section 4.3.
 
 ## Alternatives considered
 

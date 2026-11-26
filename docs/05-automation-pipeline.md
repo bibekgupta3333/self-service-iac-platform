@@ -88,7 +88,7 @@ environments/development/payments/orders-store/
 
 While local-first ([ADR-0009](adr/0009-local-first-localstack-and-local-backend.md)), the generator writes a smaller `iacp.stack.json` (`backend`, `depends_on`, `environment`, `fencing_token`, `lifecycle`, `modules` with each instance's release tag and resolved commit SHA, `region`, `request_id`, `stack`, `team`; see `environments/development/platform/smoke/iacp.stack.json`). Account, ephemeral and TTL fields arrive with multi-account support and WBS 8.4.
 
-Detection algorithm (`python -m tools.stack_pipeline detect`, used by `pr-validate.yml` and later `apply.yml`):
+Detection algorithm (`python -m tools.stack_pipeline detect`, used by `pr-validate.yml` and `apply.yml`):
 
 1. `git diff --name-only <base>...<head> -- environments/` (PR: merge base vs. head; push: `github.event.before..github.event.after`).
 2. Map each path to its stack root by taking the first four segments (`environments/<env>/<team>/<stack>`). **Fail closed:** any changed path under `environments/` that is not inside a valid root fails detection. That covers an unknown environment, a segment that is not a lowercase name (uppercase, spaces), and a file directly under `environments/`, an environment or a team. The only exceptions are `environments/README.md` and `environments/<env>/.gitkeep`.
@@ -135,6 +135,20 @@ runs:
             -X POST "$IACP_API_URL/v1/runs" --data-binary @- \
           || echo "::warning::Platform API report failed; reconciler will backfill"
 ```
+
+#### Current implementation (WBS 5.6)
+
+`.github/actions/iacp-report/action.yml` differs from the sketch above. The sketch posts a payload shape the API does not accept and puts expressions inside `run:`. The action is a thin wrapper around `python -m tools.stack_pipeline report`:
+
+- **Payload:** `RunReport` (`tools/stack_pipeline/report.py`) mirrors `runs.Report` and `runs.Validate` in `backend/internal/runs/report.go`. It sends only the declared fields, because the API decodes strictly, and a report the API would reject with `422` fails before it is sent. `plan` (hash, counts as add/change/destroy/replace, resource changes) and `policy` (`opa.deny`, `opa.warn`) come from the `summary --json-out` document. `outputs` come from `terraform output -json`, with every sensitive or unrecognised value replaced by `"<sensitive>"`. `error` is `{"class", "message"}`.
+- **Provenance:** `github.head_sha` is always `GITHUB_SHA`, the OIDC token's `sha` claim. For `pull_request` events that is the merge commit, not the PR head. There is no input to override it. `run_id`, `run_attempt` and `log_url` come from the runner environment.
+- **Request and token:** `request_short_id` defaults to `request_id` in `iacp.stack.json`. `fencing_token` defaults to the stack file's value only for `validate`. `apply` must pass the token from its own lock claim.
+- **Auth:** in a job with `id-token: write`, a GitHub OIDC token is requested for `audience`. Such a job never falls back to the shared token: an empty audience or a failed OIDC request is an error. Only a job without `id-token: write` uses the `internal-token` input (the shared `IACP_INTERNAL_TOKEN`). The backend does not scope that token to a workflow, so no job that runs pull-request code may receive it. Today no workflow passes it. If a main-only job ever needs it, store it as an environment secret of a GitHub Environment whose deployment branches are limited to `main`, never as a repository secret. Tokens travel only through `env:`, never argv, and are registered with `::add-mask::`. Messages that quote API responses are escaped, so they cannot start a workflow command.
+- **Transport:** `IacpApiClient` (`tools/stack_pipeline/api_client.py`) refuses redirects, so the bearer token is never replayed to another location. It requires https except on loopback, and retries `429`/`5xx` for run reports and lock claims. A stage report replaces its earlier entry, so retries are idempotent. Lock releases are not retried.
+- **Unconfigured:** with `api-url` empty (`vars.IACP_API_URL` unset, the local-first state), the step prints a `::notice::` and exits 0.
+- **Failure policy:** `fail-on-error: "false"` (the default) turns a rejected or unreachable report into a `::warning::`. `apply.yml` sets it to `"true"` on the pre-apply `plan` report, so `409 stale_fencing_token` aborts the job before anything is applied.
+
+Inputs: `api-url`, `audience`, `internal-token`, `pipeline`, `stack-path`, `stage`, `status` (a stage status or a GitHub step outcome; empty derives it from the summary), `summary-json`, `outputs-json`, `terraform-exit-code`, `error-message`, `fencing-token`, `request-short-id`, `fail-on-error`. The caller must check out the repository and set up Python first.
 
 ### 4.2 `pr-validate.yml`
 
@@ -355,7 +369,7 @@ Notes:
 | Apply | Only in `apply.yml` | A hermetic round trip in the same job: apply the plan to the job's throwaway LocalStack, require an empty `-detailed-exitcode` re-plan, then destroy. Nothing outside the job is touched |
 | PR comment | `marocchino/sticky-pull-request-comment` in the matrix job | The matrix job uploads `comment.md` / `summary.json`. A separate `comment` job, the only job with `pull-requests: write`, upserts one comment per stack. It writes the hidden `<!-- iacp-plan:<id> -->` marker itself from the validated artifact name, and drops any marker-looking line from the artifact body. Fork PRs are skipped (read-only token); their summary stays in the job summary |
 | Artifacts | `tfplan`, `plan.json`, SARIF, Infracost | Only the rendered summary; `tfplan` and `plan.json` can hold sensitive values and never leave the job. SARIF (6.1) and Infracost (5.5) come later |
-| API report | `iacp-report` action (`plan_ready` / `plan_failed`) | Not wired yet: a `TODO(WBS 5.6)` in the workflow. The API side exists (WBS 4.10, `POST /v1/runs` behind GitHub OIDC), and the JSON summary already has the payload shape. The API requires the report's `head_sha` to equal the OIDC token's `sha` claim. For `pull_request` events that is the merge commit `github.sha`, not `github.event.pull_request.head.sha` (the PR head shown in the sticky comment), so the step must send `github.sha` or it gets `403 run_mismatch` |
+| API report | `iacp-report` action (`plan_ready` / `plan_failed`) | A separate `report` matrix job, the only job with `id-token: write`, so the OIDC permission is never present while PR-controlled Terraform and providers run. It is OIDC only and never receives `IACP_INTERNAL_TOKEN`, because it runs the PR's own `tools/` and action code; without `vars.IACP_OIDC_AUDIENCE` the report fails as a warning. It downloads the stack's `summary.json` and reports stage `summary` for pipeline `validate`; the status comes from the summary, and a missing summary is reported as `failed`. `head_sha` is `github.sha` (the merge commit). Fork PRs are skipped. A report failure is a warning and never affects `pr-validate-result`. Skipped with a notice while `vars.IACP_API_URL` is empty. The validate report carries the `request_id` and `fencing_token` from `iacp.stack.json`, so it is accepted only while that token is current |
 
 **Module pins.** A local relative source would be denied by `iacp.forbidden.module_source`, which cannot be waived, so stacks always keep the generator's exact pinned git source. Two steps tie that source to the commit recorded in `iacp.stack.json`.
 
@@ -541,6 +555,33 @@ Notes:
 - The job-level `concurrency` group serialises applies per stack across all workflow runs; the platform lock row in Postgres (checked via `requests/by-path`, which returns the lock's fencing token) serialises at request level ([ADR-0004](adr/0004-s3-native-locking-plus-platform-lock.md)).
 - State locking during apply uses the S3 lockfile (`use_lockfile = true` in `backend.tf`).
 - Applies are never cancelled automatically; a cancelled apply leaves a stale lockfile — see the runbook in [06-lifecycle-management.md](06-lifecycle-management.md#3-state-locking).
+
+#### Local-first implementation (current)
+
+`.github/workflows/apply.yml` (WBS 5.3) follows the design above with these differences while [ADR-0009](adr/0009-local-first-localstack-and-local-backend.md) is in effect:
+
+| Area | Target design | Today |
+|---|---|---|
+| Triggers | `push` to `main` on `environments/**`; `workflow_dispatch` with a stack list | Same `push` trigger. `workflow_dispatch` takes one `stack_path`, plus optional `destroy`, `stack_id`, `request_id` and `approved_plan_hash`. Only `main` is applied: a `Require main` step fails a run from any other ref, and the apply job is guarded on `github.ref` again. The durable control is a GitHub Environment limited to `main` (WBS 6.6). A dispatched `stack_path` is shape-checked before it is used or echoed |
+| Detection | `changed-stacks.sh` | `tools.stack_pipeline detect --base github.event.before --head github.sha`, with no `--full-run-prefix`: a pipeline change re-validates every stack in `pr-validate`, but apply only applies the stacks a push changed. A missing or all-zero `before` falls back to the parent commit, with a warning. A dispatched path goes through the same detector (fail closed) and must name an existing stack root |
+| AWS access | `iacp-apply` via OIDC in GitHub Environment `<env>` | LocalStack service container with dummy `test`/`test` credentials. No GitHub Environment yet (WBS 6.6). `id-token: write` exists only on the apply job, and the API is reached with its OIDC token only; `IACP_INTERNAL_TOKEN` is never passed to `apply.yml` |
+| Concurrency | `stack-<id>-apply` | `iacp-stack-<id>-apply`, or `iacp-stack-<id>-destroy` for a destroy dispatch; `cancel-in-progress: false`, `max-parallel: 5`. GitHub keeps only the newest pending job per group. For push applies that is fine, because the newest `main` contains every change. A queued destroy, though, would be replaced silently by a later push, so destroys get their own group. The platform lock then keeps an apply and a destroy of one stack apart: the second claim is `queued` and fails visibly. With no API, each job only touches its own LocalStack |
+| Platform lock | `GET /v1/internal/requests/by-path` returns the lock's fencing token | `POST /v1/internal/stacks/{id}/lock` through `tools.stack_pipeline lock acquire`. `granted` or `held` returns the fencing token; `queued` fails the job. The token goes into every report, and the lock is released (`DELETE …/lock?request_id=&fencing_token=`) in an `always()` step. `attempted=true` is recorded before the claim, so the release also runs when the grant committed but every response was lost. Without a token, the release reads the lock (`GET …/lock`) and frees it only if this request holds it. The lock route accepts OIDC tokens only from `apply.yml`/`ttl-reaper.yml` on `main` via `push`, `workflow_dispatch` or `schedule` (`auth.RouteLocks`) |
+| Lock target | Resolved by the API from the stack path and merge commit | The lock route needs the stack and request **UUIDs**, and `GET /v1/internal/requests/by-path` is not implemented. So with `vars.IACP_API_URL` set, only a `workflow_dispatch` that passes `stack_id` and `request_id` can apply. A `push` fails closed rather than applying without the lock. With the API unset (today), the claim is skipped with a notice. **Prerequisite:** do not set `vars.IACP_API_URL` before `requests/by-path` (or stack and request UUIDs in `iacp.stack.json`) exists, or every merge to `main` fails. A dispatched `stack_id` is not checked against `stack_path` at claim time. The `plan` report is the binding check: the API resolves the stack by path and checks the token against that stack's lock, so a lock claimed on another stack gets `409` before apply |
+| Module fetch | Published tag | `verify-pins` before init and `verify-modules` after init, as in `pr-validate` |
+| Pre-apply gate | OPA on the plan with approvals | `conftest` with the same policies and the `context` from `iacp.stack.json` on the plan about to be applied |
+| Plan-hash check | Re-plan hash must equal `approved_plan_hash` | Compared when `approved_plan_hash` is dispatched. Both hashes must be 64 lowercase hex characters. With `vars.IACP_API_URL` set, a missing approved hash fails the job (fail closed, like the lock); only the local-first mode, with no API, applies with a notice. The hash is the same normalised `plan_hash` as the PR summary. Both hermetic plans start from an empty LocalStack, so an unchanged stack hashes the same in the PR and here |
+| Reports | `apply_started`, `applied`, `apply_failed` | `iacp-report` stages `plan` (with the plan and policy blocks, `fail-on-error: "true"`), `apply` (or `destroy`, with `terraform_exit_code`) and `summary` (`job.status`, redacted outputs, `error` on failure). A passed `summary` finishes the run as `succeeded`. The summary is sent **before** the release, because the API rejects any report whose fencing token is no longer current. A failed release is reported as stage `release` (accepted, since the lock is still held) and fails the job. The API keeps a finished run's status, so the run still reads `succeeded` with a failed `release` stage. Closing the run on release is a backend follow-up |
+| Outputs | Uploaded `outputs.json` | Kept in the job. Only output names reach the step summary; the report carries values with sensitive ones redacted. `tfplan`, `plan.json` and state never leave the job |
+| Destroy | `desired_state: absent` → `plan -destroy` | `workflow_dispatch` with `destroy: true` runs `plan -destroy`, then applies it. The cleanup PR and the `destroyed` status belong to WBS 7.6 |
+
+**Hermetic limit.** Every job starts a fresh LocalStack container, and the `local` backend writes state inside the job's workspace. Both are thrown away when the job ends. So today `apply.yml` proves that the merged stack applies cleanly from scratch, with the lock and the reports exercised. It does **not** keep resources or state between runs:
+
+- every push re-creates the stack from nothing;
+- an update or a `destroy` dispatch plans against empty state (a destroy is a no-op);
+- outputs describe resources that no longer exist once the job ends.
+
+Nothing in the workflow depends on that. When the generator switches to the S3 backend on a long-lived LocalStack (ADR-0009 decision 4), and later to real accounts, only `backend.tf`, the endpoint and the credentials step change. The lock, reports, plan-hash check and destroy path stay as they are.
 
 ### 4.4 `drift.yml`
 
