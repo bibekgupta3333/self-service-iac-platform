@@ -429,8 +429,8 @@ The request page follows a request's lifecycle through `GET /v1/requests/{id}/ev
 |---|---|
 | First connection | Sends `Last-Event-ID: 0`, builds the history from the replay, then follows live. |
 | Stream closes without `end` (lifetime cap, dropped connection) | Reconnects with the id of the last frame received. A connection that delivered something starts the next attempt at least 3 s after it started, so a stream that sends one event per connection cannot loop tightly. |
-| Nothing (frame or heartbeat) for 45 s | The idle watchdog aborts the connection and reconnects the same way. |
-| Counting failures | A connection is a failure only if nothing at all arrived (not even a heartbeat) and it closed within 10 s or was cut by the watchdog. Failed attempts back off exponentially with equal jitter (1 s base, 30 s cap). A healthy idle stream is followed for as long as the page is open. |
+| No bytes at all (not even a heartbeat) for 45 s | The idle watchdog aborts the connection and reconnects the same way. |
+| Counting failures | A connection is a failure if it closed within 10 s without delivering an event (a heartbeat alone does not count, so a proxy that sends one heartbeat and closes ends in the polling fallback), or if the watchdog cut it with nothing received. Failed attempts back off exponentially with equal jitter (1 s base, 30 s cap). A healthy idle stream is followed for as long as the page is open. |
 | 5 failures in a row, or a `200` that is not `text/event-stream` (its body is cancelled) | Falls back to polling `GET /v1/requests/{id}` every 5 s. Polling pauses while the tab is hidden, reads at once when it is shown, and stops at a terminal status. |
 | `401`, `403`, `404` (stream or poll), `429` (stream) | Stops and says why; retrying cannot help. |
 | Oversized frame (over 256 KiB) | Dropped; the parser resynchronises at the next blank line. |

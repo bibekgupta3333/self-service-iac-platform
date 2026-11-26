@@ -231,8 +231,8 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 
 ### Fixed
 - Portal live status and lifecycle review follow-ups:
-  - the status stream gave up after about 25 minutes on a healthy idle stream, because heartbeats did not count and the backend ends every stream at 5 minutes. A connection now counts as failed only if nothing arrived (not even a heartbeat) and it closed within 10 seconds or went silent;
-  - an idle watchdog cuts a connection after 45 seconds without a frame or heartbeat and resumes with `Last-Event-ID`;
+  - the status stream gave up after about 25 minutes on a healthy idle stream, because heartbeats did not count and the backend ends every stream at 5 minutes. A connection now counts as failed only if it closed within 10 seconds without an event (a heartbeat alone does not count, so a proxy that sends one and closes ends in the polling fallback) or went silent with nothing received;
+  - an idle watchdog cuts a connection after 45 seconds without any bytes and resumes with `Last-Event-ID`;
   - after a healthy connection, reconnects start at least 3 seconds apart, so a stream that sends one event per connection cannot loop tightly;
   - the SSE parser scans each chunk once instead of re-parsing the whole buffer (which was quadratic), caps a frame at 256 KiB, and drops an oversized frame and resynchronises;
   - a `200` that is not an event stream has its body cancelled;

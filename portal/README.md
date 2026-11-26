@@ -175,11 +175,12 @@ hides the HTTP status and cannot tell a 429 from a dropped connection:
   request (the history list), then follows live; a reconnect sends the id of the last frame;
 - `end` stops the stream for good; a stream that closes without it (the server's 5-minute
   lifetime cap) is resumed;
-- an idle watchdog cuts a connection after 45 seconds without a frame or heartbeat comment (the
-  backend heartbeats every 15 seconds) and reconnects;
-- a closed connection counts as failed only if nothing at all arrived (not even a heartbeat)
-  and it either closed within 10 seconds or was cut by the watchdog, so a healthy idle stream
-  is followed indefinitely;
+- an idle watchdog cuts a connection after 45 seconds without any bytes (the backend
+  heartbeats every 15 seconds) and reconnects;
+- a closed connection counts as failed if it closed within 10 seconds without delivering an
+  event (a heartbeat alone does not count, so a proxy that sends one and closes ends in the
+  polling fallback), or if the watchdog cut it with nothing received. A connection that lasts
+  until the lifetime cap on heartbeats is healthy, so an idle stream is followed indefinitely;
 - after a healthy connection the next one starts at least 3 seconds after the previous one
   did, so a stream that delivers one event per connection cannot reconnect in a tight loop;
 - 401, 403, 404 and 429 `too_many_streams` stop with a message instead of retrying;
