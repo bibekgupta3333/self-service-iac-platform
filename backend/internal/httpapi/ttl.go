@@ -105,8 +105,11 @@ type dueStackDTO struct {
 type dueDTO struct {
 	// Warnings are stacks inside the 24 h window that were not warned yet.
 	Warnings []dueStackDTO `json:"warnings"`
-	// Teardowns are expired stacks without an open destroy request.
+	// Teardowns are expired stacks without an open destroy request, not in backoff and not blocked.
 	Teardowns []dueStackDTO `json:"teardowns"`
+	// Blocked are expired stacks that used up their TTL destroy attempts. They are reported
+	// only: calling teardown for them opens nothing, and they never count against a run's cap.
+	Blocked []dueStackDTO `json:"blocked"`
 }
 
 func toDueStack(d ttl.DueItem) dueStackDTO {
@@ -124,6 +127,7 @@ func (h *TTLReaperHandler) due(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, dueDTO{
 		Warnings:  fp.Map(fp.Filter(items, isPhase(ttl.PhaseWarn)), toDueStack),
 		Teardowns: fp.Map(fp.Filter(items, isPhase(ttl.PhaseTeardown)), toDueStack),
+		Blocked:   fp.Map(fp.Filter(items, isPhase(ttl.PhaseBlocked)), toDueStack),
 	})
 }
 

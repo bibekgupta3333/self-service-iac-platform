@@ -136,6 +136,9 @@ const (
 	PhaseWarn Phase = "warn"
 	// PhaseTeardown: expired; a destroy request is due.
 	PhaseTeardown Phase = "teardown"
+	// PhaseBlocked: expired, but the stack used up its TTL destroy attempts. It is reported,
+	// never retried, and kept apart from the teardowns so it cannot crowd them out.
+	PhaseBlocked Phase = "blocked"
 )
 
 // Stack is a stack as the TTL rules see it.
@@ -304,25 +307,30 @@ type Due struct {
 	Phase Phase
 }
 
-// Classify keeps the stacks that are due for a warning or a teardown at now (teardowns
-// of stacks in backoff left out), teardowns first and each group by expiry then id, so the order is deterministic. Pure.
+// Classify keeps the stacks that are due for a warning or a teardown at now and the stacks
+// that are blocked: teardowns first, then warnings, then blocked stacks, each group by expiry
+// then id, so the order is deterministic. A stack in backoff is left out. Blocked stacks
+// are a group of their own because a blocked stack stays blocked until a person acts, so
+// among teardowns it would sit in front of every run and spend the per-run cap. Pure.
 func (p Policy) Classify(stacks []Stack, now time.Time) []Due {
-	var warn, down []Due
+	var warn, down, blocked []Due
 	for _, s := range stacks {
 		switch PhaseAt(s, now) {
 		case PhaseWarn:
 			warn = append(warn, Due{Stack: s, Phase: PhaseWarn})
 		case PhaseTeardown:
-			// A stack in backoff is left alone; a blocked one stays listed so that the
-			// teardown call records it (ttl.blocked) and the reaper reports it.
-			if state, _ := p.Backoff(s, now); state != BackoffWait {
+			switch state, _ := p.Backoff(s, now); state {
+			case BackoffClear:
 				down = append(down, Due{Stack: s, Phase: PhaseTeardown})
+			case BackoffBlocked:
+				blocked = append(blocked, Due{Stack: s, Phase: PhaseBlocked})
 			}
 		}
 	}
 	sortDue(warn)
 	sortDue(down)
-	return append(down, warn...)
+	sortDue(blocked)
+	return append(append(down, warn...), blocked...)
 }
 
 func sortDue(d []Due) {

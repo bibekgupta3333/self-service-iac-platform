@@ -1,8 +1,10 @@
 package ttl
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -60,14 +62,37 @@ func (r *memRepo) get(id uuid.UUID) (Stack, error) {
 
 func (r *memRepo) Stack(_ context.Context, id uuid.UUID) (Stack, error)     { return r.get(id) }
 func (r *memRepo) LockStack(_ context.Context, id uuid.UUID) (Stack, error) { return r.get(id) }
-func (r *memRepo) Candidates(_ context.Context, horizon time.Time, limit int) ([]Stack, error) {
-	var out []Stack
+func (r *memRepo) Candidates(_ context.Context, horizon time.Time, after *Cursor, limit int) ([]Stack, error) {
+	var all []Stack
 	for _, s := range r.stacks {
 		if s.IsEphemeral && s.Environment != ProductionEnvironment && !s.ExpiresAt.After(horizon) && !r.openDestroy[s.ID] {
+			all = append(all, s)
+		}
+	}
+	slices.SortFunc(all, func(a, b Stack) int {
+		if c := a.ExpiresAt.Compare(*b.ExpiresAt); c != 0 {
+			return c
+		}
+		return bytes.Compare(a.ID[:], b.ID[:])
+	})
+	var out []Stack
+	for _, s := range all {
+		past := after == nil || s.ExpiresAt.After(after.ExpiresAt) ||
+			(s.ExpiresAt.Equal(after.ExpiresAt) && bytes.Compare(s.ID[:], after.ID[:]) > 0)
+		if past && len(out) < limit {
 			out = append(out, s)
 		}
 	}
 	return out, nil
+}
+
+func (r *memRepo) BlockedSince(_ context.Context, id uuid.UUID, since time.Time) (bool, error) {
+	for _, e := range r.events {
+		if e.Action == "ttl.blocked" && e.SubjectID == id.String() && !e.OccurredAt.Before(since) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 func (r *memRepo) SystemUserID(context.Context) (uuid.UUID, error) { return r.botID, nil }
 func (r *memRepo) LatestPullRequest(_ context.Context, id uuid.UUID) (int, bool, error) {

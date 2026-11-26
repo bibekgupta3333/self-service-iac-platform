@@ -64,14 +64,19 @@ func (r *PostgresRepository) Stack(ctx context.Context, id uuid.UUID) (Stack, er
 }
 
 // Candidates implements Repository. The stacks_expiry_idx partial index serves the filter.
-func (r *PostgresRepository) Candidates(ctx context.Context, horizon time.Time, limit int) ([]Stack, error) {
+func (r *PostgresRepository) Candidates(ctx context.Context, horizon time.Time, after *Cursor, limit int) ([]Stack, error) {
+	var afterAt, afterID any
+	if after != nil {
+		afterAt, afterID = after.ExpiresAt, after.ID
+	}
 	rows, err := r.pool.Query(ctx, `SELECT `+stackCols+stackFrom+`
 		WHERE s.is_ephemeral AND s.status NOT IN ('destroying', 'destroyed')
 		  AND e.name::text <> $1 AND s.expires_at <= $2
+		  AND ($4::timestamptz IS NULL OR (s.expires_at, s.id) > ($4, $5::uuid))
 		  AND NOT EXISTS (SELECT 1 FROM requests q
 		                  WHERE q.stack_id = s.id AND q.kind = 'destroy' AND q.completed_at IS NULL)
 		ORDER BY s.expires_at, s.id
-		LIMIT $3`, ProductionEnvironment, horizon, limit)
+		LIMIT $3`, ProductionEnvironment, horizon, limit, afterAt, afterID)
 	if err != nil {
 		return nil, fmt.Errorf("query ttl candidates: %w", err)
 	}
@@ -183,6 +188,13 @@ func (s *pgStore) HasOpenDestroy(ctx context.Context, id uuid.UUID) (bool, error
 	err := s.tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM requests WHERE stack_id = $1 AND kind = 'destroy'
 		AND completed_at IS NULL)`, id).Scan(&open)
 	return open, err
+}
+
+func (s *pgStore) BlockedSince(ctx context.Context, id uuid.UUID, since time.Time) (bool, error) {
+	var found bool
+	err := s.tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM audit_events WHERE action = 'ttl.blocked'
+		AND subject_type = 'stack' AND subject_id = $1 AND occurred_at >= $2)`, id.String(), since).Scan(&found)
+	return found, err
 }
 
 func (s *pgStore) AppendAudit(ctx context.Context, e audit.Event) error {

@@ -1,8 +1,14 @@
 package ttl
 
 import (
+	"context"
+	"slices"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
 )
 
 func TestBackoff(t *testing.T) {
@@ -61,6 +67,75 @@ func TestClassifyLeavesBackoffOutButKeepsBlocked(t *testing.T) {
 	}
 	if len(got) != 2 || !ids[sid(1).String()] || !ids[sid(3).String()] || ids[sid(2).String()] {
 		t.Fatalf("want the fresh and the blocked stack, not the one in backoff: %+v", got)
+	}
+}
+
+// Blocked stacks and stacks in backoff are the oldest expiries and never go away by
+// themselves. They must neither fill the page that bounds the actionable stacks nor be
+// listed among the teardowns: fresh expired stacks behind hundreds of them are still found.
+func TestDueFindsFreshTeardownsBehindManyBlockedAndBackoffStacks(t *testing.T) {
+	p := Policy{MinHours: 1, MaxHours: 72, DefaultHours: 24, BackoffHours: 24, MaxAttempts: 2}
+	var all []Stack
+	n := 0
+	add := func(expiredAgo time.Duration, endedAgo ...time.Duration) uuid.UUID {
+		s := stack("development", t0.Add(-expiredAgo))
+		var attempts []Attempt
+		for _, e := range endedAgo { // attempts opened after the expiry, so they count in this cycle
+			attempts = append(attempts, Attempt{CreatedAt: s.ExpiresAt.Add(time.Hour), EndedAt: t0.Add(-e), Outcome: "failed"})
+		}
+		s.ID, s.Team, s.Attempts = uuid.UUID{14: byte(n >> 8), 15: byte(n)}, "payments", attempts
+		n++
+		all = append(all, s)
+		return s.ID
+	}
+	const blockedCount, backoffCount = 450, 450 // far more than a page (200) and than the run cap
+	for i := 0; i < blockedCount; i++ {
+		add(1000*time.Hour+time.Duration(i)*time.Minute, 50*time.Hour, 40*time.Hour)
+	}
+	for i := 0; i < backoffCount; i++ {
+		add(900*time.Hour+time.Duration(i)*time.Minute, time.Hour)
+	}
+	fresh := []uuid.UUID{add(3 * time.Hour), add(2 * time.Hour), add(time.Hour)}
+	nearing := stack("development", t0.Add(5*time.Hour))
+	nearing.ID, nearing.Team = uuid.UUID{13: 1}, "payments"
+	all = append(all, nearing)
+
+	repo := newMemRepo(all...)
+	items, err := NewService(repo, members, nil, platform.FixedClock{T: t0}, p).Due(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var down, warn, blocked []uuid.UUID
+	for _, it := range items {
+		switch it.Phase {
+		case PhaseTeardown:
+			down = append(down, it.Stack.ID)
+		case PhaseWarn:
+			warn = append(warn, it.Stack.ID)
+		case PhaseBlocked:
+			blocked = append(blocked, it.Stack.ID)
+		}
+	}
+	if len(down) != 3 || !slices.Equal(down, fresh) || len(warn) != 1 {
+		t.Fatalf("teardowns %v, warnings %v: the fresh stacks must all be listed", down, warn)
+	}
+	if len(blocked) != blockedCount {
+		t.Fatalf("blocked = %d, want %d", len(blocked), blockedCount)
+	}
+	// Each blocked stack is audited once; a second call adds nothing.
+	count := func() (c int) {
+		for _, e := range repo.events {
+			if e.Action == "ttl.blocked" {
+				c++
+			}
+		}
+		return c
+	}
+	if count() != blockedCount {
+		t.Fatalf("ttl.blocked events = %d, want %d", count(), blockedCount)
+	}
+	if _, err := NewService(repo, members, nil, platform.FixedClock{T: t0}, p).Due(context.Background()); err != nil || count() != blockedCount {
+		t.Fatalf("second Due: %v, events %d", err, count())
 	}
 }
 

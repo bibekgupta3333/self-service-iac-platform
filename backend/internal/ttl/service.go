@@ -35,8 +35,16 @@ type Store interface {
 	MarkWarned(ctx context.Context, id uuid.UUID, at time.Time) error
 	// HasOpenDestroy reports a destroy request that is not terminal yet.
 	HasOpenDestroy(ctx context.Context, id uuid.UUID) (bool, error)
+	// BlockedSince reports whether ttl.blocked was already recorded for the stack at or after since.
+	BlockedSince(ctx context.Context, id uuid.UUID, since time.Time) (bool, error)
 	AppendAudit(ctx context.Context, e audit.Event) error
 	Enqueue(ctx context.Context, m outbox.Message) (bool, error)
+}
+
+// Cursor is the keyset position of a Candidates page.
+type Cursor struct {
+	ExpiresAt time.Time
+	ID        uuid.UUID
 }
 
 // Repository is the persistence port of the TTL service.
@@ -45,8 +53,9 @@ type Repository interface {
 	// Stack loads one stack without locking (apperr NotFound when missing).
 	Stack(ctx context.Context, id uuid.UUID) (Stack, error)
 	// Candidates lists live ephemeral stacks outside production that expire at or before
-	// horizon and have no open destroy request, oldest expiry first, at most limit.
-	Candidates(ctx context.Context, horizon time.Time, limit int) ([]Stack, error)
+	// horizon and have no open destroy request, oldest expiry first, at most limit, starting
+	// after the cursor (nil for the first page).
+	Candidates(ctx context.Context, horizon time.Time, after *Cursor, limit int) ([]Stack, error)
 	// SystemUserID is the platform bot's user id, owner of the requests the reaper opens.
 	SystemUserID(ctx context.Context) (uuid.UUID, error)
 	// LatestPullRequest is the number of the newest pull request opened for the stack.
@@ -200,26 +209,99 @@ func (s *Service) Extend(ctx context.Context, by identity.Principal, id uuid.UUI
 	return res, nil
 }
 
-// DueItem is a stack the reaper has to act on.
+// DueItem is a stack the reaper has to act on or report.
 type DueItem struct {
 	Stack Stack
 	Phase Phase
 }
 
-// Due lists the stacks due for a warning and for teardown at the current time, teardowns
-// first. It only reads; Warn and Teardown re-check everything under lock.
+// Paging of the due list: candidates are read in pages and classified page by page, so the
+// stacks the backoff leaves out (in backoff, blocked) never use up the limit that bounds
+// the actionable ones. MaxScan bounds the whole read.
+const (
+	duePage = 200
+	MaxScan = 5000
+)
+
+// Due lists the stacks due for a teardown or a warning at the current time (teardowns
+// first, at most MaxDue actionable stacks) and the blocked ones (at most MaxDue), which are
+// reported and never retried. It also records ttl.blocked, once per expiry, for every
+// blocked stack, so the audit trail names the stacks that need a person. Warn and Teardown
+// re-check everything under lock.
 func (s *Service) Due(ctx context.Context) ([]DueItem, error) {
 	now := s.clock.Now()
-	rows, err := s.repo.Candidates(ctx, WarnHorizon(now), MaxDue)
-	if err != nil {
-		return nil, fmt.Errorf("list ttl candidates: %w", err)
+	var actionable, blocked []Due
+	var after *Cursor
+	for scanned := 0; scanned < MaxScan && len(actionable) < MaxDue; {
+		rows, err := s.repo.Candidates(ctx, WarnHorizon(now), after, duePage)
+		if err != nil {
+			return nil, fmt.Errorf("list ttl candidates: %w", err)
+		}
+		for _, d := range s.policy.Classify(rows, now) {
+			if d.Phase == PhaseBlocked {
+				blocked = append(blocked, d)
+			} else {
+				actionable = append(actionable, d)
+			}
+		}
+		scanned += len(rows)
+		if len(rows) < duePage {
+			break
+		}
+		last := rows[len(rows)-1]
+		after = &Cursor{ExpiresAt: *last.ExpiresAt, ID: last.ID}
 	}
-	due := s.policy.Classify(rows, now)
-	out := make([]DueItem, len(due))
-	for i, d := range due {
-		out[i] = DueItem{Stack: d.Stack, Phase: d.Phase}
+	sortDue(actionable)
+	// Teardowns before warnings, as Classify orders a single page.
+	actionable = teardownsFirst(actionable)
+	if len(actionable) > MaxDue {
+		actionable = actionable[:MaxDue]
+	}
+	if len(blocked) > MaxDue {
+		blocked = blocked[:MaxDue]
+	}
+	out := make([]DueItem, 0, len(actionable)+len(blocked))
+	for _, d := range append(actionable, blocked...) {
+		out = append(out, DueItem{Stack: d.Stack, Phase: d.Phase})
+	}
+	for _, d := range blocked {
+		if err := s.recordBlocked(ctx, d.Stack); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
+}
+
+// teardownsFirst stably moves teardowns in front of warnings. Pure.
+func teardownsFirst(d []Due) []Due {
+	var down, other []Due
+	for _, x := range d {
+		if x.Phase == PhaseTeardown {
+			down = append(down, x)
+		} else {
+			other = append(other, x)
+		}
+	}
+	return append(down, other...)
+}
+
+// recordBlocked appends ttl.blocked for a blocked stack unless this expiry already has one.
+func (s *Service) recordBlocked(ctx context.Context, st Stack) error {
+	return s.repo.InTx(ctx, func(tx Store) error {
+		done, err := tx.BlockedSince(ctx, st.ID, *st.ExpiresAt)
+		if err != nil || done {
+			return err
+		}
+		e, err := event(s.clock.Now(), audit.ActorSystem, Actor, "ttl.blocked", st, "ttl-due", map[string]any{
+			"stack_path": st.Path, "expires_at": st.ExpiresAt.UTC(), "attempts": len(st.Attempts)})
+		if err != nil {
+			return err
+		}
+		if err := tx.AppendAudit(ctx, e); err != nil {
+			return fmt.Errorf("audit ttl.blocked: %w", err)
+		}
+		return nil
+	})
 }
 
 // WarnResult is the outcome of Warn.

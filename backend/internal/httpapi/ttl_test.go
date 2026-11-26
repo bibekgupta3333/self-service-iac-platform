@@ -54,7 +54,8 @@ func (f *fakeTTL) Due(context.Context) ([]ttl.DueItem, error) {
 		return ttl.DueItem{Phase: p, Stack: ttl.Stack{ID: uuid.UUID{15: n}, Team: "payments", Environment: env,
 			Path: "environments/" + env + "/payments/s" + string('0'+n), ExpiresAt: &exp}}
 	}
-	return []ttl.DueItem{mk(1, "development", ttlAt.Add(-time.Hour), ttl.PhaseTeardown), mk(2, "staging", ttlAt.Add(5*time.Hour), ttl.PhaseWarn)}, nil
+	return []ttl.DueItem{mk(1, "development", ttlAt.Add(-time.Hour), ttl.PhaseTeardown), mk(2, "staging", ttlAt.Add(5*time.Hour), ttl.PhaseWarn),
+		mk(3, "development", ttlAt.Add(-72*time.Hour), ttl.PhaseBlocked)}, nil
 }
 
 func (f *fakeTTL) Warn(_ context.Context, id uuid.UUID, corr string) (ttl.WarnResult, error) {
@@ -149,7 +150,7 @@ func TestReaperRoutes(t *testing.T) {
 			t.Fatalf("status = %d: %s", rec.Code, rec.Body)
 		}
 		var b struct {
-			Warnings, Teardowns []struct {
+			Warnings, Teardowns, Blocked []struct {
 				StackID     string `json:"stack_id"`
 				Path        string `json:"path"`
 				Environment string `json:"environment"`
@@ -160,7 +161,7 @@ func TestReaperRoutes(t *testing.T) {
 			t.Fatal(err)
 		}
 		if len(b.Teardowns) != 1 || b.Teardowns[0].Environment != "development" || b.Teardowns[0].ExpiresAt != "2026-11-26T11:00:00Z" ||
-			len(b.Warnings) != 1 || b.Warnings[0].Environment != "staging" || b.Warnings[0].StackID != (uuid.UUID{15: 2}).String() {
+			len(b.Blocked) != 1 || b.Blocked[0].StackID != (uuid.UUID{15: 3}).String() || len(b.Warnings) != 1 || b.Warnings[0].Environment != "staging" || b.Warnings[0].StackID != (uuid.UUID{15: 2}).String() {
 			t.Fatalf("due = %s", rec.Body)
 		}
 	})
