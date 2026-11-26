@@ -116,7 +116,7 @@ The queue names are inputs, not dependencies: the stack does not create the queu
 | G2 | The backend exposes only HTTP and DB pool metrics; none of the request, apply, lock or stack metrics in §2 exist | Lead time, failure rate, apply duration, lock and stack panels have no data source | Backend: a metrics collector reading `requests`, `pipeline_runs`, `locks` and `stacks` (blocked on the runs, TTL and drift work for the apply and lock series) |
 | G3 | `modules/monitoring` has no custom-metric alarm input | The failure-rate and stuck-lock alarms cannot be deployed | A `monitoring` v1.1.0 adding a `metric_alarms` map (namespace, metric name, dimensions, statistic, period, threshold, comparison), released through the module release workflow, then a stack update pinned to it |
 | G4 | The local-first platform has no SQS: the outbox is the Postgres table (`outbox`, migration 0008) and the `iacp-events` queues do not exist | The queue alarms cannot fire in development; the outbox backlog has no CloudWatch signal | Backend: publish `OutboxPending`, `OutboxOldestPendingAgeSeconds` and `OutboxDead`, and add an outbox panel and alarms once G1 and G3 are done |
-| G5 | The topic has no subscriptions | Alarms do not notify anyone | Add `subscriptions` to the stack inputs (a real email address or https endpoint) |
+| G5 | The topic has no subscriptions | Alarms do not notify anyone | Add `subscriptions` through a platform update request for this stack (a real email address or https endpoint); the generator then renders it. Do not edit the generated `main.tf` |
 | G6 | docs/02 §8 lists other dashboards and alarms (Pipeline, Lifecycle, Cost, Service) | Out of scope for the MVP observability stack | Later, as the metrics in G2 appear |
 
 ## 6. Running it locally
@@ -140,4 +140,4 @@ LocalStack 4.4 drops the tags passed to `PutMetricAlarm`. Two consequences, neit
 - a second `terraform plan` after the apply proposes an in-place tag update on the six alarms; the pr-validate round trip accepts exactly that difference (`tools.stack_pipeline converged`) and nothing else;
 - the post-apply smoke test (`tools.stack_pipeline smoke`) does not check tags on `aws_cloudwatch_metric_alarm`, and its report names the type as not checked. Tags on the topic and the key are still verified, in state and on the live resource.
 
-Real AWS keeps the tags, so both effects disappear when the stacks leave LocalStack.
+Real AWS keeps the tags, but nothing switches the exceptions off by itself: `EMULATOR_UNTAGGED` in `tools/stack_pipeline/smoke.py` applies to every run, and the exception also lives in `convergence.py`. A test ties the set to the pinned LocalStack image (4.4); when that pin moves, re-test `PutMetricAlarm` tagging and empty the set by hand if LocalStack keeps the tags.
