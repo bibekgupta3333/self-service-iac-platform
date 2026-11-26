@@ -110,6 +110,10 @@ type Store interface {
 	UpdateRequest(ctx context.Context, r *Request, from Status) error
 	// Enqueue adds an outbox job in the same transaction.
 	Enqueue(ctx context.Context, m outbox.Message) (bool, error)
+	// UpdateStackApplied writes the outcome of an apply on the stack row, which the caller
+	// holds locked (LockStackTarget). It fails with a concurrent_update conflict when the
+	// stored status is no longer w.From.
+	UpdateStackApplied(ctx context.Context, w StackApplied) error
 }
 
 // StackLocker takes the per-stack platform lock inside the request-creation transaction
@@ -282,7 +286,7 @@ func (s *Service) precheck(ctx context.Context, by identity.Principal, in Create
 	if in.Kind.TargetsExistingStack() {
 		return s.precheckExisting(ctx, by, in)
 	}
-	role, err := s.members.RoleInTeam(ctx, in.Team, by.UserID)
+	role, err := s.roleIn(ctx, by, in.Team)
 	if err != nil {
 		return fieldLookupError(err, "/team", fmt.Sprintf("unknown team %q", in.Team))
 	}
@@ -301,7 +305,7 @@ func (s *Service) precheckExisting(ctx context.Context, by identity.Principal, i
 	if err != nil {
 		return stackLookupError(err, *in.StackID)
 	}
-	role, err := s.members.RoleInTeam(ctx, t.TeamSlug, by.UserID)
+	role, err := s.roleIn(ctx, by, t.TeamSlug)
 	if err != nil {
 		return fmt.Errorf("lookup membership of team %s: %w", t.TeamSlug, err)
 	}
@@ -324,6 +328,18 @@ func (s *Service) precheckExisting(ctx context.Context, by identity.Principal, i
 		return nil
 	}
 	return s.checkResources(ctx, in.Resources)
+}
+
+// roleIn is the caller's role in a team: the stored membership (which also proves the team
+// exists) raised to admin for a platform admin, by the principal's flag (identity.Principal.
+// EffectiveRole), the same rule identity.Visibility uses for reads. Every write check goes
+// through it so that create, update and destroy agree with what the caller can see.
+func (s *Service) roleIn(ctx context.Context, by identity.Principal, teamSlug string) (Role, error) {
+	role, err := s.members.RoleInTeam(ctx, teamSlug, by.UserID)
+	if err != nil {
+		return RoleNone, err
+	}
+	return by.EffectiveRole(role), nil
 }
 
 // authorizeKind is the one decision whether a caller with role in team may create a request

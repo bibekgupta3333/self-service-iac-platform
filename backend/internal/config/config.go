@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -78,6 +79,13 @@ type Config struct {
 	PortalURL string
 	// LocalStackEndpoint is rendered into generated provider blocks (ADR-0009).
 	LocalStackEndpoint string
+	// TrustedProxies (IACP_TRUSTED_PROXIES, comma-separated CIDRs or addresses) are the
+	// reverse proxies whose X-Forwarded-For header is believed for rate limiting and the
+	// audit actor_ip. Empty (the default) trusts no proxy: the client is the TCP peer.
+	TrustedProxies []string
+	// QueueRetention (IACP_QUEUE_RETENTION) is how long processed outbox jobs and webhook
+	// delivery ids are kept before the sweeper deletes them.
+	QueueRetention time.Duration
 	// WorkerPollInterval is how often the in-process worker polls the outbox when idle.
 	WorkerPollInterval time.Duration
 }
@@ -153,6 +161,12 @@ func Load(lookup LookupFunc) (Config, error) {
 		PortalURL:          strings.TrimRight(get("PORTAL_URL", "http://localhost:3000"), "/"),
 		LocalStackEndpoint: get("LOCALSTACK_ENDPOINT", "http://localhost:4566"),
 		MetricsToken:       get("METRICS_TOKEN", ""),
+		TrustedProxies:     splitList(get("TRUSTED_PROXIES", "")),
+	}
+	for _, e := range cfg.TrustedProxies {
+		if !validProxyEntry(e) {
+			errs = append(errs, fmt.Errorf("%sTRUSTED_PROXIES: %q is neither a CIDR nor an IP address", Prefix, e))
+		}
 	}
 	oidc, err := loadOIDC(get)
 	errs = append(errs, err)
@@ -164,6 +178,8 @@ func Load(lookup LookupFunc) (Config, error) {
 	errs = append(errs, err)
 	cfg.Publisher = pub
 	cfg.WorkerPollInterval, err = loadWorker(get)
+	errs = append(errs, err)
+	cfg.QueueRetention, err = loadQueueRetention(get)
 	errs = append(errs, err)
 	if cfg.WebhookSecret != "" && len(cfg.WebhookSecret) < MinWebhookSecretLen {
 		errs = append(errs, fmt.Errorf("%sGITHUB_WEBHOOK_SECRET must be at least %d characters", Prefix, MinWebhookSecretLen))
@@ -224,6 +240,15 @@ func loadOIDC(get func(name, def string) string) (OIDCConfig, error) {
 		errs = append(errs, fmt.Errorf("%sOIDC_AUDIENCE and %sOIDC_REPOSITORY must be set together", Prefix, Prefix))
 	}
 	return o, errors.Join(errs...)
+}
+
+// validProxyEntry reports whether e is a CIDR or a single IP address. Pure.
+func validProxyEntry(e string) bool {
+	if _, err := netip.ParsePrefix(e); err == nil {
+		return true
+	}
+	_, err := netip.ParseAddr(e)
+	return err == nil
 }
 
 func splitList(s string) []string {

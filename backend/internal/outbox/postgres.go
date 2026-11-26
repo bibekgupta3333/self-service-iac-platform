@@ -95,3 +95,15 @@ func (s *PostgresStore) Retry(ctx context.Context, id int64, attempt int, availa
 func (s *PostgresStore) Dead(ctx context.Context, id int64, attempt int, at time.Time, lastErr string) error {
 	return s.finish(ctx, `UPDATE outbox SET dead_at = $3, locked_until = NULL, last_error = $4`, id, attempt, at, lastErr)
 }
+
+// PurgeProcessed removes up to limit jobs that were handled successfully before cutoff and
+// returns how many it removed. It calls purge_processed_outbox (migration 0010), which runs
+// with the owner's rights because iacp_app cannot delete from outbox, and which never
+// removes pending or dead jobs.
+func (s *PostgresStore) PurgeProcessed(ctx context.Context, cutoff time.Time, limit int) (int64, error) {
+	var n int64
+	if err := s.pool.QueryRow(ctx, `SELECT purge_processed_outbox($1, $2)`, cutoff, limit).Scan(&n); err != nil {
+		return 0, fmt.Errorf("purge processed outbox rows: %w", err)
+	}
+	return n, nil
+}

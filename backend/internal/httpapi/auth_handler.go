@@ -3,7 +3,6 @@ package httpapi
 import (
 	"context"
 	"errors"
-	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -59,9 +58,14 @@ type AuthHandler struct {
 	Secure bool
 	// Mode is echoed by /v1/me ("dev" or "github").
 	Mode string
-	// LoginLimiter bounds GET /v1/auth/login per remote address (nil: unlimited). Behind the
-	// portal proxy the remote address is the portal's, so it acts as a global cap there.
+	// LoginLimiter bounds GET /v1/auth/login per client address (nil: unlimited). The
+	// address is the TCP peer unless the peer is in Proxies, in which case it is the
+	// right-most untrusted X-Forwarded-For entry; without trusted proxies, a portal proxy in
+	// front makes the peer the portal's address and the limiter one global bucket.
 	LoginLimiter *ratelimit.Limiter
+	// Proxies are the reverse proxies whose X-Forwarded-For is believed; the zero value
+	// trusts none. The client address is also the actor_ip of the login audit events.
+	Proxies TrustedProxies
 }
 
 const stateCookieMaxAge = 10 * time.Minute
@@ -99,7 +103,7 @@ func (h *AuthHandler) stateCookie(value string, maxAge time.Duration) *http.Cook
 
 func (h *AuthHandler) login(w http.ResponseWriter, r *http.Request) {
 	if h.LoginLimiter != nil {
-		ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+		ip := h.Proxies.Request(r)
 		if ok, retry := h.LoginLimiter.AllowN(ip); !ok {
 			w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
 			writeError(w, r, &apperr.Error{Kind: apperr.KindRateLimited, Code: "rate_limited",
@@ -131,7 +135,7 @@ func (h *AuthHandler) callback(w http.ResponseWriter, r *http.Request) {
 	if q.Get("error") != "" { // the user declined on GitHub
 		err = oauth.ErrInvalidState
 	} else {
-		ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+		ip := h.Proxies.Request(r)
 		res, err = h.Login.Complete(r.Context(), q.Get("code"), q.Get("state"), cookieState,
 			oauth.Meta{IP: ip, CorrelationID: RequestIDFrom(r.Context())})
 	}
@@ -208,7 +212,7 @@ func (h *AuthHandler) auditLogout(r *http.Request, rec session.Record) {
 		return
 	}
 	p := rec.Principal()
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	ip := h.Proxies.Request(r)
 	if err := h.Audit.Record(r.Context(), audit.Event{ActorType: string(p.Type), ActorID: p.AuditActorID(), ActorIP: ip,
 		Action: "auth.logout", SubjectType: "user", SubjectID: p.AuditActorID(), CorrelationID: RequestIDFrom(r.Context())}); err != nil {
 		observability.Logger(r.Context()).ErrorContext(r.Context(), "audit logout failed", "error", err)

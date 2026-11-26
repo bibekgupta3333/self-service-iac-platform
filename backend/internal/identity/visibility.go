@@ -6,6 +6,8 @@ import (
 	"slices"
 
 	"github.com/google/uuid"
+
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/rbac"
 )
 
 // Visibility is the set of teams whose data a caller may read: every team for a platform
@@ -61,4 +63,16 @@ func (s *UserStore) VisibleTeams(ctx context.Context, p Principal) (Visibility, 
 		return Visibility{}, fmt.Errorf("read visible teams: %w", err)
 	}
 	return Visibility{TeamIDs: ids}, nil
+}
+
+// EffectiveRole is the role p holds in a team where its stored membership gives stored. A
+// platform admin counts as team admin everywhere, which is also what VisibleTeams grants,
+// so a read and a write against the same team always agree. The flag lives on the
+// principal, so the dev-mode user (an admin for route policies, never in the database) is
+// covered without being made a database admin. Pure.
+func (p Principal) EffectiveRole(stored rbac.Role) rbac.Role {
+	if p.PlatformAdmin {
+		return rbac.RoleAdmin
+	}
+	return stored
 }

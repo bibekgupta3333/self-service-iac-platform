@@ -108,7 +108,7 @@ func (s *Service) authorizeView(ctx context.Context, by identity.Principal, id u
 	if !ok {
 		return fmt.Errorf("request %s has a stack path without a team: %q", id, req.Stack.Path)
 	}
-	role, err := s.members.RoleInTeam(ctx, team, by.UserID)
+	role, err := s.roleIn(ctx, by, team)
 	if apperr.IsKind(err, apperr.KindNotFound) || (err == nil && !CanView(role)) {
 		return notFound
 	}
