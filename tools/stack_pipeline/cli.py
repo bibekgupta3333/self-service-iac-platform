@@ -307,7 +307,7 @@ def run_report(args: argparse.Namespace) -> int:
     except (ReportError, ApiError, StackMetadataError, ValueError) as exc:
         if not args.warn_on_error:
             raise
-        print(f"::warning title=Run report not sent::{exc}")
+        print(f"::warning title=Run report not sent::{annotation(str(exc))}")
         return 0
     body = resp.body
     print(f"reported {args.pipeline}/{args.stage}={payload['status']}: run {body.get('run_id')} "
@@ -335,6 +335,11 @@ def run_lock(args: argparse.Namespace) -> int:
     return 0
 
 
+def annotation(text: str) -> str:
+    """Escape text for a workflow command message so it cannot start a new command. Pure."""
+    return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
 def _write_outputs(path: Path | None, values: Mapping[str, str]) -> None:
     if path is None:
         return
@@ -357,7 +362,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return COMMANDS[args.command](args)
-    except (DetectionError, StackMetadataError, PinError, ReportError, ApiError) as exc:
+    except (ReportError, ApiError) as exc:
+        # These can quote server responses; keep them on one line.
+        print(f"error: {annotation(str(exc))}", file=sys.stderr)
+        return 1
+    except (DetectionError, StackMetadataError, PinError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:

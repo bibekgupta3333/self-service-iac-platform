@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from tools.stack_pipeline.api_client import ApiError, Credential, IacpApiClient, TokenSource
-from tools.stack_pipeline.cli import main
+from tools.stack_pipeline.cli import annotation, main
 
 SHA = "e4" * 20
 STACK = "11111111-1111-4111-8111-111111111111"
@@ -312,3 +312,17 @@ class TestLockCommand:
         api.reply("POST", f"/v1/internal/stacks/{STACK}/lock", 202, {"lock": "queued", "queued_behind": REQ, "current": LOCK})
         assert main(["lock", "acquire", "--stack-id", STACK, "--request-id", REQ, "--api-url", api.url]) == 1
         assert "not granted" in capsys.readouterr().err
+
+
+def test_annotation_cannot_start_a_new_workflow_command():
+    assert annotation("bad\n::add-mask::x 100%\r") == "bad%0A::add-mask::x 100%25%0D"
+
+
+def test_server_text_in_warnings_stays_on_one_line(tmp_path, make_stack, runner_env, api, capsys):
+    root = make_stack("development", "platform", "smoke")
+    api.reply("POST", "/v1/runs", 400, {"code": "bad_request", "title": "x\n::error::injected"})
+    rc = main(["--repo-root", str(tmp_path), "report", str(root), "--pipeline", "validate", "--stage", "summary",
+               "--status", "passed", "--api-url", api.url, "--warn-on-error"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "\n::error::" not in out and "%0A::error::injected" in out
