@@ -23,6 +23,7 @@ from tools.module_release import (
     release_notes,
     required_bump,
 )
+from tools.module_release.interface import normalise_expression
 from tools.module_release.models import Change, Subject
 
 BASE_TF = """
@@ -457,3 +458,22 @@ class TestRequirements:
         before = parse_interface({"variables.tf": BASE_TF})
         assert labels(diff_interfaces(before, versions())) == [
             ("terraform", "required_version", Bump.MAJOR), ("provider", "hashicorp/aws", Bump.MINOR)]
+
+
+class TestNormalisation:
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ('${contains(["a b"], var.x)}', 'contains(["a b"],var.x)'),
+            ('${length( var.x ) > 0}', "length(var.x)>0"),
+            ('${var.x == "say \\"hi there\\""}', 'var.x=="say \\"hi there\\""'),
+            ("map( string )", "map(string)"),
+        ],
+    )
+    def test_keeps_string_literals(self, raw, expected):
+        assert normalise_expression(raw) == expected
+
+    def test_whitespace_inside_a_literal_is_a_validation_change(self):
+        text = BASE_TF.replace('can(regex("^[a-z]+$", var.name))', 'contains(["a b"], var.name)')
+        narrowed = text.replace('["a b"]', '["ab"]')
+        assert labels(diff_interfaces(iface(text), iface(narrowed))) == [("variable", "name", Bump.MAJOR)]

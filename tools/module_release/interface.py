@@ -6,7 +6,6 @@ so callers decide whether the text comes from the working tree or a git tag.
 
 from __future__ import annotations
 
-import re
 from typing import Any, Iterable, Mapping
 
 import hcl2
@@ -15,19 +14,40 @@ from hcl2 import SerializationOptions
 from .models import Interface, Output, Variable
 
 _OPTIONS = SerializationOptions(with_comments=False, explicit_blocks=False, strip_string_quotes=True)
-_WHITESPACE = re.compile(r"\s+")
 
 
 class InterfaceError(ValueError):
     """A Terraform file could not be parsed."""
 
 
+def strip_whitespace_outside_strings(text: str) -> str:
+    """Remove whitespace that is not inside a ``"..."`` string literal (escapes respected)."""
+    out: list[str] = []
+    in_string = escaped = False
+    for ch in text:
+        if in_string:
+            out.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+            out.append(ch)
+        elif not ch.isspace():
+            out.append(ch)
+    return "".join(out)
+
+
 def normalise_expression(raw: Any) -> str:
-    """Render an HCL expression in a canonical form: no ``${}`` wrapper, no whitespace."""
+    """Render an HCL expression in a canonical form: no ``${}`` wrapper and no
+    whitespace outside string literals (string contents are kept verbatim)."""
     text = str(raw).strip()
     if text.startswith("${") and text.endswith("}"):
         text = text[2:-1]
-    return _WHITESPACE.sub("", text)
+    return strip_whitespace_outside_strings(text)
 
 
 def parse_variable(name: str, body: Mapping[str, Any]) -> Variable:
