@@ -10,6 +10,10 @@
 #   version has no tag yet and modules tagged without a GitHub release, then
 #   creates modules/<name>/v<version>, a GitHub release, and (when configured)
 #   indexes the version in the catalog.
+# workflow_dispatch on main: the same as a push, over every module. Use it to
+#   re-run a release or a catalog index that failed. Releases run only from
+#   main via push or workflow_dispatch, which is also the only OIDC caller
+#   the backend accepts on /v1/internal/catalog/index (auth.RouteCatalogIndex).
 #
 # fmt, validate, TFLint, Checkov, terraform test, the manifest validator and
 # Terratest already run on every PR in ci.yml; this workflow does not repeat them.
@@ -25,6 +29,7 @@ on:
       - "tools/module_release/**"
       - "tools/requirements.txt"
       - ".github/workflows/module-release.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -70,8 +75,9 @@ jobs:
             changed="$(git diff --name-only "$base" HEAD -- $RELEASE_PATHS)"
             needed=$([ -n "$changed" ] && echo true || echo false)
           else
+            # push is path-filtered; workflow_dispatch has no base, so detect selects every module.
             base="$PUSH_BEFORE"
-            needed=true # push is already path-filtered
+            needed=true
           fi
           { echo "base=$base"; echo "needed=$needed"; } | tee -a "$GITHUB_OUTPUT"
 
@@ -102,7 +108,7 @@ jobs:
           # --include-untagged: a module whose declared version has no tag is
           # released on the next push to main, so a failed or skipped run self-heals.
           args=(detect --base "$BASE" --include-untagged)
-          if [ "$EVENT" = "push" ]; then
+          if [ "$EVENT" != "pull_request" ]; then
             # Also retry modules whose tag exists but whose GitHub release is missing.
             gh release list --repo "$REPO" --limit 1000 --json tagName --jq '.[].tagName' > "$RUNNER_TEMP/released.txt"
             args+=(--released-tags "$RUNNER_TEMP/released.txt")
@@ -168,7 +174,9 @@ jobs:
 
   release:
     needs: [detect, gate]
-    if: github.event_name == 'push' && needs.detect.outputs.modules != '[]'
+    if: >-
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && github.ref == 'refs/heads/main' && needs.detect.outputs.modules != '[]'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
