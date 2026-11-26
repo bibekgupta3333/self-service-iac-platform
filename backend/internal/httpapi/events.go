@@ -38,8 +38,10 @@ type StreamOptions struct {
 	// signal, so http.Server.Shutdown does not wait out streams of up to MaxLifetime.
 	Stop <-chan struct{}
 	// Session, when set, is asked on every poll whether the session behind the request is
-	// still live; the stream ends when it is not, so logout or revocation cuts it at once
-	// instead of after MaxLifetime. Nil in dev mode, which has no sessions.
+	// still live and whether its user is still (or newly) a platform admin; the stream ends
+	// when the session is gone or the admin flag changed, so logout, revocation, a demotion
+	// or a promotion cuts it at once instead of after MaxLifetime (the client reconnects and
+	// is authorized afresh). Nil in dev mode, which has no sessions.
 	Session StreamSession
 }
 
@@ -320,10 +322,16 @@ func (h *RequestEventsHandler) stream(w http.ResponseWriter, r *http.Request) {
 			beat.Reset(h.opts.Heartbeat)
 		case <-poll.C:
 			if h.opts.Session != nil {
-				if err := h.opts.Session.Alive(ctx, r); err != nil {
+				admin, err := h.opts.Session.Alive(ctx, r)
+				if err != nil {
 					if ctx.Err() == nil {
 						log.InfoContext(ctx, "status stream ended: session is no longer live", "request", id, "reason", err.Error())
 					}
+					return
+				}
+				if admin != p.PlatformAdmin {
+					log.InfoContext(ctx, "status stream ended: the user's platform admin flag changed", "request", id,
+						"was_admin", p.PlatformAdmin, "is_admin", admin)
 					return
 				}
 			}
