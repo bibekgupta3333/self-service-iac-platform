@@ -174,6 +174,18 @@ describe("RequestLive", () => {
     expect(getRequest).not.toHaveBeenCalled();
   });
 
+  it("keeps treating a request as live after a refresh brings a terminal status", async () => {
+    const getRequest = vi.fn(async (): Promise<RequestSummary> => ({ ...base, status: "applied" }));
+    const openRequestEvents = vi.fn(async () => new Response("<html></html>", { status: 200, headers: { "content-type": "text/html" } }));
+    const client = { openRequestEvents, getRequest };
+    const { rerender } = render(<RequestLive request={base} client={client} streamOptions={fast} pollMs={5} />);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Request applied. No further changes."));
+    // router.refresh() re-renders the page with the server's now-terminal request.
+    rerender(<RequestLive request={{ ...base, status: "applied" }} client={client} streamOptions={fast} pollMs={5} />);
+    expect(screen.queryByText(/already finished when the page loaded/)).not.toBeInTheDocument();
+    expect(screen.getByText(/only available over the live connection/)).toBeInTheDocument();
+  });
+
   it("shows each change once when a resumed stream replays the frame it was cut on", async () => {
     const responses = [
       sse([status(1, "pr_open", "pr_opened", "draft"), status(2, "validating", "validation_started", "pr_open")]),

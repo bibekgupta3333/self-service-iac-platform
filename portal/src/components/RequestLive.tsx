@@ -90,7 +90,8 @@ export function RequestLive({ request, client, streamOptions, pollMs = POLL_MS, 
   const previous = useRef(live.status);
   const id = request.id;
   // A request that was already terminal never changes again: no stream, no polling.
-  const finishedOnLoad = isTerminal(request.status);
+  // Captured once: router.refresh() later passes a new request prop that may be terminal.
+  const [finishedOnLoad] = useState(() => isTerminal(request.status));
 
   useEffect(() => {
     if (finishedOnLoad) return;
