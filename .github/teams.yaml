@@ -1,0 +1,26 @@
+# Source of truth for .github/CODEOWNERS (WBS 6.6). Regenerate after any change:
+#   .venv/bin/python -m tools.codeowners          # write
+#   .venv/bin/python -m tools.codeowners --check  # what CI runs; fails on drift
+#
+# org:              GitHub organisation. A team with no `owners` is owned by @<org>/<slug>.
+#                   This repository lives under a personal account, which has no teams,
+#                   so it is unset and every team lists explicit owners.
+# default_owners:   owners of everything not matched below (`*`).
+# platform_owners:  owners of platform_paths (policy gates, CI, modules, the stack tree).
+# teams.<slug>:     owners of environments/<env>/<slug>/ in every environment;
+#                   `environments.<env>` overrides one environment (for example
+#                   production -> @<org>/<slug>-maintainers, docs/07 §7).
+#
+# Every team that owns a stack under environments/ must be listed here; the tool
+# fails otherwise.
+default_owners: ["@bibekgupta3333"]
+platform_owners: ["@bibekgupta3333"]
+platform_paths:
+  - /policies/
+  - /.github/
+  - /.tflint.hcl
+  - /environments/
+  - /modules/
+teams:
+  platform:
+    owners: ["@bibekgupta3333"]
