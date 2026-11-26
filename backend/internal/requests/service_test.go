@@ -254,6 +254,25 @@ func (m *memStore) OpenRequestKinds(_ context.Context, stackID uuid.UUID) ([]Kin
 	return out, nil
 }
 
+func (m *memStore) LatestSpec(_ context.Context, stackID uuid.UUID) (json.RawMessage, bool, error) {
+	var best *Request
+	for _, r := range m.s.requests {
+		if r.Stack.ID != stackID || (r.Kind != KindCreate && r.Kind != KindUpdate) {
+			continue
+		}
+		if r.Status == StatusFailed || r.Status == StatusRejected || r.Status == StatusCancelled {
+			continue
+		}
+		if best == nil || !r.CreatedAt.Before(best.CreatedAt) {
+			best = r
+		}
+	}
+	if best == nil {
+		return nil, false, nil
+	}
+	return best.Spec, true, nil
+}
+
 func (m *memStore) LockRequest(ctx context.Context, id uuid.UUID) (*Request, error) {
 	return m.GetRequest(ctx, id)
 }

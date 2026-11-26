@@ -32,10 +32,14 @@ type CreateInput struct {
 	Region      string     `json:"region,omitempty"`
 	Ephemeral   *Ephemeral `json:"ephemeral,omitempty"`
 	// ConfirmStackName must repeat the stack's name on a destroy.
-	ConfirmStackName string          `json:"confirm_stack_name,omitempty"`
-	Justification    string          `json:"justification,omitempty"`
-	Resources        []ResourceInput `json:"resources"`
-	DependsOn        []string        `json:"depends_on,omitempty"`
+	ConfirmStackName string `json:"confirm_stack_name,omitempty"`
+	// AllowRemovals lets an update drop resources of the stack's current spec. Without it
+	// such an update is refused, so a form built from an older spec cannot silently delete
+	// what a newer request added.
+	AllowRemovals bool            `json:"allow_removals,omitempty"`
+	Justification string          `json:"justification,omitempty"`
+	Resources     []ResourceInput `json:"resources"`
+	DependsOn     []string        `json:"depends_on,omitempty"`
 }
 
 // Ephemeral requests a stack that is destroyed after TTLHours.
@@ -113,6 +117,9 @@ func validateNewStackTarget(in CreateInput, add fieldAdder) {
 	if in.ConfirmStackName != "" {
 		add("/confirm_stack_name", "not_allowed", "only a destroy confirms the stack name")
 	}
+	if in.AllowRemovals {
+		add("/allow_removals", "not_allowed", "only an update can remove resources")
+	}
 }
 
 // validateExistingStackTarget checks how an update or destroy names its stack: by
@@ -136,6 +143,9 @@ func validateExistingStackTarget(in CreateInput, add fieldAdder) {
 	}
 	switch in.Kind {
 	case KindDestroy:
+		if in.AllowRemovals {
+			add("/allow_removals", "not_allowed", "only an update can remove resources")
+		}
 		if !stackNameRe.MatchString(in.ConfirmStackName) {
 			add("/confirm_stack_name", "required", "repeat the stack name (^[a-z][a-z0-9-]{1,40}$) to confirm the destroy")
 		}
@@ -334,6 +344,23 @@ func NormalizeForStack(in CreateInput, t StackTarget) NormalizedSpec {
 		n.Resources = []ResourceInput{}
 	}
 	return n
+}
+
+// RemovedResources returns the instance names of prev that next no longer lists, sorted.
+// An update is a full replacement of the resource list, so these are destroyed by it. Pure.
+func RemovedResources(prev NormalizedSpec, next []ResourceInput) []string {
+	kept := make(map[string]bool, len(next))
+	for _, r := range next {
+		kept[r.Name] = true
+	}
+	var gone []string
+	for _, r := range prev.Resources {
+		if !kept[r.Name] {
+			gone = append(gone, r.Name)
+		}
+	}
+	slices.Sort(gone)
+	return gone
 }
 
 // RequestHash fingerprints an idempotent POST: sha256(method + path + body).

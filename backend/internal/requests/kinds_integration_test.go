@@ -46,6 +46,14 @@ func TestUpdateAndDestroyAgainstPostgres(t *testing.T) {
 		t.Fatal("an update that holds the lock must enqueue a publish job")
 	}
 
+	// The newest spec is the update's: an update that drops one of its resources is refused
+	// unless it says so, and then it queues like any other.
+	shrunk := stackInput(updateInput(), id)
+	shrunk.Resources = shrunk.Resources[:1]
+	if _, err := f.svc.Create(ctx, f.user, createCmd(shrunk, "kinds-shrink-001")); !hasCode(err, "resources_removed") {
+		t.Fatalf("shrinking update: %v", err)
+	}
+
 	// A destroy submitted meanwhile queues behind the update; nothing may follow it.
 	down, err := f.svc.Create(ctx, f.user, createCmd(stackInput(destroyInput(), id), "kinds-destroy-01"))
 	if err != nil {

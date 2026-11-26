@@ -97,6 +97,9 @@ type Store interface {
 	GetRequestByShortID(ctx context.Context, shortID string) (*Request, error)
 	// LockStackTarget loads an existing stack FOR UPDATE (apperr NotFound when it does not exist).
 	LockStackTarget(ctx context.Context, id uuid.UUID) (StackTarget, error)
+	// LatestSpec returns the spec of the stack's newest create or update request that is not
+	// failed, rejected or cancelled; ok is false when there is none.
+	LatestSpec(ctx context.Context, stackID uuid.UUID) (spec json.RawMessage, ok bool, err error)
 	// OpenRequestKinds lists the kinds of the stack's requests that are not terminal yet.
 	OpenRequestKinds(ctx context.Context, stackID uuid.UUID) ([]Kind, error)
 	// LockRequest loads the request FOR UPDATE.
@@ -414,6 +417,11 @@ func (s *Service) createForStack(ctx context.Context, st Store, by identity.Prin
 	if err := CheckStackAllowsKind(in.Kind, t.Status, open); err != nil {
 		return nil, err
 	}
+	if in.Kind == KindUpdate && !in.AllowRemovals {
+		if err := s.checkNoRemovals(ctx, st, t.ID, in); err != nil {
+			return nil, err
+		}
+	}
 	return s.record(ctx, st, by, cmd, StackRef{ID: t.ID, Path: t.Path, Status: string(t.Status)}, t.TeamID, NormalizeForStack(in, t))
 }
 
@@ -429,6 +437,32 @@ func createdPayload(req *Request, stack StackRef, in CreateInput) map[string]any
 		p["confirm_stack_name"] = in.ConfirmStackName
 	}
 	return p
+}
+
+// checkNoRemovals refuses an update that drops resources of the stack's newest spec (the
+// latest create or update that is not failed, rejected or cancelled) unless the caller said
+// so with allow_removals. The stack row is locked, so the newest spec cannot change under it.
+func (s *Service) checkNoRemovals(ctx context.Context, st Store, stackID uuid.UUID, in CreateInput) error {
+	raw, ok, err := st.LatestSpec(ctx, stackID)
+	if err != nil {
+		return fmt.Errorf("load the stack's current spec: %w", err)
+	}
+	if !ok {
+		return nil
+	}
+	var prev NormalizedSpec
+	if err := json.Unmarshal(raw, &prev); err != nil {
+		return fmt.Errorf("decode the stack's current spec: %w", err)
+	}
+	gone := RemovedResources(prev, in.Resources)
+	if len(gone) == 0 {
+		return nil
+	}
+	names := strings.Join(gone, ", ")
+	return apperr.Invalid("resources_removed",
+		fmt.Sprintf("this update would destroy %s, which the stack's current spec has; if that is intended, send allow_removals: true", names),
+		apperr.FieldError{Pointer: "/resources", Code: "removes_resources",
+			Message: fmt.Sprintf("the current spec has %s; start from the stack's current spec or send allow_removals", names)})
 }
 
 // record inserts the draft request for stack, audits request.created and takes the stack

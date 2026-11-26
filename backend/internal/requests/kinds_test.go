@@ -274,6 +274,80 @@ func TestUpdateRequest(t *testing.T) {
 	}
 }
 
+func TestRemovedResources(t *testing.T) {
+	prev := NormalizedSpec{Resources: []ResourceInput{{Name: "b"}, {Name: "a"}, {Name: "c"}}}
+	if got := RemovedResources(prev, []ResourceInput{{Name: "a"}, {Name: "new"}}); !slices.Equal(got, []string{"b", "c"}) {
+		t.Fatalf("got %v", got)
+	}
+	if got := RemovedResources(prev, []ResourceInput{{Name: "c"}, {Name: "b"}, {Name: "a"}}); len(got) != 0 {
+		t.Fatalf("same names in another order remove nothing: %v", got)
+	}
+	if got := RemovedResources(NormalizedSpec{}, nil); len(got) != 0 {
+		t.Fatalf("got %v", got)
+	}
+}
+
+// An update replaces the whole resource list. A form built from an older spec would delete
+// what a newer request added, so shrinking the list needs an explicit allow_removals.
+func TestUpdateCannotSilentlyRemoveResources(t *testing.T) {
+	ctx := context.Background()
+	_, svc, created := existingStackFixture(t, StackActive)
+	shrunk := stackInput(updateInput(), created.Stack.ID)
+	shrunk.Resources = shrunk.Resources[:1] // drops one of the two resources of the create
+
+	_, err := svc.Create(ctx, dev, createCmd(shrunk, "key-shrink-0001"))
+	e, ok := apperr.As(err)
+	if !ok || e.Code != "resources_removed" || e.Kind != apperr.KindInvalid || len(e.Fields) != 1 || e.Fields[0].Pointer != "/resources" {
+		t.Fatalf("err = %v", err)
+	}
+	dropped := "order_processor"
+	if shrunk.Resources[0].Name == dropped {
+		dropped = "orders_queue"
+	}
+	if !strings.Contains(e.Message, dropped) {
+		t.Fatalf("the message must name %s: %s", dropped, e.Message)
+	}
+
+	shrunk.AllowRemovals = true
+	if _, err := svc.Create(ctx, dev, createCmd(shrunk, "key-shrink-0002")); err != nil {
+		t.Fatalf("an explicit allow_removals must pass: %v", err)
+	}
+	// The newest spec is now the shrunk one, so a form built from it may add resources again.
+	grown := stackInput(updateInput(), created.Stack.ID)
+	if _, err := svc.Create(ctx, dev, createCmd(grown, "key-shrink-0003")); err != nil {
+		t.Fatalf("growing the list needs no flag: %v", err)
+	}
+}
+
+func TestRemovalCheckIgnoresSpecsThatNeverApplied(t *testing.T) {
+	for _, dead := range []Status{StatusFailed, StatusRejected, StatusCancelled} {
+		_, svc, created := existingStackFixture(t, StackActive)
+		created.Status = dead // the only earlier spec never took effect
+		in := stackInput(updateInput(), created.Stack.ID)
+		in.Resources = in.Resources[:1]
+		if _, err := svc.Create(context.Background(), dev, createCmd(in, "key-dead-spec-01")); err != nil {
+			t.Fatalf("%s: %v", dead, err)
+		}
+	}
+}
+
+func TestAllowRemovalsIsForUpdatesOnly(t *testing.T) {
+	c := validInput()
+	c.AllowRemovals = true
+	d := destroyInput()
+	d.AllowRemovals = true
+	for name, in := range map[string]CreateInput{"create": c, "destroy": d} {
+		if !slices.Contains(pointers(ValidateShape(in)), "/allow_removals:not_allowed") {
+			t.Errorf("%s accepted allow_removals", name)
+		}
+	}
+	u := updateInput()
+	u.AllowRemovals = true
+	if len(ValidateShape(u)) != 0 {
+		t.Fatalf("an update may carry it: %v", ValidateShape(u))
+	}
+}
+
 func TestDestroyRequest(t *testing.T) {
 	repo, svc, created := existingStackFixture(t, StackActive)
 	ctx := context.Background()

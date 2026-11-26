@@ -2,6 +2,7 @@ package requests
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -44,6 +45,21 @@ func (r *PostgresRepository) StackTarget(ctx context.Context, id uuid.UUID) (Sta
 // stack-lock operation uses.
 func (s *pgStore) LockStackTarget(ctx context.Context, id uuid.UUID) (StackTarget, error) {
 	return stackTarget(ctx, s.tx, id, "FOR UPDATE OF s")
+}
+
+// LatestSpec implements Store.
+func (s *pgStore) LatestSpec(ctx context.Context, stackID uuid.UUID) (json.RawMessage, bool, error) {
+	var spec []byte
+	err := s.tx.QueryRow(ctx, `SELECT spec FROM requests
+		WHERE stack_id = $1 AND kind IN ('create', 'update') AND status NOT IN ('failed', 'rejected', 'cancelled')
+		ORDER BY created_at DESC, id DESC LIMIT 1`, stackID).Scan(&spec)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("query latest spec: %w", err)
+	}
+	return spec, true, nil
 }
 
 // OpenRequestKinds implements Store.
