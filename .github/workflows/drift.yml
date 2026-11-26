@@ -217,10 +217,6 @@ jobs:
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
           if [ "$code" = "0" ] || [ "$code" = "2" ]; then
             terraform show -json drift.tfplan > "$RUNNER_TEMP/drift.json"
-          else
-            # The tool keeps only one redacted summary line of this text (never the rest: provider
-            # errors can echo values), in the result file, the annotation and the platform's report.
-            tail -n 5 "$RUNNER_TEMP/drift.txt" > "$RUNNER_TEMP/drift-error.txt"
           fi
           rm -f drift.tfplan
 
@@ -243,7 +239,10 @@ jobs:
           if [ -n "$PLAN_EXIT_CODE" ]; then
             args+=(--exit-code "$PLAN_EXIT_CODE")
             if [ -f "$RUNNER_TEMP/drift.json" ]; then args+=(--plan "$RUNNER_TEMP/drift.json"); fi
-            if [ -f "$RUNNER_TEMP/drift-error.txt" ]; then args+=(--error-message "$(cat "$RUNNER_TEMP/drift-error.txt")"); fi
+            # The whole log, not a window: the tool keeps only its first "Error:" line, redacted
+            # and capped (provider errors elsewhere in the log can echo values), in the result
+            # file, the annotation and the platform's report.
+            if [ "$PLAN_EXIT_CODE" = "1" ] && [ -f "$RUNNER_TEMP/drift.txt" ]; then args+=(--error-file "$RUNNER_TEMP/drift.txt"); fi
           else
             # The plan never ran: say which earlier step stopped it.
             failed="module pins"

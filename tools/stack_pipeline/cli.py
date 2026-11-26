@@ -37,6 +37,7 @@ from .report import (
 )
 
 DRIFT_MAX_STACKS = 256  # one drift.yml dispatch (docs/06 section 4)
+MAX_LOG_BYTES = 1_000_000  # how much of terraform's log `drift scan --error-file` reads
 API_URL_ENV = "IACP_API_URL"
 AUDIENCE_ENV = "IACP_OIDC_AUDIENCE"
 
@@ -166,7 +167,9 @@ def build_parser() -> argparse.ArgumentParser:
     d_scan.add_argument("stack_dir", type=Path)
     d_scan.add_argument("--exit-code", type=int, required=True, help="terraform's exit code (0, 1 or 2)")
     d_scan.add_argument("--plan", type=Path, help="terraform show -json of the refresh-only plan (needed for exit 0 and 2)")
-    d_scan.add_argument("--error-message", default="", help="what failed, for exit 1")
+    d_scan.add_argument("--error-message", default="", help="what failed, for exit 1 (only its `Error:` line is kept)")
+    d_scan.add_argument("--error-file", type=Path,
+                        help="terraform's whole log for exit 1; only its first `Error:` line is kept, redacted and capped")
     d_scan.add_argument("--out", type=Path, required=True, help="result file (plan values never reach it)")
     d_report = drift_sub.add_parser("report", help="POST every scan result under --results-dir to $IACP_API_URL/v1/internal/drift")
     d_report.add_argument("--results-dir", type=Path, required=True, help="directory of result files written by `drift scan`")
@@ -442,7 +445,11 @@ def _drift_paths(raw: str) -> list[str] | None:
 def _drift_scan(args: argparse.Namespace) -> int:
     meta = FileSystemStackRepository(args.repo_root).load_dir(args.stack_dir)
     plan = _read_json(args.plan)
-    outcome = build_outcome(meta.ref.path, args.exit_code, plan if isinstance(plan, dict) else None, args.error_message)
+    # The whole log is read (bounded) rather than a pre-cut window: the summary is the first
+    # `Error:` line wherever it is, and nothing else of the log is kept.
+    log = _read_text(args.error_file) if args.error_file is not None else None
+    message = (log or "")[:MAX_LOG_BYTES] if log is not None else args.error_message
+    outcome = build_outcome(meta.ref.path, args.exit_code, plan if isinstance(plan, dict) else None, message)
     errs = outcome.problems()
     if errs:
         raise ValueError("drift result is invalid: " + "; ".join(errs))

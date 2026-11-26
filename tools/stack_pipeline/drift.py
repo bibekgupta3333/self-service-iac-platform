@@ -127,22 +127,34 @@ _SECRET_RE = re.compile(
 GENERIC_FAILURE = "terraform plan -refresh-only failed; see the workflow log"
 
 
+_ERROR_LINE_RE = re.compile(r"Error:\s+\S")
+_BOX = " \t\u2502\u2577\u2575"
+
+
 def summarize_error(text: str) -> str:
     """One redacted line of terraform's failure output, at most ``MAX_SUMMARY`` characters. Pure.
 
-    Provider errors can echo request bodies or attribute values, and the text ends up in an
-    annotation and in the platform's report, so only the first non-empty line is kept
-    (terraform prints ``Error: <summary>`` first), credential-shaped text is replaced and
-    control characters become spaces. Mirrors ``drift.SummarizeError`` in the backend.
+    Terraform prints a diagnostic as a box (``\u2577`` ... ``\u2575``, each line prefixed with
+    ``\u2502``) whose first line is ``Error: <summary>``; the lines after it carry source
+    snippets and provider detail, which can hold attribute values and request bodies. Only the
+    first line that starts with ``Error:`` (after the box characters) is kept; with none, the
+    fixed ``GENERIC_FAILURE`` is used, never "the first non-empty line" (on a full log that is
+    a "Refreshing state" line, on a tail it is source text). Credential-shaped text is replaced
+    as defence in depth and control characters become spaces. Mirrors ``drift.SummarizeError``
+    in the backend.
     """
-    line = next((t for raw in text.splitlines() if (t := raw.strip(" \t\u2502"))), "")
-    line = "".join(" " if ord(c) < 0x20 or ord(c) == 0x7F else c for c in line)
+    for raw in text.splitlines():
+        line = raw.strip().strip(_BOX).strip()
+        if not _ERROR_LINE_RE.match(line):
+            continue
+        line = "".join(" " if ord(c) < 0x20 or ord(c) == 0x7F else c for c in line)
 
-    def redact(m: re.Match[str]) -> str:
-        return (m.group(1).rstrip() + " <redacted>") if m.group(1) else "<redacted>"
+        def redact(m: re.Match[str]) -> str:
+            return (m.group(1).rstrip() + " <redacted>") if m.group(1) else "<redacted>"
 
-    line = _SECRET_RE.sub(redact, line)
-    return line if len(line) <= MAX_SUMMARY else line[: MAX_SUMMARY - 3] + "..."
+        line = _SECRET_RE.sub(redact, line)
+        return line if len(line) <= MAX_SUMMARY else line[: MAX_SUMMARY - 3] + "..."
+    return GENERIC_FAILURE
 
 
 def one_line(text: str, limit: int = MAX_ERROR) -> str:

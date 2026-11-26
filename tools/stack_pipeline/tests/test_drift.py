@@ -17,6 +17,7 @@ from tools.stack_pipeline.drift import (
     one_line,
     outcome_from_dict,
     parse_refresh_plan,
+    GENERIC_FAILURE,
     summarize_error,
 )
 from tools.stack_pipeline.report import GitHubRun, ReportError
@@ -24,6 +25,19 @@ from tools.stack_pipeline.report import GitHubRun, ReportError
 from .test_api_client import INTERNAL, SHA, STACK, api, client  # noqa: F401 (api is a fixture)
 
 PATH = "environments/development/payments/orders"
+BOXED_LOG = "\n".join([
+    "module.db.aws_ssm_parameter.db: Refreshing state... [id=/db/password]",
+    "module.db.aws_kms_key.this: Refreshing state... [id=1234]",
+    "\u2577",
+    "\u2502 Error: reading SSM Parameter (/db/password): operation error SSM: GetParameter, api error ValidationException: bad request",
+    "\u2502 ",
+    "\u2502   with module.db.aws_ssm_parameter.db,",
+    "\u2502   on main.tf line 12, in resource \"aws_ssm_parameter\" \"db\":",
+    "\u2502   12:   value = \"hunter2-secret\"",
+    "\u2502 ",
+    "\u2502 request body {\"Value\":\"hunter2-secret\"} was rejected",
+    "\u2575",
+])
 GH = GitHubRun(run_id=42, run_attempt=1, head_sha=SHA, log_url="https://github.com/acme/iacp/actions/runs/42/attempts/1")
 
 
@@ -117,14 +131,21 @@ class TestBuildOutcome:
         assert (out.result, out.terraform_exit_code, out.error) == ("error", 1, "Error: init failed")
         assert out.to_payload(GH)["error"] == "Error: init failed" and "plan_hash" not in out.to_payload(GH)
 
-    def test_only_a_redacted_summary_line_leaves_terraforms_output(self):
-        text = "Error: AccessDenied password=hunter2 AKIAABCDEFGHIJKLMNOP\n  body: {\"secret\": \"s3cr3t\"}\n  more detail"
-        out = build_outcome(PATH, 1, None, text)
-        assert out.error == "Error: AccessDenied password= <redacted> <redacted>"
-        assert "hunter2" not in json.dumps(out.to_payload(GH)) and "s3cr3t" not in json.dumps(out.to_payload(GH))
+    def test_only_the_error_line_leaves_terraforms_output(self):
+        for text in (BOXED_LOG, "\n".join(BOXED_LOG.splitlines()[-5:]), "\n".join(BOXED_LOG.splitlines()[-3:])):
+            out = build_outcome(PATH, 1, None, text)
+            payload = json.dumps(out.to_payload(GH))
+            assert "hunter2" not in payload and "value =" not in payload
+        assert build_outcome(PATH, 1, None, BOXED_LOG).error.startswith("Error: reading SSM Parameter")
+        # A 5-line tail has no Error line: the fixed message, never source text or detail.
+        assert build_outcome(PATH, 1, None, "\n".join(BOXED_LOG.splitlines()[-5:])).error == GENERIC_FAILURE
 
     @pytest.mark.parametrize("text,want", [
-        ("", ""), ("\n\u2502 Error: boom\n\u2502 more", "Error: boom"),
+        ("", GENERIC_FAILURE), ("no error line here", GENERIC_FAILURE), ("\u2577\n\u2502\n\u2575", GENERIC_FAILURE),
+        ("\u2502 Error: boom\n\u2502 more", "Error: boom"),
+        ("an Error: in the middle", GENERIC_FAILURE),
+        ("Error: bad password=hunter2 for token: abc", "Error: bad password= <redacted> for token: <redacted>"),
+        ("Error: key AKIAABCDEFGHIJKLMNOP rejected", "Error: key <redacted> rejected"),
         ("Error: Authorization failed with Bearer abc.def", "Error: Authorization failed with <redacted>"),
         ("Error: x" + "y" * 400, None),
     ])
@@ -135,7 +156,7 @@ class TestBuildOutcome:
             assert got == want
 
     def test_a_failed_check_without_a_message_still_says_something(self):
-        assert build_outcome(PATH, 1).error == "terraform plan -refresh-only failed; see the workflow log"
+        assert build_outcome(PATH, 1).error == GENERIC_FAILURE
 
     @pytest.mark.parametrize("code,plan", [(0, None), (2, None), (3, PLAN), (137, None)])
     def test_unusable_results_become_errors_never_clean(self, code, plan):
@@ -324,6 +345,15 @@ class TestScan:
         printed = capsys.readouterr().out
         assert rc == 0 and json.loads(out.read_text())["result"] == "error"
         assert "::warning title=Drift check failed::" in printed and "\n::error::x" not in printed
+
+    def test_the_error_file_yields_only_the_error_line(self, stacks, tmp_path, capsys):
+        log = tmp_path / "drift.txt"
+        log.write_text(BOXED_LOG)
+        rc, out = self.run_scan(tmp_path, stacks["orders"], 1, extra=["--error-file", str(log)])
+        printed = capsys.readouterr().out
+        written = out.read_text()
+        assert rc == 0 and json.loads(written)["error"].startswith("Error: reading SSM Parameter")
+        assert "hunter2" not in written and "hunter2" not in printed and "value =" not in printed
 
     def test_a_missing_plan_with_exit_two_is_an_error_result(self, stacks, tmp_path):
         rc, out = self.run_scan(tmp_path, stacks["orders"], 2)
