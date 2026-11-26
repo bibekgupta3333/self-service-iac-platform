@@ -11,6 +11,7 @@ from tools.module_release import (
     SemVer,
     bump_between,
     changelog_section,
+    constraint_floor,
     diff_interfaces,
     diff_summary,
     evaluate,
@@ -374,3 +375,85 @@ class TestOutputSensitivity:
         changes = diff_interfaces(iface(self.SENSITIVE), iface())
         assert labels(changes) == [("output", "id", Bump.MINOR)]
         assert "no longer sensitive" in changes[0].description
+
+
+VERSIONS_TF = """
+terraform {
+  required_version = ">= 1.10, < 2.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = ">= 5.60, < 6.0"
+    }
+  }
+}
+"""
+
+
+def versions(text: str = VERSIONS_TF):
+    return parse_interface({"variables.tf": BASE_TF, "versions.tf": text})
+
+
+class TestRequirements:
+    def test_parsed(self):
+        result = versions()
+        assert result.terraform_version == ">= 1.10, < 2.0"
+        assert result.providers == {"hashicorp/aws": ">= 5.60, < 6.0"}
+
+    def test_legacy_shorthand_and_missing_version(self):
+        result = parse_interface({"v.tf": 'terraform {\n  required_providers {\n    aws = "~> 5.0"\n'
+                                          '    random = { source = "hashicorp/random" }\n  }\n}\n'})
+        assert result.providers == {"aws": "~> 5.0", "hashicorp/random": None}
+        assert result.terraform_version is None
+
+    @pytest.mark.parametrize(
+        "constraint,floor",
+        [
+            (None, (0, 0, 0)),
+            ("", (0, 0, 0)),
+            ("< 6.0", (0, 0, 0)),
+            (">= 5.60, < 6.0", (5, 60, 0)),
+            ("~> 5.6", (5, 6, 0)),
+            ("~> 5.6.1", (5, 6, 1)),
+            ("5.2.0", (5, 2, 0)),
+            ("= 5.2.0", (5, 2, 0)),
+            ("> 4.9", (4, 9, 0)),
+            (">= 4.0, >= 5.1, != 5.3.0", (5, 1, 0)),
+            (">= 1.10.0-beta1", (1, 10, 0)),
+            ("whatever", None),
+        ],
+    )
+    def test_constraint_floor(self, constraint, floor):
+        assert constraint_floor(constraint) == floor
+
+    @pytest.mark.parametrize(
+        "old,new,expected",
+        [
+            pytest.param('">= 5.60, < 6.0"', '">= 6.0, < 7.0"', [("provider", "hashicorp/aws", Bump.MAJOR)],
+                         id="provider-major-floor-raised"),
+            pytest.param('">= 5.60, < 6.0"', '">= 5.70, < 6.0"', [("provider", "hashicorp/aws", Bump.MINOR)],
+                         id="provider-minor-floor-raised"),
+            pytest.param('">= 5.60, < 6.0"', '">= 5.60, < 7.0"', [], id="provider-ceiling-raised"),
+            pytest.param('">= 5.60, < 6.0"', '">= 5.0, < 6.0"', [], id="provider-floor-lowered"),
+            pytest.param('">= 5.60, < 6.0"', '"~> 5.60"', [], id="provider-same-floor-other-syntax"),
+            pytest.param('">= 5.60, < 6.0"', '"latest"', [("provider", "hashicorp/aws", Bump.MAJOR)],
+                         id="provider-unreadable"),
+            pytest.param('">= 1.10, < 2.0"', '">= 2.0"', [("terraform", "required_version", Bump.MAJOR)],
+                         id="terraform-major-floor-raised"),
+            pytest.param('">= 1.10, < 2.0"', '">= 1.11, < 2.0"', [("terraform", "required_version", Bump.MINOR)],
+                         id="terraform-minor-floor-raised"),
+        ],
+    )
+    def test_classification(self, old, new, expected):
+        assert labels(diff_interfaces(versions(), versions(VERSIONS_TF.replace(old, new)))) == expected
+
+    def test_new_provider_is_minor(self):
+        added = VERSIONS_TF.replace("    aws = {", '    random = {\n      source  = "hashicorp/random"\n'
+                                                  '      version = ">= 3.0"\n    }\n    aws = {')
+        assert labels(diff_interfaces(versions(), versions(added))) == [("provider", "hashicorp/random", Bump.MINOR)]
+
+    def test_adding_a_terraform_floor_from_nothing(self):
+        before = parse_interface({"variables.tf": BASE_TF})
+        assert labels(diff_interfaces(before, versions())) == [
+            ("terraform", "required_version", Bump.MAJOR), ("provider", "hashicorp/aws", Bump.MINOR)]

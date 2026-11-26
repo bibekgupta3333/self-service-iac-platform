@@ -10,14 +10,21 @@ point of view:
 * MINOR: new optional variable, new output, default added or changed,
   ``nullable`` turned on, validation condition removed, output no longer
   ``sensitive``.
+* Terraform and provider constraints: raising the lowest allowed major
+  version is MAJOR, raising the lowest allowed minor version is MINOR, and a
+  new required provider is MINOR (see ``constraint_floor``).
 * PATCH: any other change to release-relevant files.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Iterable
 
 from .models import Bump, Change, Interface, Subject, Variable
+
+_CONSTRAINT = re.compile(r"^(>=|<=|!=|~>|>|<|=)?\s*v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[-+][0-9A-Za-z.-]*)?$")
+_LOWER_BOUND_OPS = frozenset({"", "=", ">=", ">", "~>"})
 
 
 def _variable_changes(old: Variable, new: Variable) -> list[Change]:
@@ -73,6 +80,54 @@ def diff_interfaces(old: Interface, new: Interface) -> list[Change]:
                                   "marked sensitive: consumers that re-export it must mark theirs sensitive", Bump.MAJOR))
         elif was and not now:
             changes.append(Change(Subject.OUTPUT, name, "no longer sensitive", Bump.MINOR))
+    changes.extend(diff_requirements(old, new))
+    return changes
+
+
+def constraint_floor(constraint: str | None) -> tuple[int, int, int] | None:
+    """Lowest version a Terraform version constraint allows, or None if it cannot be read.
+
+    The floor is the highest lower bound among the comma-separated parts
+    (``>=``, ``>``, ``=``, ``~>`` or a bare version); ``<``, ``<=`` and ``!=``
+    do not raise it. ``> X.Y.Z`` is treated as ``>= X.Y.Z``. No constraint, or
+    no lower bound, means 0.0.0.
+    """
+    if constraint is None or not constraint.strip():
+        return (0, 0, 0)
+    floor = (0, 0, 0)
+    for part in constraint.split(","):
+        match = _CONSTRAINT.match(part.strip())
+        if not match:
+            return None
+        op, major, minor, patch = match.groups()
+        if (op or "") in _LOWER_BOUND_OPS:
+            floor = max(floor, (int(major), int(minor or 0), int(patch or 0)))
+    return floor
+
+
+def _floor_change(subject: Subject, name: str, old: str | None, new: str | None) -> list[Change]:
+    """Changes for one version constraint: a raised minimum major is MAJOR, a raised minor is MINOR."""
+    if old == new:
+        return []
+    before, after = constraint_floor(old), constraint_floor(new)
+    if before is None or after is None:
+        return [Change(subject, name, f"version constraint changed from {old!r} to {new!r} "
+                                      "and could not be compared", Bump.MAJOR)]
+    label = ".".join(map(str, after))
+    if after[0] > before[0]:
+        return [Change(subject, name, f"minimum major version raised to {label} ({new!r})", Bump.MAJOR)]
+    if after[:2] > before[:2]:
+        return [Change(subject, name, f"minimum minor version raised to {label} ({new!r})", Bump.MINOR)]
+    return []
+
+
+def diff_requirements(old: Interface, new: Interface) -> list[Change]:
+    """Changes to ``required_version`` and ``required_providers`` constraints."""
+    changes = _floor_change(Subject.TERRAFORM, "required_version", old.terraform_version, new.terraform_version)
+    for name in sorted(set(new.providers) - set(old.providers)):
+        changes.append(Change(Subject.PROVIDER, name, f"new required provider ({new.providers[name]!r})", Bump.MINOR))
+    for name in sorted(set(old.providers) & set(new.providers)):
+        changes.extend(_floor_change(Subject.PROVIDER, name, old.providers[name], new.providers[name]))
     return changes
 
 

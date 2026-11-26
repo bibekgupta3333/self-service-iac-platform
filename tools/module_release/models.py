@@ -104,15 +104,24 @@ class Output:
 
 @dataclass(frozen=True)
 class Interface:
-    """A module's public interface: its variables and outputs keyed by name."""
+    """A module's public interface.
+
+    Variables and outputs are keyed by name. ``terraform_version`` is the raw
+    ``required_version`` constraint and ``providers`` maps each required
+    provider (by source address, else local name) to its raw version constraint.
+    """
 
     variables: dict[str, Variable] = field(default_factory=dict)
     outputs: dict[str, Output] = field(default_factory=dict)
+    terraform_version: str | None = None
+    providers: dict[str, str | None] = field(default_factory=dict)
 
 
 class Subject(str, enum.Enum):
     VARIABLE = "variable"
     OUTPUT = "output"
+    TERRAFORM = "terraform"
+    PROVIDER = "provider"
 
 
 @dataclass(frozen=True)

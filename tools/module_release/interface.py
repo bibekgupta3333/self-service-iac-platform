@@ -67,14 +67,38 @@ def parse_document(text: str, filename: str = "<string>") -> Mapping[str, Any]:
         raise InterfaceError(f"{filename}: cannot parse HCL: {exc}") from exc
 
 
+def _required_providers(settings: Mapping[str, Any]) -> dict[str, str | None]:
+    blocks = settings.get("required_providers") or []
+    if isinstance(blocks, Mapping):
+        blocks = [blocks]
+    providers: dict[str, str | None] = {}
+    for block in blocks:
+        for local_name, spec in (block.items() if isinstance(block, Mapping) else []):
+            if isinstance(spec, Mapping):
+                key = str(spec.get("source") or local_name)
+                version = spec.get("version")
+            else:  # legacy shorthand: aws = "~> 5.0"
+                key, version = local_name, spec
+            providers[key] = None if version is None else str(version)
+    return providers
+
+
 def parse_interface(files: Mapping[str, str]) -> Interface:
     """Return the interface declared across ``files`` (filename -> contents)."""
     variables: dict[str, Variable] = {}
     outputs: dict[str, Output] = {}
+    terraform_version: str | None = None
+    providers: dict[str, str | None] = {}
     for filename in sorted(files):
         if not filename.endswith(".tf"):
             continue
         document = parse_document(files[filename], filename)
         variables.update((n, parse_variable(n, b)) for n, b in _labelled_blocks(document, "variable"))
         outputs.update((n, parse_output(n, b)) for n, b in _labelled_blocks(document, "output"))
-    return Interface(variables=variables, outputs=outputs)
+        for settings in document.get("terraform") or []:
+            if not isinstance(settings, Mapping):
+                continue
+            if settings.get("required_version") is not None:
+                terraform_version = str(settings["required_version"])
+            providers.update(_required_providers(settings))
+    return Interface(variables=variables, outputs=outputs, terraform_version=terraform_version, providers=providers)

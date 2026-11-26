@@ -1,7 +1,7 @@
 """SemVer interface-diff gate, release notes and catalog indexing for modules/<name>."""
 
 from .catalog import CatalogClient, CatalogError, IndexResult, build_index_payload, index_url
-from .diffing import diff_interfaces, is_release_relevant, required_bump
+from .diffing import constraint_floor, diff_interfaces, diff_requirements, is_release_relevant, required_bump
 from .gate import ReleaseGate
 from .interface import InterfaceError, parse_interface
 from .models import Bump, Change, Interface, Output, SemVer, Subject, Variable
@@ -30,7 +30,9 @@ __all__ = [
     "build_index_payload",
     "bump_between",
     "changelog_section",
+    "constraint_floor",
     "diff_interfaces",
+    "diff_requirements",
     "diff_summary",
     "evaluate",
     "git_tag",
