@@ -98,6 +98,12 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
   - RS256 only, cached JWKS with refetch on an unknown `kid` (rate limited), `iss`/`aud`/`exp`/`nbf`/`iat` with leeway, and `repository`/`repository_owner`/`repository_id`/`ref`/`job_workflow_ref` allow-lists
   - configured with `IACP_OIDC_AUDIENCE` and `IACP_OIDC_REPOSITORY` (plus optional overrides); accepted on `/v1/internal/*` next to the shared token
 - `POST /v1/runs` records run reports in the new `pipeline_runs` table (migration `0005`), checking the fencing token, the reporting run id and commit, and the workflow and trigger allowed for each pipeline. Replayed stage reports replace their entry instead of duplicating it, and reports lock the stack row before the lock row so they cannot deadlock with lock release.
+- Backend hardening (WBS 4.1, 4.10, 6.2, 6.4, 6.6 partial):
+  - `GET /metrics` in Prometheus format (`prometheus/client_golang` v1.24.1): request count and latency per method and chi route pattern (unmatched paths share one label), database pool gauges, Go and process collectors.
+  - OIDC `jti` replay protection: `auth.ReplayGuard` claims each token id until `exp` plus leeway. The default store is the new `oidc_jti` table (migration `0006`), shared by every replica; `IACP_OIDC_REPLAY_STORE=memory` uses a bounded per-process cache instead.
+  - `GET /v1/internal/budget-context?stack_path=` returns the conftest `--data` document: environment, allowed regions, the team's monthly budget from the new `budgets` table (migration `0007`), and the yanked module versions. It sits behind a new `budget_context` route class for `pr-validate.yml` and `apply.yml`.
+  - OPA `iacp.modules.yanked` denies plans that create or update resources in a module pinned to a yanked version. `iacp.modules.yanked_pinned` only warns when the module is left alone or destroyed. 11 new tests; `verify.sh` also checks the rule against `context-yanked.json`.
+  - `tools/codeowners` generates `.github/CODEOWNERS` from `.github/teams.yaml`. CI and `make lint` run `--check`, which fails on drift or on a stack whose team is not declared. The branch ruleset and Environment protection payloads are checked in under `.github/rulesets/`, for the owner to apply with `gh api` in WBS 2.5.
 
 ### Security
 - The backend fails closed: it binds to loopback by default, refuses to start without `IACP_AUTH_MODE`, keeps internal endpoints behind a constant-time token check, and enforces team membership on request creation.
@@ -109,6 +115,9 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 - The JWKS endpoint must be https (loopback excepted) and redirects are not followed. Fetches are shared (singleflight) and detached from the caller, so a disconnecting client cannot block key refreshes.
 - When `IACP_OIDC_REPOSITORY_ID` is set every token must carry it; the API warns when it is unset.
 - `iacp_app` can only SELECT, INSERT and UPDATE `pipeline_runs`.
+- `/metrics` shares the API listener but is closed by default. It answers direct loopback peers, never a request with forwarding headers, and otherwise needs `IACP_METRICS_TOKEN`, which is separate from the internal token.
+- A replayed GitHub OIDC token gets a 401, and so does a token without `jti` or any replay-store failure. `iacp_app` has no UPDATE on `oidc_jti`.
+- Pull-request tokens can now also read the budget context, which is read-only. They still cannot take locks or index the catalog.
 
 ### Changed
 - `AGENTS.md`: local-first rules, the 70/30 object-oriented and functional coding style, and the small-commit, reviewed-PR workflow.
@@ -116,8 +125,8 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 ### Planned
 - M0 Foundations (remaining): smoke stack against LocalStack. The real-AWS state bucket and OIDC roles are deferred by ADR-0009.
 - M1 Module registry (remaining): upgrade-plan test and CHANGELOG/upgrade-notes check in `module-release.yml`, a live catalog index once a hosted API exists, Lambda Terratest.
-- M2 Orchestration engine (remaining): GitHub App PRs, webhooks, OAuth/RBAC, `pr-validate.yml`, `apply.yml`, OIDC `jti` replay cache.
-- M3 Security gates (remaining): SARIF upload, budget context, approval and budget policies, environment protection.
+- M2 Orchestration engine (remaining): GitHub App PRs, webhooks, OAuth/RBAC, `pr-validate.yml`, `apply.yml`.
+- M3 Security gates (remaining): SARIF upload, wiring the budget context into the workflows, approval and budget policies, applying the ruleset and Environment protection.
 - M4 Portal and destroy: Next.js dashboard, destroy flow, Infracost comments.
 
 ## [0.1.0] - 2026-11-24
