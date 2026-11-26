@@ -5,15 +5,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
 )
 
 var t0 = time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
 
+func sid(n byte) uuid.UUID { return uuid.UUID{15: n} }
+
 func ptr[T any](v T) *T { return &v }
 
 func stack(env string, expires time.Time) Stack {
-	return Stack{ID: "s1", Environment: env, Path: "environments/" + env + "/team/app", Status: "active",
+	return Stack{ID: sid(1), Environment: env, Path: "environments/" + env + "/team/app", Status: "active",
 		IsEphemeral: true, ExpiresAt: &expires, CreatedAt: t0.Add(-48 * time.Hour)}
 }
 
@@ -138,7 +142,7 @@ func TestEligibleCodes(t *testing.T) {
 	}
 }
 
-func TestExtend(t *testing.T) {
+func TestExtendPure(t *testing.T) {
 	p := Policy{MinHours: 1, MaxHours: 72, DefaultHours: 24, MaxExtensionHours: 100}
 	exp := t0.Add(10 * time.Hour)
 	base := stack("development", exp)
@@ -198,24 +202,26 @@ func TestExtend(t *testing.T) {
 }
 
 func TestClassifyOrdersTeardownFirstAndIsDeterministic(t *testing.T) {
-	mk := func(id, env string, expires time.Time) Stack {
+	names := map[uuid.UUID]string{}
+	mk := func(id string, n byte, env string, expires time.Time) Stack {
 		s := stack(env, expires)
-		s.ID = id
+		s.ID = sid(n)
+		names[s.ID] = id
 		return s
 	}
 	in := []Stack{
-		mk("w2", "development", t0.Add(20*time.Hour)),
-		mk("none", "development", t0.Add(100*time.Hour)),
-		mk("d2", "staging", t0.Add(-time.Hour)),
-		mk("prod", "production", t0.Add(-time.Hour)),
-		mk("w1", "development", t0.Add(2*time.Hour)),
-		mk("d1", "development", t0.Add(-5*time.Hour)),
-		mk("d1b", "development", t0.Add(-5*time.Hour)),
+		mk("w2", 1, "development", t0.Add(20*time.Hour)),
+		mk("none", 2, "development", t0.Add(100*time.Hour)),
+		mk("d2", 3, "staging", t0.Add(-time.Hour)),
+		mk("prod", 4, "production", t0.Add(-time.Hour)),
+		mk("w1", 5, "development", t0.Add(2*time.Hour)),
+		mk("d1", 6, "development", t0.Add(-5*time.Hour)),
+		mk("d1b", 7, "development", t0.Add(-5*time.Hour)),
 	}
 	got := Classify(in, t0)
 	var ids []string
 	for _, d := range got {
-		ids = append(ids, string(d.Phase)+":"+d.Stack.ID)
+		ids = append(ids, string(d.Phase)+":"+names[d.Stack.ID])
 	}
 	want := "teardown:d1,teardown:d1b,teardown:d2,warn:w1,warn:w2"
 	if strings.Join(ids, ",") != want {

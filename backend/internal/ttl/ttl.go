@@ -8,10 +8,13 @@
 package ttl
 
 import (
+	"bytes"
 	"fmt"
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
 )
@@ -123,8 +126,8 @@ const (
 
 // Stack is a stack as the TTL rules see it.
 type Stack struct {
-	ID               string
-	TeamID           string
+	ID               uuid.UUID
+	TeamID           uuid.UUID
 	Team             string
 	Environment      string
 	Name             string
@@ -248,7 +251,7 @@ func sortDue(d []Due) {
 		if c := a.Stack.ExpiresAt.Compare(*b.Stack.ExpiresAt); c != 0 {
 			return c
 		}
-		return strings.Compare(a.Stack.ID, b.Stack.ID)
+		return bytes.Compare(a.Stack.ID[:], b.Stack.ID[:])
 	})
 }
 
