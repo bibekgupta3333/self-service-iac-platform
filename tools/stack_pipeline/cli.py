@@ -114,7 +114,8 @@ def build_parser() -> argparse.ArgumentParser:
     smoke.add_argument("--outputs", type=Path, required=True, help="terraform output -json")
     smoke.add_argument("--state", type=Path, required=True, help="terraform show -json after apply")
     smoke.add_argument("--endpoint-url", default=os.environ.get("AWS_ENDPOINT_URL", ""),
-                       help="AWS endpoint for the live probes (default: $AWS_ENDPOINT_URL)")
+                       help="LocalStack or loopback endpoint for the live probes (default: $AWS_ENDPOINT_URL); "
+                            "required: an empty or other endpoint is refused, so the probes never reach real AWS")
     smoke.add_argument("--region", default="", help="default: region in iacp.stack.json")
     smoke.add_argument("--markdown-out", type=Path)
     smoke.add_argument("--json-out", type=Path)
@@ -287,11 +288,12 @@ def run_sarif(args: argparse.Namespace) -> int:
 
 def run_smoke(args: argparse.Namespace) -> int:
     meta = FileSystemStackRepository(args.repo_root).load_dir(args.stack_dir)
+    # First: refuses an empty or non-LocalStack endpoint before anything else runs.
+    reader = AwsCliTagReader(args.endpoint_url, args.region or meta.region)
     docs = {name: _read_json(getattr(args, name)) for name in ("plan", "outputs", "state")}
     unusable = [f"--{name} {getattr(args, name)}" for name, doc in docs.items() if not isinstance(doc, dict)]
     if unusable:
         raise ValueError(f"missing or not a JSON object: {', '.join(unusable)}")
-    reader = AwsCliTagReader(args.endpoint_url, args.region or meta.region)
     result = SmokeTester(reader).run(meta, docs["plan"], docs["outputs"], docs["state"])
     if args.markdown_out:
         args.markdown_out.write_text(result.render_markdown(), encoding="utf-8")

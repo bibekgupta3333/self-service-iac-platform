@@ -8,10 +8,12 @@ from tools.stack_pipeline.cli import main
 from tools.stack_pipeline.smoke import (
     PROBES,
     AppliedResource,
+    SmokeConfigError,
     SmokeProbeError,
     SmokeTester,
     applied_resources,
     declared_outputs,
+    local_endpoint,
     output_checks,
     required_tags,
     state_tag_checks,
@@ -19,6 +21,8 @@ from tools.stack_pipeline.smoke import (
 )
 
 from .conftest import metadata
+
+LOCAL = "http://localhost:4566"
 
 TAGS = {
     "iacp:team": "platform",
@@ -240,10 +244,37 @@ class TestAwsCliTagReader:
         assert run.cmd == ["aws", "sqs", "list-queue-tags", "--queue-url", "u", "--region", "us-east-1",
                            "--output", "json", "--no-cli-pager", "--endpoint-url", "http://localhost:4566"]
 
-    def test_no_endpoint_and_empty_output(self):
+    def test_empty_output(self):
         run = FakeRun(stdout="")
-        assert AwsCliTagReader("", "eu-west-1", run).read(["sqs", "list-queue-tags", "--queue-url", "u"]) == {}
-        assert "--endpoint-url" not in run.cmd
+        reader = AwsCliTagReader("http://127.0.0.1:4566", "eu-west-1", run)
+        assert reader.read(["sqs", "list-queue-tags", "--queue-url", "u"]) == {}
+        assert run.cmd[-2:] == ["--endpoint-url", "http://127.0.0.1:4566"]
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "",  # the AWS default endpoint, i.e. real AWS
+            "   ",
+            "https://s3.us-east-1.amazonaws.com",
+            "http://localstack.cloud.evil.example",
+            "http://localhost.evil.example:4566",
+            "ftp://localhost:4566",
+            "localhost:4566",
+        ],
+    )
+    def test_refuses_endpoints_that_could_reach_real_aws(self, endpoint):
+        run = FakeRun(stdout="{}")
+        with pytest.raises(SmokeConfigError):
+            AwsCliTagReader(endpoint, "us-east-1", run)
+        assert run.cmd is None
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        ["http://localhost:4566", "http://127.0.0.1:4566", "http://[::1]:4566",
+         "http://s3.localhost.localstack.cloud:4566", "https://LOCALHOST:4566"],
+    )
+    def test_local_endpoints(self, endpoint):
+        assert local_endpoint(endpoint) == endpoint
 
     @pytest.mark.parametrize(
         "run,message",
@@ -260,16 +291,36 @@ class TestAwsCliTagReader:
     )
     def test_errors(self, run, message):
         with pytest.raises(SmokeProbeError, match=message):
-            AwsCliTagReader("", "us-east-1", run).read(["s3api", "get-bucket-tagging", "--bucket", "b"])
+            AwsCliTagReader(LOCAL, "us-east-1", run).read(["s3api", "get-bucket-tagging", "--bucket", "b"])
 
 
 class TestSmokeCommand:
     def test_fails_on_missing_inputs(self, tmp_path, make_stack, capsys):
         root = make_stack("development", "platform", "smoke")
         argv = ["--repo-root", str(tmp_path), "smoke", str(root), "--plan", str(tmp_path / "p.json"),
-                "--outputs", str(tmp_path / "o.json"), "--state", str(tmp_path / "s.json")]
+                "--outputs", str(tmp_path / "o.json"), "--state", str(tmp_path / "s.json"), "--endpoint-url", LOCAL]
         assert main(argv) == 2
         assert "missing or not a JSON object" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        "env_endpoint,message",
+        [
+            (None, "needs a LocalStack endpoint"),  # no endpoint: the default is an error
+            ("https://sts.amazonaws.com", "never calls real AWS"),
+        ],
+    )
+    def test_refuses_to_run_without_a_local_endpoint(self, tmp_path, make_stack, capsys, monkeypatch,
+                                                     env_endpoint, message):
+        monkeypatch.delenv("AWS_ENDPOINT_URL", raising=False)
+        if env_endpoint is not None:
+            monkeypatch.setenv("AWS_ENDPOINT_URL", env_endpoint)
+        root = make_stack("development", "platform", "smoke")
+        for name, doc in (("p", PLAN), ("o", OUTPUTS), ("s", STATE)):
+            (tmp_path / f"{name}.json").write_text(json.dumps(doc))
+        argv = ["--repo-root", str(tmp_path), "smoke", str(root), "--plan", str(tmp_path / "p.json"),
+                "--outputs", str(tmp_path / "o.json"), "--state", str(tmp_path / "s.json")]
+        assert main(argv) == 2
+        assert message in capsys.readouterr().err
 
     def test_writes_results_and_exit_code(self, tmp_path, make_stack, capsys, monkeypatch):
         root = make_stack("development", "platform", "smoke")
@@ -278,7 +329,7 @@ class TestSmokeCommand:
         md, js = tmp_path / "smoke.md", tmp_path / "smoke.json"
         argv = ["--repo-root", str(tmp_path), "smoke", str(root), "--plan", str(tmp_path / "p.json"),
                 "--outputs", str(tmp_path / "o.json"), "--state", str(tmp_path / "s.json"),
-                "--markdown-out", str(md), "--json-out", str(js)]
+                "--markdown-out", str(md), "--json-out", str(js), "--endpoint-url", LOCAL]
         assert main(argv) == 0
         assert json.loads(js.read_text())["ok"] is True and "(passed)" in md.read_text()
         (tmp_path / "o.json").write_text("{}")

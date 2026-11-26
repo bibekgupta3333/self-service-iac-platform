@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
+from urllib.parse import urlsplit
 
 from .models import StackMetadata
 
@@ -26,6 +27,33 @@ REQUIRED_TAG_KEYS = ("iacp:team", "iacp:environment", "iacp:stack", "iacp:manage
 
 class SmokeProbeError(RuntimeError):
     """A probe could not read the resource (missing resource, API error)."""
+
+
+class SmokeConfigError(ValueError):
+    """The smoke test is not configured to run against LocalStack."""
+
+
+LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+LOCALSTACK_DOMAIN = ".localstack.cloud"
+
+
+def local_endpoint(url: str) -> str:
+    """``url`` when it is a LocalStack or loopback http(s) endpoint, else SmokeConfigError. Pure.
+
+    While ADR-0009 is in force the probes must never reach real AWS: no endpoint
+    (the AWS default) and any other host are refused, not silently allowed.
+    """
+    parts = urlsplit(url.strip())
+    host = (parts.hostname or "").lower()
+    if parts.scheme not in ("http", "https") or not host:
+        raise SmokeConfigError(
+            f"the smoke test needs a LocalStack endpoint (--endpoint-url or $AWS_ENDPOINT_URL), got {url!r}"
+        )
+    if host not in LOCAL_HOSTS and not host.endswith(LOCALSTACK_DOMAIN):
+        raise SmokeConfigError(
+            f"endpoint host {host!r} is not loopback or *{LOCALSTACK_DOMAIN}; the smoke test never calls real AWS (ADR-0009)"
+        )
+    return url.strip()
 
 
 class TagReader(Protocol):

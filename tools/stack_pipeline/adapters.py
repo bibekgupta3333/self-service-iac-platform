@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from .models import ENVIRONMENTS_DIR, STACK_FILE, StackMetadata, StackMetadataError, StackRef
-from .smoke import SmokeProbeError
+from .smoke import SmokeProbeError, local_endpoint
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
@@ -137,20 +137,20 @@ class AwsCliTagReader:
     """Read-only AWS CLI calls for the smoke test (``smoke.TagReader``).
 
     Only the probe table in ``smoke.PROBES`` builds the arguments. While ADR-0009 is
-    in force the endpoint is the job's LocalStack and the credentials are the dummy
-    test/test pair from the environment.
+    in force the endpoint must be LocalStack or loopback (``smoke.local_endpoint``);
+    the constructor refuses anything else, so a call can never reach real AWS. The
+    credentials are the dummy test/test pair from the environment.
     """
 
     def __init__(self, endpoint_url: str, region: str, run: Runner = subprocess.run, timeout: float = 60.0) -> None:
-        self.endpoint_url = endpoint_url
+        self.endpoint_url = local_endpoint(endpoint_url)
         self.region = region
         self._run = run
         self.timeout = timeout
 
     def read(self, argv: Sequence[str]) -> Mapping[str, Any]:
-        cmd = ["aws", *argv, "--region", self.region, "--output", "json", "--no-cli-pager"]
-        if self.endpoint_url:
-            cmd += ["--endpoint-url", self.endpoint_url]
+        cmd = ["aws", *argv, "--region", self.region, "--output", "json", "--no-cli-pager",
+               "--endpoint-url", self.endpoint_url]
         call = " ".join(argv[:2])
         try:
             result = self._run(cmd, capture_output=True, text=True, check=False, timeout=self.timeout)
