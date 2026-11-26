@@ -47,3 +47,32 @@ def test_the_jq_filter_drops_forged_run_properties(steps, tmp_path):
     src.write_text(json.dumps(doc))
     out = subprocess.run(["jq", filt, str(src)], check=True, capture_output=True, text=True).stdout
     assert json.loads(out) == {"runs": [{"tool": {"driver": {"name": "t"}}, "results": []}]}
+
+
+@pytest.fixture(scope="module")
+def ci_jobs():
+    return yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))["jobs"]
+
+
+def test_ci_result_needs_every_gating_job(ci_jobs):
+    expected = set(ci_jobs) - {"ci-result", "code-scanning"}
+    assert set(ci_jobs["ci-result"]["needs"]) == expected
+    assert ci_jobs["ci-result"]["if"] == "always()"
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq is not installed")
+@pytest.mark.parametrize(
+    "needs,ok",
+    [
+        ({"detect": "success", "go": "skipped", "python": "success"}, True),
+        ({"detect": "failure", "go": "skipped", "python": "skipped"}, False),
+        ({"detect": "success", "go": "failure"}, False),
+        ({"detect": "success", "go": "cancelled"}, False),
+        ({"detect": "skipped", "go": "skipped"}, False),
+    ],
+)
+def test_ci_result_logic(ci_jobs, needs, ok):
+    run = ci_jobs["ci-result"]["steps"][0]["run"]
+    env = {"NEEDS": json.dumps({k: {"result": v} for k, v in needs.items()}), "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"}
+    result = subprocess.run(["bash", "-c", run], env=env, capture_output=True, text=True)
+    assert (result.returncode == 0) is ok

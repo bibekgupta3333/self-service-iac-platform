@@ -37,9 +37,20 @@ def job_names(workflow: Mapping[str, Any]) -> tuple[str, ...]:
     )
 
 
-def problems(contexts: tuple[str, ...], names: frozenset[str]) -> tuple[str, ...]:
-    """What is wrong with ``contexts`` given the job names that exist. Pure."""
-    found = [f"required check {c!r} is not the name of any job in .github/workflows/" for c in contexts if c not in names]
+def problems(contexts: tuple[str, ...], names: tuple[str, ...]) -> tuple[str, ...]:
+    """What is wrong with ``contexts`` given every job name in the workflows (with repeats). Pure.
+
+    An empty list is a problem: a ruleset that requires nothing is not a gate. A required
+    name that two jobs share is ambiguous (GitHub matches by name, so either job can
+    satisfy it), so it is a problem too.
+    """
+    found = [] if contexts else ["the ruleset requires no status checks"]
+    found += [f"required check {c!r} is not the name of any job in .github/workflows/" for c in contexts if c not in names]
+    found += [
+        f"required check {c!r} is the name of {names.count(c)} jobs; give each job a unique name"
+        for c in dict.fromkeys(contexts)
+        if names.count(c) > 1
+    ]
     found += [f"required check {c!r} is listed more than once" for c in dict.fromkeys(contexts) if contexts.count(c) > 1]
     found += [f"required check {c!r} has a matrix expression and cannot be a stable name" for c in contexts if "${{" in c]
     return tuple(found)
@@ -54,11 +65,14 @@ class RepositoryChecks:
     def contexts(self) -> tuple[str, ...]:
         return required_contexts(json.loads((self.root / RULESET).read_text(encoding="utf-8")))
 
-    def names(self) -> frozenset[str]:
-        found: set[str] = set()
-        for path in sorted((self.root / WORKFLOWS).glob("*.yml")):
-            found.update(job_names(yaml.safe_load(path.read_text(encoding="utf-8")) or {}))
-        return frozenset(found)
+    def names(self) -> tuple[str, ...]:
+        """Every job name in ``*.yml`` and ``*.yaml`` workflows, repeats included."""
+        directory = self.root / WORKFLOWS
+        paths = sorted([*directory.glob("*.yml"), *directory.glob("*.yaml")])
+        found: list[str] = []
+        for path in paths:
+            found.extend(job_names(yaml.safe_load(path.read_text(encoding="utf-8")) or {}))
+        return tuple(found)
 
     def problems(self) -> tuple[str, ...]:
         return problems(self.contexts(), self.names())

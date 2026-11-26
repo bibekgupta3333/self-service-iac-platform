@@ -28,10 +28,20 @@ def test_job_names_use_the_name_or_the_id():
 
 
 def test_problems():
-    assert problems(("a", "b"), frozenset({"a", "b"})) == ()
-    assert "'c' is not the name of any job" in problems(("c",), frozenset({"a"}))[0]
-    assert "more than once" in problems(("a", "a"), frozenset({"a"}))[0]
-    assert "matrix" in problems(("v ${{ m }}",), frozenset({"v ${{ m }}"}))[0]
+    assert problems(("a", "b"), ("a", "b", "other")) == ()
+    assert "'c' is not the name of any job" in problems(("c",), ("a",))[0]
+    assert "more than once" in problems(("a", "a"), ("a",))[0]
+    assert "matrix" in problems(("v ${{ m }}",), ("v ${{ m }}",))[0]
+
+
+def test_an_empty_required_list_is_a_problem():
+    assert problems((), ("a",)) == ("the ruleset requires no status checks",)
+
+
+def test_a_required_name_shared_by_two_jobs_is_ambiguous():
+    assert "2 jobs" in problems(("a",), ("a", "a"))[0]
+    # A shared name that is not required does not matter.
+    assert problems(("a",), ("a", "b", "b")) == ()
 
 
 def test_the_repository_ruleset_names_real_jobs():
@@ -46,6 +56,7 @@ def test_the_repository_ruleset_names_real_jobs():
         "policy (opa, conftest, checkov checks)",
         "portal (lint, typecheck, test, build)",
         "pr-validate-result",
+        "ci-result",
     ],
 )
 def test_the_ruleset_requires(job):
@@ -59,5 +70,10 @@ def test_cli(tmp_path, capsys):
     (tmp_path / ".github/workflows/w.yml").write_text("jobs:\n  a:\n    name: a\n")
     assert main(["--repo-root", str(tmp_path), "--check"]) == 1
     assert "'b (x)' is not the name of any job" in capsys.readouterr().err
+    # .yaml workflows count too.
+    (tmp_path / ".github/workflows/v.yaml").write_text("jobs:\n  b:\n    name: b (x)\n")
+    assert main(["--repo-root", str(tmp_path), "--check"]) == 0
+    (tmp_path / ".github/workflows/v.yaml").write_text("jobs:\n  b:\n    name: a\n")
+    assert main(["--repo-root", str(tmp_path), "--check"]) == 1
     assert main(["--repo-root", str(tmp_path)]) == 0
     assert main(["--repo-root", str(tmp_path / "missing"), "--check"]) == 2
