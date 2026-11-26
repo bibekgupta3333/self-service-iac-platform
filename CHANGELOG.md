@@ -52,13 +52,16 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
   - LocalStack examples with `policy-context.json` and `terraform test` suites (s3 14, sqs 11, lambda 23).
   - Terratest suite (`tests/`) for s3 and sqs that asserts the platform tag values. Run it with `make integration-test`.
 - Module release (WBS 3.6, 3.7 partial):
-  - `tools/module_release`, a SemVer interface-diff gate. It parses variables and outputs with `python-hcl2` (pinned 8.1.4) at the last `modules/<name>/vX.Y.Z` tag and at HEAD, classifies changes as major, minor or patch, and fails when `metadata.version` is bumped too little or not at all. It handles first releases, prerelease tags and `0.x` modules. Run it with `make module-gate`, which is also part of `make lint`.
-  - `notes` builds release notes from the module's CHANGELOG section, or from a generated diff summary.
-  - `index` posts the parsed `module.yaml` to `POST /v1/internal/catalog/index` in the backend's `IndexCommand` shape. It authenticates with `IACP_INTERNAL_TOKEN`, retries 5xx responses, and accepts plain http only for loopback hosts.
-  - Pytest suite (143 tests, including temporary git repositories, a fake HTTP server and an opt-in `IACP_INTEGRATION=1` test against a running API).
+  - `tools/module_release`, a SemVer interface-diff gate. It parses the module with `python-hcl2` (pinned 8.1.4) at the last `modules/<name>/vX.Y.Z` tag and at HEAD, classifies changes as major, minor or patch, and fails when `metadata.version` is bumped too little or not at all. Run it with `make module-gate`, which is also part of `make lint`.
+    - It compares variables (type, default, `nullable`, validation conditions with string literals kept verbatim), outputs (name and `sensitive`), and the floors of `required_version` and `required_providers` (a raised minimum major version is major).
+    - It handles first releases and `0.x` modules, and fails when an already tagged version (prereleases included) changed, or when a prerelease is lower than an existing one.
+  - `notes` builds release notes from the module's CHANGELOG section, or from a generated diff summary against the last final release below the declared version.
+  - `index` posts the parsed `module.yaml` to `POST /v1/internal/catalog/index` in the backend's `IndexCommand` shape. It authenticates with `IACP_INTERNAL_TOKEN`, retries 5xx responses, refuses redirects, and accepts plain http only for loopback hosts. Setting only one of `IACP_API_URL` and `IACP_INTERNAL_TOKEN` is an error.
+  - Pytest suite (198 tests, including temporary git repositories, a fake HTTP server and an opt-in `IACP_INTEGRATION=1` test against a running API).
   - `.github/workflows/module-release.yml`:
-    - On PRs, it runs the gate as the `semver gate result` check.
-    - On pushes to `main`, it creates any missing tags and GitHub releases, then calls the catalog index, which is skipped with a notice until `IACP_API_URL` and `IACP_INTERNAL_TOKEN` are configured.
+    - It runs on every PR, so the `semver gate result` check always reports. PRs that don't touch modules or the tooling get an empty matrix without installing Python.
+    - On pushes to `main`, it creates any missing tags and GitHub releases (also retrying tags that have no release), then calls the catalog index, which is skipped with a notice until `IACP_API_URL` and `IACP_INTERNAL_TOKEN` are configured.
+    - Steps run with bash `pipefail`, and annotated tags are peeled to their commit before indexing.
     - Actions are pinned by SHA, and only the release job has `contents: write`.
     - The first merge to `main` creates `modules/{s3,sqs,lambda}/v1.0.0`.
 
