@@ -120,6 +120,31 @@ def counts(findings: Sequence[Finding]) -> dict[str, int]:
     return {"drifted": len(findings), "updated": updated, "deleted": deleted}
 
 
+MAX_SUMMARY = 200
+_SECRET_RE = re.compile(
+    r"((?:secret|token|password|passwd|authorization|api[_-]?key|access[_-]?key)[A-Za-z_-]*\s*[=:]\s*)\S+"
+    r"|AKIA[0-9A-Z]{16}|bearer\s+\S+", re.IGNORECASE)
+GENERIC_FAILURE = "terraform plan -refresh-only failed; see the workflow log"
+
+
+def summarize_error(text: str) -> str:
+    """One redacted line of terraform's failure output, at most ``MAX_SUMMARY`` characters. Pure.
+
+    Provider errors can echo request bodies or attribute values, and the text ends up in an
+    annotation and in the platform's report, so only the first non-empty line is kept
+    (terraform prints ``Error: <summary>`` first), credential-shaped text is replaced and
+    control characters become spaces. Mirrors ``drift.SummarizeError`` in the backend.
+    """
+    line = next((t for raw in text.splitlines() if (t := raw.strip(" \t\u2502"))), "")
+    line = "".join(" " if ord(c) < 0x20 or ord(c) == 0x7F else c for c in line)
+
+    def redact(m: re.Match[str]) -> str:
+        return (m.group(1).rstrip() + " <redacted>") if m.group(1) else "<redacted>"
+
+    line = _SECRET_RE.sub(redact, line)
+    return line if len(line) <= MAX_SUMMARY else line[: MAX_SUMMARY - 3] + "..."
+
+
 def one_line(text: str, limit: int = MAX_ERROR) -> str:
     """A single-line, bounded message (it ends up in an annotation and the audit trail). Pure."""
     flat = " ".join(text.split())
@@ -231,7 +256,7 @@ def build_outcome(
     the counts and the hash always cover all of them.
     """
     if exit_code == EXIT_ERROR:
-        return _error(stack_path, exit_code, error_message or "terraform plan -refresh-only failed")
+        return _error(stack_path, exit_code, summarize_error(error_message) or GENERIC_FAILURE)
     if exit_code not in (EXIT_CLEAN, EXIT_CHANGES):
         return _error(stack_path, EXIT_ERROR, f"terraform exited with the unexpected code {exit_code}")
     if plan is None:

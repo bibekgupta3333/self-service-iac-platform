@@ -17,6 +17,7 @@ from tools.stack_pipeline.drift import (
     one_line,
     outcome_from_dict,
     parse_refresh_plan,
+    summarize_error,
 )
 from tools.stack_pipeline.report import GitHubRun, ReportError
 
@@ -112,12 +113,29 @@ class TestBuildOutcome:
         assert (out.result, out.terraform_exit_code) == ("clean", 2) and out.problems(GH) == []
 
     def test_a_failed_check_is_an_error_not_drift(self):
-        out = build_outcome(PATH, 1, None, "Error: init\nfailed\n")
+        out = build_outcome(PATH, 1, None, "Error: init failed\n  with module.x\n")
         assert (out.result, out.terraform_exit_code, out.error) == ("error", 1, "Error: init failed")
         assert out.to_payload(GH)["error"] == "Error: init failed" and "plan_hash" not in out.to_payload(GH)
 
+    def test_only_a_redacted_summary_line_leaves_terraforms_output(self):
+        text = "Error: AccessDenied password=hunter2 AKIAABCDEFGHIJKLMNOP\n  body: {\"secret\": \"s3cr3t\"}\n  more detail"
+        out = build_outcome(PATH, 1, None, text)
+        assert out.error == "Error: AccessDenied password= <redacted> <redacted>"
+        assert "hunter2" not in json.dumps(out.to_payload(GH)) and "s3cr3t" not in json.dumps(out.to_payload(GH))
+
+    @pytest.mark.parametrize("text,want", [
+        ("", ""), ("\n\u2502 Error: boom\n\u2502 more", "Error: boom"),
+        ("Error: Authorization failed with Bearer abc.def", "Error: Authorization failed with <redacted>"),
+        ("Error: x" + "y" * 400, None),
+    ])
+    def test_summarize_error(self, text, want):
+        got = summarize_error(text)
+        assert "\n" not in got and len(got) <= 200
+        if want is not None:
+            assert got == want
+
     def test_a_failed_check_without_a_message_still_says_something(self):
-        assert build_outcome(PATH, 1).error
+        assert build_outcome(PATH, 1).error == "terraform plan -refresh-only failed; see the workflow log"
 
     @pytest.mark.parametrize("code,plan", [(0, None), (2, None), (3, PLAN), (137, None)])
     def test_unusable_results_become_errors_never_clean(self, code, plan):

@@ -218,7 +218,8 @@ jobs:
           if [ "$code" = "0" ] || [ "$code" = "2" ]; then
             terraform show -json drift.tfplan > "$RUNNER_TEMP/drift.json"
           else
-            # The tail of terraform's log is the error message; the tool flattens it to one line.
+            # The tool keeps only one redacted summary line of this text (never the rest: provider
+            # errors can echo values), in the result file, the annotation and the platform's report.
             tail -n 5 "$RUNNER_TEMP/drift.txt" > "$RUNNER_TEMP/drift-error.txt"
           fi
           rm -f drift.tfplan
