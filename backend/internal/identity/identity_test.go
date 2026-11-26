@@ -25,6 +25,27 @@ func TestPrincipalContext(t *testing.T) {
 	}
 }
 
+func TestWorkflowFileAndOnMain(t *testing.T) {
+	const repo = "acme/iacp"
+	tests := []struct {
+		ref, jobRef string
+		file        string
+		onMain      bool
+	}{
+		{"refs/heads/main", repo + "/.github/workflows/apply.yml@refs/heads/main", "apply.yml", true},
+		{"refs/pull/1/merge", repo + "/.github/workflows/pr-validate.yml@refs/pull/1/merge", "pr-validate.yml", false},
+		{"refs/heads/main", repo + "/.github/workflows/apply.yml@refs/heads/feature", "apply.yml", false},
+		{"refs/heads/main", "acme/x/workflows/apply.yml@refs/heads/main", "", true},
+		{"", "", "", false},
+	}
+	for _, tt := range tests {
+		w := identity.Workflow{Ref: tt.ref, JobWorkflowRef: tt.jobRef}
+		if w.File() != tt.file || w.OnMain() != tt.onMain {
+			t.Errorf("%q: File=%q OnMain=%v, want %q %v", tt.jobRef, w.File(), w.OnMain(), tt.file, tt.onMain)
+		}
+	}
+}
+
 func TestDevGitHubUserIDIsNegativeAndStable(t *testing.T) {
 	for _, login := range []string{"", "local-dev", "priya-s"} {
 		id := identity.DevGitHubUserID(login)

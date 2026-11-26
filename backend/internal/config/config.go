@@ -56,10 +56,30 @@ type Config struct {
 	AuthMode        AuthMode
 	DevUserLogin    string
 	ModuleRepoURL   string
-	// InternalToken authenticates /v1/internal/* callers until the GitHub OIDC
-	// verifier lands (WBS 4.10). Empty means every internal call is rejected.
+	// InternalToken is the shared bearer token for /v1/internal/* and /v1/runs, accepted
+	// alongside GitHub OIDC. Empty means the token path rejects every call.
 	InternalToken string
+	// OIDC configures GitHub Actions OIDC verification; disabled when Audience is empty.
+	OIDC OIDCConfig
 }
+
+// DefaultOIDCIssuer is the GitHub Actions token issuer.
+const DefaultOIDCIssuer = "https://token.actions.githubusercontent.com"
+
+// OIDCConfig configures GitHub Actions OIDC verification for machine endpoints.
+type OIDCConfig struct {
+	Audience     string        // IACP_OIDC_AUDIENCE: the aud the workflows request
+	Repository   string        // IACP_OIDC_REPOSITORY: owner/name allowed to call
+	RepositoryID string        // IACP_OIDC_REPOSITORY_ID: optional numeric id
+	Issuer       string        // IACP_OIDC_ISSUER (tests and local dev only)
+	JWKSURL      string        // IACP_OIDC_JWKS_URL, default <issuer>/.well-known/jwks
+	Refs         []string      // IACP_OIDC_ALLOWED_REFS: comma-separated patterns; empty means the defaults
+	WorkflowRefs []string      // IACP_OIDC_ALLOWED_WORKFLOWS: comma-separated job_workflow_ref patterns
+	Leeway       time.Duration // IACP_OIDC_LEEWAY: clock skew allowed on exp/nbf/iat
+}
+
+// Enabled reports whether OIDC verification is configured.
+func (o OIDCConfig) Enabled() bool { return o.Audience != "" }
 
 // LookupFunc returns the value of an environment variable and whether it was set.
 type LookupFunc func(key string) (string, bool)
@@ -100,6 +120,9 @@ func Load(lookup LookupFunc) (Config, error) {
 		ModuleRepoURL:      get("MODULE_REPO_URL", "https://github.com/bibekgupta3333/self-service-iac-platform.git"),
 		InternalToken:      get("INTERNAL_TOKEN", ""),
 	}
+	oidc, err := loadOIDC(get)
+	errs = append(errs, err)
+	cfg.OIDC = oidc
 	switch cfg.AuthMode {
 	case AuthModeDev:
 		if cfg.AppDBPassword == "" {
@@ -117,6 +140,40 @@ func Load(lookup LookupFunc) (Config, error) {
 		return Config{}, fmt.Errorf("load config: %w", err)
 	}
 	return cfg, nil
+}
+
+// loadOIDC reads the IACP_OIDC_* variables. Audience and repository must be set together:
+// half a configuration fails loudly instead of silently disabling OIDC.
+func loadOIDC(get func(name, def string) string) (OIDCConfig, error) {
+	o := OIDCConfig{
+		Audience:     get("OIDC_AUDIENCE", ""),
+		Repository:   get("OIDC_REPOSITORY", ""),
+		RepositoryID: get("OIDC_REPOSITORY_ID", ""),
+		Issuer:       strings.TrimRight(get("OIDC_ISSUER", DefaultOIDCIssuer), "/"),
+		Refs:         splitList(get("OIDC_ALLOWED_REFS", "")),
+		WorkflowRefs: splitList(get("OIDC_ALLOWED_WORKFLOWS", "")),
+	}
+	o.JWKSURL = get("OIDC_JWKS_URL", o.Issuer+"/.well-known/jwks")
+	var errs []error
+	leeway, err := time.ParseDuration(get("OIDC_LEEWAY", "30s"))
+	if err != nil || leeway < 0 || leeway > 5*time.Minute {
+		errs = append(errs, fmt.Errorf("%sOIDC_LEEWAY must be a duration between 0 and 5m", Prefix))
+	}
+	o.Leeway = leeway
+	if (o.Audience == "") != (o.Repository == "") {
+		errs = append(errs, fmt.Errorf("%sOIDC_AUDIENCE and %sOIDC_REPOSITORY must be set together", Prefix, Prefix))
+	}
+	return o, errors.Join(errs...)
+}
+
+func splitList(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func parseLevel(s string) (slog.Level, error) {

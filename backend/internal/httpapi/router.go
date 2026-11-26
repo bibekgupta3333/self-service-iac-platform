@@ -37,6 +37,11 @@ type Deps struct {
 	Catalog  *CatalogHandler
 	// Public lists further handlers mounted under authenticated /v1.
 	Public []RouteRegistrar
+	// InternalHandlers are mounted under /v1/internal behind the Internal authenticator.
+	InternalHandlers []RouteRegistrar
+	// PipelineHandlers are GitHub Actions callbacks outside /internal (POST /v1/runs);
+	// they also use the Internal authenticator, never the user one.
+	PipelineHandlers []RouteRegistrar
 }
 
 var probeMethods = []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
@@ -76,6 +81,15 @@ func NewRouter(d Deps) http.Handler {
 			in.Use(requireAuth(internal))
 			if d.Catalog != nil {
 				d.Catalog.InternalRoutes(in)
+			}
+			for _, h := range d.InternalHandlers {
+				h.Routes(in)
+			}
+		})
+		v1.Group(func(pipeline chi.Router) {
+			pipeline.Use(requireAuth(internal))
+			for _, h := range d.PipelineHandlers {
+				h.Routes(pipeline)
 			}
 		})
 		v1.Group(func(user chi.Router) {

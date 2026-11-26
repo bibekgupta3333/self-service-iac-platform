@@ -5,6 +5,7 @@ package identity
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/google/uuid"
 )
@@ -24,6 +25,39 @@ type Principal struct {
 	UserID uuid.UUID // users.id; uuid.Nil for non-user callers
 	Login  string    // GitHub login, or workflow ref for Actions callers
 	Type   ActorType
+	// Workflow is set when the caller proved a GitHub Actions OIDC identity. Callers
+	// using the shared internal token have none.
+	Workflow *Workflow
+}
+
+// Workflow is the verified GitHub Actions run behind an OIDC token.
+type Workflow struct {
+	Repository     string // owner/name
+	Ref            string // refs/heads/main, refs/pull/812/merge
+	JobWorkflowRef string // owner/name/.github/workflows/apply.yml@refs/heads/main
+	SHA            string
+	EventName      string
+	RunID          int64
+	RunAttempt     int
+}
+
+// MainRef is the default branch every mutating workflow must run from.
+const MainRef = "refs/heads/main"
+
+// File is the workflow file name in JobWorkflowRef, e.g. "apply.yml" from
+// "owner/repo/.github/workflows/apply.yml@refs/heads/main"; empty if malformed. Pure.
+func (w Workflow) File() string {
+	_, rest, ok := strings.Cut(w.JobWorkflowRef, "/.github/workflows/")
+	if !ok {
+		return ""
+	}
+	file, _, _ := strings.Cut(rest, "@")
+	return file
+}
+
+// OnMain reports whether both the run's ref and the workflow definition are main. Pure.
+func (w Workflow) OnMain() bool {
+	return w.Ref == MainRef && strings.HasSuffix(w.JobWorkflowRef, "@"+MainRef)
 }
 
 // AuditActorID is the actor_id recorded in audit events.

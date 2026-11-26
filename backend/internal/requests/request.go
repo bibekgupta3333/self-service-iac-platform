@@ -4,6 +4,7 @@ package requests
 
 import (
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"slices"
 	"time"
@@ -51,7 +52,8 @@ type Request struct {
 	Status           Status
 	Spec             json.RawMessage
 	Justification    string
-	QueuedBehind     *uuid.UUID
+	QueuedBehind     *uuid.UUID // set while the request waits for the stack lock
+	FencingToken     *int64     // token of the stack lock lease granted to this request
 	ApprovedPlanHash string
 	ApprovedBy       *uuid.UUID
 	ApprovedAt       *time.Time
@@ -71,10 +73,18 @@ func NewDraft(id uuid.UUID, shortID string, stack StackRef, kind Kind, spec json
 	}
 }
 
+// IsQueued reports whether the request waits for another request's stack lock.
+func (r *Request) IsQueued() bool { return r.QueuedBehind != nil }
+
 // Fire applies event at time at. Approval must go through Approve, which pins the plan hash.
+// A queued request cannot open its PR: it stays draft until it holds the stack lock.
 func (r *Request) Fire(event Event, at time.Time) error {
 	if event == EventApproved {
 		return apperr.Invalid("approval_requires_plan_hash", "use Approve to approve a request")
+	}
+	if event == EventPROpened && r.IsQueued() {
+		return apperr.Conflict("stack_locked",
+			fmt.Sprintf("request %s is queued behind %s and does not hold the stack lock", r.ShortID, *r.QueuedBehind))
 	}
 	return r.move(event, at)
 }

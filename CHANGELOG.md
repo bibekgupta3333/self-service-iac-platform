@@ -51,12 +51,26 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
     - tagged SQS event source with validated batching, KMS grants for queues, and guarded `extra_policy_jsons`
   - LocalStack examples with `policy-context.json` and `terraform test` suites (s3 14, sqs 11, lambda 23).
   - Terratest suite (`tests/`) for s3 and sqs that asserts the platform tag values. Run it with `make integration-test`.
+- Per-stack platform lock (WBS 4.6), `backend/internal/locks`:
+  - fencing tokens from `lock_fencing_seq`, a 7-day lease with heartbeat, takeover of expired leases, and a FIFO queue (`requests.queued_behind`) promoted on release
+  - pure decisions (`Decide`, `NextInQueue`, `CheckToken`); the repository serialises each stack with `SELECT … FOR UPDATE` and a concurrency test proves one winner
+  - `POST /v1/requests` acquires or queues in its own transaction; a queued request cannot open its PR
+  - internal endpoints `GET/POST/DELETE /v1/internal/stacks/{id}/lock` and `POST …/lock/heartbeat`; `lock.acquired`, `lock.queued`, `lock.released` audit events
+- GitHub Actions OIDC verifier (WBS 4.10), `backend/internal/auth`:
+  - RS256 only, cached JWKS with refetch on an unknown `kid` (rate limited), `iss`/`aud`/`exp`/`nbf`/`iat` with leeway, and `repository`/`repository_owner`/`repository_id`/`ref`/`job_workflow_ref` allow-lists
+  - configured with `IACP_OIDC_AUDIENCE` and `IACP_OIDC_REPOSITORY` (plus optional overrides); accepted on `/v1/internal/*` next to the shared token
+- `POST /v1/runs` records run reports in the new `pipeline_runs` table (migration `0005`), checking the fencing token, the reporting run id and commit, and the workflow and trigger allowed for each pipeline. Replayed stage reports replace their entry instead of duplicating it, and reports lock the stack row before the lock row so they cannot deadlock with lock release.
 
 ### Security
 - The backend fails closed: it binds to loopback by default, refuses to start without `IACP_AUTH_MODE`, keeps internal endpoints behind a constant-time token check, and enforces team membership on request creation.
 - The API runs as the `iacp_app` role, which can only INSERT and SELECT on `audit_events`. Triggers block UPDATE, DELETE and TRUNCATE.
 - The local stack binds LocalStack and Postgres to loopback only. Images are pinned by digest.
 - `make` forces LocalStack dummy credentials and unexports `AWS_PROFILE` and session tokens.
+- Machine endpoints fail closed: with neither OIDC nor `IACP_INTERNAL_TOKEN` configured they reject every call, a half OIDC configuration stops the API from starting, and a genuine token from a workflow outside the allow-list gets `403 workflow_not_allowed`.
+- OIDC callers are scoped per route class: lock routes accept only `apply.yml`/`ttl-reaper.yml` on main, catalog indexing only `module-release.yml` on main, so a pull-request token only reaches `/v1/runs`. Each pipeline also has an `event_name` allow-list (`pull_request_target` and `workflow_run` never qualify), and run reports must carry the token's `sha`.
+- The JWKS endpoint must be https (loopback excepted) and redirects are not followed. Fetches are shared (singleflight) and detached from the caller, so a disconnecting client cannot block key refreshes.
+- When `IACP_OIDC_REPOSITORY_ID` is set every token must carry it; the API warns when it is unset.
+- `iacp_app` can only SELECT, INSERT and UPDATE `pipeline_runs`.
 
 ### Changed
 - `AGENTS.md`: local-first rules, the 70/30 object-oriented and functional coding style, and the small-commit, reviewed-PR workflow.
@@ -64,7 +78,7 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 ### Planned
 - M0 Foundations (remaining): smoke stack against LocalStack. The real-AWS state bucket and OIDC roles are deferred by ADR-0009.
 - M1 Module registry (remaining): `module-release.yml` tagging and catalog indexing (3.6–3.7), Lambda Terratest.
-- M2 Orchestration engine (remaining): stack lock and queue, GitHub App PRs, webhooks, OIDC verifier, OAuth/RBAC, `pr-validate.yml`, `apply.yml`.
+- M2 Orchestration engine (remaining): GitHub App PRs, webhooks, OAuth/RBAC, `pr-validate.yml`, `apply.yml`, OIDC `jti` replay cache.
 - M3 Security gates (remaining): SARIF upload, budget context, approval and budget policies, environment protection.
 - M4 Portal and destroy: Next.js dashboard, destroy flow, Infracost comments.
 

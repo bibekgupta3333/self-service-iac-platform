@@ -155,6 +155,39 @@ func TestApproveGuards(t *testing.T) {
 	}
 }
 
+func TestQueuedRequestCannotOpenPR(t *testing.T) {
+	holder := uuid.New()
+	tests := []struct {
+		name   string
+		behind *uuid.UUID
+		event  Event
+		want   Status
+		code   string
+	}{
+		{name: "holder opens its PR", event: EventPROpened, want: StatusPROpen},
+		{name: "queued request stays draft", behind: &holder, event: EventPROpened, want: StatusDraft, code: "stack_locked"},
+		{name: "queued request can still be cancelled", behind: &holder, event: EventCancel, want: StatusCancelled},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := NewDraft(uuid.New(), "req-abc123", StackRef{}, KindUpdate, nil, "", uuid.New(), t0)
+			r.QueuedBehind = tt.behind
+			err := r.Fire(tt.event, t0.Add(time.Second))
+			if r.Status != tt.want || r.IsQueued() != (tt.behind != nil) {
+				t.Fatalf("status = %s, queued = %v", r.Status, r.IsQueued())
+			}
+			if tt.code == "" && err != nil {
+				t.Fatal(err)
+			}
+			if tt.code != "" {
+				if e, ok := apperr.As(err); !ok || e.Code != tt.code || e.Kind != apperr.KindConflict {
+					t.Fatalf("want %s conflict, got %v", tt.code, err)
+				}
+			}
+		})
+	}
+}
+
 func TestNextCapsApplyRetries(t *testing.T) {
 	s := Snapshot{Status: StatusApplying}
 	for i := 1; i <= MaxApplyRetries; i++ {

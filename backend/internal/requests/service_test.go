@@ -16,6 +16,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/audit"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/catalog"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/locks"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
 )
 
@@ -43,7 +44,7 @@ func (c *stepClock) Now() time.Time { return c.t }
 func TestIdempotencyKeyExpiresAfterWindow(t *testing.T) {
 	repo := newMemRepo()
 	clock := &stepClock{t: t0}
-	svc := NewService(repo, fakeVersions{}, fakeMembers{dev.UserID: RoleDeveloper}, clock, &seqIDs{})
+	svc := NewService(repo, fakeVersions{}, fakeMembers{dev.UserID: RoleDeveloper}, &fakeLocker{}, clock, &seqIDs{})
 	ctx := context.Background()
 
 	first, err := svc.Create(ctx, dev, createCmd(validInput(), "key-expiry-01"))
@@ -193,6 +194,28 @@ func (m *memStore) AppendAudit(_ context.Context, e audit.Event) error {
 	return nil
 }
 
+func (m *memStore) Locks() locks.Store { return nil }
+
+// fakeLocker grants every lock with an increasing token, or queues when queueBehind is set.
+type fakeLocker struct {
+	calls       []locks.AcquireCommand
+	queueBehind *uuid.UUID
+	err         error
+}
+
+func (f *fakeLocker) AcquireIn(_ context.Context, _ locks.Store, cmd locks.AcquireCommand) (locks.Result, error) {
+	if f.err != nil {
+		return locks.Result{}, f.err
+	}
+	f.calls = append(f.calls, cmd)
+	if f.queueBehind != nil {
+		return locks.Result{Outcome: locks.OutcomeQueued, Lock: locks.Lock{RequestID: *f.queueBehind, FencingToken: 1},
+			QueuedBehind: f.queueBehind}, nil
+	}
+	return locks.Result{Outcome: locks.OutcomeGranted,
+		Lock: locks.Lock{StackID: cmd.StackID, RequestID: cmd.RequestID, FencingToken: int64(40 + len(f.calls))}}, nil
+}
+
 // fakeVersions serves the sqs and lambda fixtures.
 type fakeVersions struct{ err error }
 
@@ -243,7 +266,7 @@ func newSvc(repo Repository, v VersionLookup) *Service {
 var otherUser = uuid.MustParse("44444444-4444-4444-4444-444444444444")
 
 func newSvcWithMembers(repo Repository, v VersionLookup, m Memberships) *Service {
-	return NewService(repo, v, m, platform.FixedClock{T: t0}, &seqIDs{})
+	return NewService(repo, v, m, &fakeLocker{}, platform.FixedClock{T: t0}, &seqIDs{})
 }
 
 func TestCreateRequiresTeamRole(t *testing.T) {
@@ -314,6 +337,49 @@ func TestCreate(t *testing.T) {
 		t.Fatalf("audit = %+v", repo.state.events)
 	}
 }
+
+func TestCreateTakesTheStackLock(t *testing.T) {
+	holder := uuid.MustParse("55555555-5555-4555-8555-555555555555")
+	tests := []struct {
+		name       string
+		locker     *fakeLocker
+		wantToken  *int64
+		wantQueued *uuid.UUID
+		wantErr    bool
+	}{
+		{name: "granted", locker: &fakeLocker{}, wantToken: ptr(int64(41))},
+		{name: "queued", locker: &fakeLocker{queueBehind: &holder}, wantQueued: &holder},
+		{name: "lock failure rolls back", locker: &fakeLocker{err: errors.New("db down")}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := newMemRepo()
+			svc := NewService(repo, fakeVersions{}, fakeMembers{dev.UserID: RoleDeveloper}, tt.locker, platform.FixedClock{T: t0}, &seqIDs{})
+			res, err := svc.Create(context.Background(), dev, createCmd(validInput(), "key-lock-0001"))
+			if tt.wantErr {
+				if err == nil || len(repo.state.requests) != 0 || len(repo.state.stacks) != 0 || len(repo.state.keys) != 0 {
+					t.Fatalf("want error with nothing persisted, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := res.Request
+			if len(tt.locker.calls) != 1 || tt.locker.calls[0].RequestID != r.ID || tt.locker.calls[0].StackID != r.Stack.ID ||
+				tt.locker.calls[0].By != dev || tt.locker.calls[0].CorrelationID != "corr-1" {
+				t.Fatalf("locker calls = %+v", tt.locker.calls)
+			}
+			if !equalPtr(r.FencingToken, tt.wantToken) || !equalPtr(r.QueuedBehind, tt.wantQueued) || r.Status != StatusDraft {
+				t.Fatalf("request token=%v queued=%v status=%s", r.FencingToken, r.QueuedBehind, r.Status)
+			}
+		})
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
+
+func equalPtr[T comparable](a, b *T) bool { return (a == nil) == (b == nil) && (a == nil || *a == *b) }
 
 func TestCreateIdempotency(t *testing.T) {
 	repo := newMemRepo()
