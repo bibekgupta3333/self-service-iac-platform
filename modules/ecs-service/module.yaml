@@ -211,7 +211,7 @@ inputs:
       propertyNames: { pattern: "^[a-z0-9][a-z0-9-]{0,39}$" }
       maxProperties: 10
       default: {}
-      description: Additional IAM policy documents for the task role keyed by a stable name. Allow statements must use explicit actions (no "*", "<service>:*", NotAction or NotResource).
+      description: 'Additional IAM policy documents for the task role keyed by a stable name. Allow statements must use explicit actions (no "*", "<service>:*", NotAction or NotResource), and may not allow iam:PassRole or any iam: action on Resource "*".'
       x-iacp-group: Security
       x-iacp-ui: stack-output
     ecr_max_image_count:

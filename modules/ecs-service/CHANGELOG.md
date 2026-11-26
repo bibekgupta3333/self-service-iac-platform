@@ -20,8 +20,8 @@ as git tags `modules/ecs-service/vX.Y.Z`.
   `iacp-boundary`) and a trust policy scoped to the owning account. The
   execution role can pull from its repository, write its logs and read
   exactly the `secrets` ARNs and `secrets_kms_key_arns`; the task role gets
-  only `extra_policy_jsons` (wildcards, `NotAction` and `NotResource`
-  rejected).
+  only `extra_policy_jsons` (wildcards, `NotAction`, `NotResource`,
+  `iam:PassRole` and `iam:` actions on `Resource "*"` rejected).
 - CloudWatch log group with KMS and retention (default 30 days).
 - Optional Application Load Balancer (internal by default): HTTPS listener
   with an ACM certificate and a TLS 1.2+ policy, HTTP-to-HTTPS redirect,

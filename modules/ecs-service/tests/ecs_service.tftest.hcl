@@ -656,6 +656,54 @@ run "rejects_wildcard_task_policy" {
   expect_failures = [var.extra_policy_jsons]
 }
 
+run "rejects_pass_role_task_policy" {
+  command = plan
+
+  variables {
+    extra_policy_jsons = { pass = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = "iam:PassRole", Resource = "arn:aws:iam::123456789012:role/iacp/admin" }] }) }
+  }
+
+  expect_failures = [var.extra_policy_jsons]
+}
+
+run "rejects_lowercase_pass_role_task_policy" {
+  command = plan
+
+  variables {
+    extra_policy_jsons = { pass = jsonencode({ Version = "2012-10-17", Statement = { Effect = "Allow", Action = ["s3:GetObject", "iam:passrole"], Resource = ["arn:aws:s3:::b/*"] } }) }
+  }
+
+  expect_failures = [var.extra_policy_jsons]
+}
+
+run "rejects_iam_action_on_all_resources" {
+  command = plan
+
+  variables {
+    extra_policy_jsons = { iam-read = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["iam:GetRole"], Resource = "*" }] }) }
+  }
+
+  expect_failures = [var.extra_policy_jsons]
+}
+
+run "accepts_scoped_iam_read_and_deny_pass_role" {
+  command = plan
+
+  variables {
+    extra_policy_jsons = {
+      iam-read = jsonencode({ Version = "2012-10-17", Statement = [
+        { Effect = "Allow", Action = ["iam:GetRole"], Resource = "arn:aws:iam::123456789012:role/iacp/orders-*" },
+        { Effect = "Deny", Action = "iam:PassRole", Resource = "*" },
+      ] })
+    }
+  }
+
+  assert {
+    condition     = keys(aws_iam_role_policy.task_extra) == ["iam-read"]
+    error_message = "Scoped IAM reads and Deny statements must be accepted."
+  }
+}
+
 run "rejects_reserved_env_var_prefix" {
   command = plan
 
