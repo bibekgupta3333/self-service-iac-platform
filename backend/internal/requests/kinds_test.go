@@ -527,6 +527,40 @@ func TestUpdateOfProductionNeedsNoMoreThanDeveloper(t *testing.T) {
 	}
 }
 
+// authorizeKind is the rbac matrix: developers create and update anywhere, destroy outside
+// production, and maintainers destroy in production; an unknown environment is production.
+func TestAuthorizeKindFollowsTheRBACMatrix(t *testing.T) {
+	tests := []struct {
+		role Role
+		kind Kind
+		env  string
+		ok   bool
+	}{
+		{RoleViewer, KindUpdate, "development", false},
+		{RoleNone, KindCreate, "development", false},
+		{RoleDeveloper, KindCreate, "production", true},
+		{RoleDeveloper, KindUpdate, "production", true},
+		{RoleDeveloper, KindDestroy, "development", true},
+		{RoleDeveloper, KindDestroy, "staging", true},
+		{RoleDeveloper, KindDestroy, "production", false},
+		{RoleDeveloper, KindDestroy, "qa", false}, // unknown environment counts as production
+		{RoleDeveloper, KindDestroy, "", false},
+		{RoleMaintainer, KindDestroy, "production", true},
+		{RoleAdmin, KindDestroy, "qa", true},
+		{Role("bogus"), KindUpdate, "development", false},
+	}
+	for _, tt := range tests {
+		err := authorizeKind(tt.role, tt.kind, tt.env, "payments")
+		if tt.ok != (err == nil) || (err != nil && !apperr.IsKind(err, apperr.KindForbidden)) {
+			t.Errorf("%q %s in %q: err = %v", tt.role, tt.kind, tt.env, err)
+		}
+	}
+	err := authorizeKind(RoleDeveloper, KindDestroy, "production", "payments")
+	if e, _ := apperr.As(err); !strings.Contains(e.Message, "needs the maintainer role") {
+		t.Fatalf("message = %v", err)
+	}
+}
+
 func TestUpgradeIsRejectedUntilItIsImplemented(t *testing.T) {
 	in := updateInput()
 	in.Kind = KindUpgrade
