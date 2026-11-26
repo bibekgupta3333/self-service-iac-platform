@@ -9,8 +9,6 @@ const securityHeaders = [
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
-  // Standalone output keeps a future container image small; `next start` still works.
-  output: "standalone",
   async headers() {
     return [{ source: "/:path*", headers: securityHeaders }];
   },

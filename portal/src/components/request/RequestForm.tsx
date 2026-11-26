@@ -57,9 +57,10 @@ const labelFor = (key: FormKey): string =>
 export function RequestForm({ version, client, newIdempotencyKey, onCreated }: RequestFormProps) {
   const router = useRouter();
   const adapter = useMemo(() => new SchemaAdapter(version), [version]);
-  // One key per form session: a retry after a network error or a validation failure reuses
-  // it, so a request that did reach the backend is never created twice (docs/03 §5).
-  const [idempotencyKey] = useState(() => (newIdempotencyKey ?? (() => crypto.randomUUID()))());
+  // One key per form session, created on the first submit (not during render, so server and
+  // client markup match). Retries after a network error or a validation failure reuse it, so a
+  // request that did reach the backend is never created twice (docs/03 §5).
+  const [idempotencyKey, setIdempotencyKey] = useState<string | null>(null);
   const [stack, setStack] = useState<StackFields>(() => ({
     team: "",
     environment: "development",
@@ -93,11 +94,13 @@ export function RequestForm({ version, client, newIdempotencyKey, onCreated }: R
       showProblems(clientErrors, null);
       return;
     }
+    const key = idempotencyKey ?? (newIdempotencyKey ?? (() => crypto.randomUUID()))();
+    if (idempotencyKey === null) setIdempotencyKey(key);
     setSubmitting(true);
     setErrors({});
     setFailure(null);
     try {
-      const { request } = await (client ?? browserApi()).createRequest(payload, idempotencyKey);
+      const { request } = await (client ?? browserApi()).createRequest(payload, key);
       if (onCreated) onCreated(request);
       else router.push(`/requests/${encodeURIComponent(request.id)}`);
     } catch (err) {
@@ -251,7 +254,7 @@ export function RequestForm({ version, client, newIdempotencyKey, onCreated }: R
         </p>
         <pre className="mt-3 overflow-x-auto rounded-md bg-slate-900 p-4 text-xs text-slate-100">
           <code>
-            {`POST /v1/requests\nIdempotency-Key: ${idempotencyKey}\nContent-Type: application/json\n\n${JSON.stringify(payload, null, 2)}`}
+            {`POST /v1/requests\nIdempotency-Key: ${idempotencyKey ?? "<a UUID created on the first submit and reused for retries>"}\nContent-Type: application/json\n\n${JSON.stringify(payload, null, 2)}`}
           </code>
         </pre>
         <p className="mt-2 text-xs text-slate-500">

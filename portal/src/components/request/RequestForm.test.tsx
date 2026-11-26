@@ -18,7 +18,10 @@ function setup(createRequest: (input: CreateRequestInput, key: string) => Promis
   const client = { createRequest: vi.fn(createRequest) };
   const onCreated = vi.fn();
   const user = userEvent.setup();
-  render(<RequestForm version={version} client={client} newIdempotencyKey={() => "key-0001-fixed"} onCreated={onCreated} />);
+  let n = 0;
+  // A new value per call proves the form asks for a key only once per session.
+  const newKey = () => `key-000${++n}-fixed`;
+  render(<RequestForm version={version} client={client} newIdempotencyKey={newKey} onCreated={onCreated} />);
   return { client, onCreated, user };
 }
 
@@ -98,6 +101,9 @@ describe("RequestForm", () => {
     await user.click(screen.getByRole("button", { name: "Submit request" }));
     expect(client.createRequest).toHaveBeenCalledTimes(2);
     expect(client.createRequest.mock.calls.map((c) => c[1])).toEqual(["key-0001-fixed", "key-0001-fixed"]);
+    expect(screen.getByText(/POST \/v1\/requests/, { selector: "pre code" }).textContent).toContain(
+      "Idempotency-Key: key-0001-fixed",
+    );
   });
 
   it("previews the exact request", async () => {
@@ -105,7 +111,7 @@ describe("RequestForm", () => {
     await fillValid(user);
     await user.click(screen.getByText("Preview request"));
     const pre = screen.getByText(/POST \/v1\/requests/, { selector: "pre code" });
-    expect(pre.textContent).toContain("Idempotency-Key: key-0001-fixed");
+    expect(pre.textContent).toContain("Idempotency-Key: <a UUID created on the first submit");
     expect(pre.textContent).toContain('"stack": "order-events"');
   });
 });
