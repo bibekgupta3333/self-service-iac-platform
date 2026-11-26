@@ -55,13 +55,17 @@ func ParseLookupPath(path string) (string, error) {
 // ResolveApplyTarget decides whether h names a request apply.yml may act on, and builds
 // its answer. It fails closed:
 //   - no lock, or an expired lease: no_active_request (404);
-//   - the holder is not approved or applying: request_not_approved (409). The webhook that
-//     moves a merged request to applying can trail the push that starts apply.yml, so both
-//     statuses pass; anything earlier means the change was not reviewed;
+//   - the holder is not approved or applying: request_not_approved (409);
+//   - no merge commit is recorded for the holder: merge_not_recorded (409, retryable). The
+//     lock credential and the approved hash are only handed out for a change that is merged
+//     to main; until the pr_merged webhook records the commit (it also moves the request to
+//     applying) the PR may still be open, and an apply that released the lock of an open,
+//     unmerged request would promote the next waiter over it. The caller retries briefly to
+//     cover the webhook lag;
 //   - head is a 40-character SHA that differs from the recorded merge commit:
-//     merge_commit_mismatch (409). A request whose merge is not recorded yet passes.
+//     merge_commit_mismatch (409).
 //
-// head is optional (empty skips the check); its shape is validated by the caller. Pure.
+// head is optional (empty skips only the comparison); its shape is validated by the caller. Pure.
 func ResolveApplyTarget(h StackHolder, head string, now time.Time) (ApplyTarget, error) {
 	if h.Lock == nil || h.Request == nil || h.Lock.Expired(now) {
 		return ApplyTarget{}, &apperr.Error{Kind: apperr.KindNotFound, Code: "no_active_request",
@@ -75,7 +79,11 @@ func ResolveApplyTarget(h StackHolder, head string, now time.Time) (ApplyTarget,
 		return ApplyTarget{}, apperr.Conflict("request_not_approved",
 			fmt.Sprintf("request %s holds the lock of %s but is %s, not approved", r.ShortID, h.StackPath, r.Status))
 	}
-	if head != "" && r.MergeCommitSHA != "" && head != r.MergeCommitSHA {
+	if r.MergeCommitSHA == "" {
+		return ApplyTarget{}, apperr.Conflict("merge_not_recorded",
+			fmt.Sprintf("request %s is not merged yet (no merge commit recorded); retry shortly", r.ShortID))
+	}
+	if head != "" && head != r.MergeCommitSHA {
 		return ApplyTarget{}, apperr.Conflict("merge_commit_mismatch",
 			fmt.Sprintf("request %s was merged as %s, not %s", r.ShortID, r.MergeCommitSHA, head))
 	}

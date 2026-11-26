@@ -32,7 +32,17 @@ func TestApplyTargetByPath(t *testing.T) {
 
 	hash, merge := strings.Repeat("ab", 32), strings.Repeat("c", 40)
 	if _, err := f.pool.Exec(ctx, `UPDATE requests SET status = 'approved', approved_plan_hash = $2, approved_by = created_by,
-		approved_at = now(), merge_commit_sha = $3 WHERE id = $1`, req.ID, hash, merge); err != nil {
+		approved_at = now() WHERE id = $1`, req.ID, hash); err != nil {
+		t.Fatal(err)
+	}
+	// Approved but not merged: the PR may still be open, so no credential is handed out,
+	// with or without a head.
+	for _, head := range []string{"", merge} {
+		if _, err := f.svc.ApplyTargetByPath(ctx, path, head); !hasCode(err, "merge_not_recorded") {
+			t.Fatalf("approved, unmerged, head %q: %v", head, err)
+		}
+	}
+	if _, err := f.pool.Exec(ctx, `UPDATE requests SET merge_commit_sha = $2 WHERE id = $1`, req.ID, merge); err != nil {
 		t.Fatal(err)
 	}
 	got, err := f.svc.ApplyTargetByPath(ctx, path, merge)

@@ -50,7 +50,7 @@ func holder(status Status, mutate func(h *StackHolder)) StackHolder {
 	h := StackHolder{
 		StackID: stack, StackPath: "environments/development/payments/order-events",
 		Lock: &locks.Lock{StackID: stack, RequestID: req, FencingToken: 48214, ExpiresAt: t0.Add(time.Hour)},
-		Request: &Request{ID: req, ShortID: "req-7k3p9x", Kind: KindUpdate, Status: status, ApprovedPlanHash: strings.Repeat("ab", 32),
+		Request: &Request{ID: req, ShortID: "req-7k3p9x", Kind: KindUpdate, Status: status, ApprovedPlanHash: strings.Repeat("ab", 32), MergeCommitSHA: strings.Repeat("c", 40),
 			Stack: StackRef{ID: stack}},
 	}
 	if mutate != nil {
@@ -71,7 +71,10 @@ func TestResolveApplyTarget(t *testing.T) {
 		{name: "approved", holder: holder(StatusApproved, nil)},
 		{name: "applying", holder: holder(StatusApplying, nil)},
 		{name: "head matches the merge", holder: holder(StatusApplying, func(h *StackHolder) { h.Request.MergeCommitSHA = head }), head: head},
-		{name: "merge not recorded yet", holder: holder(StatusApproved, nil), head: head},
+		{name: "merge not recorded, no head", holder: holder(StatusApproved, func(h *StackHolder) { h.Request.MergeCommitSHA = "" }),
+			wantCode: "merge_not_recorded", wantKind: apperr.KindConflict},
+		{name: "merge not recorded, head sent", holder: holder(StatusApproved, func(h *StackHolder) { h.Request.MergeCommitSHA = "" }), head: head,
+			wantCode: "merge_not_recorded", wantKind: apperr.KindConflict},
 		{name: "head differs from the merge", holder: holder(StatusApplying, func(h *StackHolder) { h.Request.MergeCommitSHA = head }),
 			head: other, wantCode: "merge_commit_mismatch", wantKind: apperr.KindConflict},
 		{name: "no lock", holder: holder(StatusApproved, func(h *StackHolder) { h.Lock, h.Request = nil, nil }),
