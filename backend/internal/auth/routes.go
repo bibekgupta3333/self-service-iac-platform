@@ -29,6 +29,11 @@ const (
 	// apply is verified against, and a pull-request token comes from a workflow file the
 	// PR author controls. pr-validate.yml reads its request id and token from iacp.stack.json.
 	RouteRequestLookup RouteClass = "request_lookup"
+	// RouteBudgetActuals: POST /v1/internal/budget-actuals. Records a team's actual spend.
+	// No workflow is allowed: only a caller holding the shared internal token (the future
+	// Cost Explorer worker, WBS 8.5) may write it, so a token minted by a workflow file a
+	// pull-request author controls can never move the spend a budget gate reads.
+	RouteBudgetActuals RouteClass = "budget_actuals"
 )
 
 // RoutePolicy is what an OIDC caller must be to use a route class.
@@ -65,6 +70,7 @@ var RoutePolicies = map[RouteClass]RoutePolicy{
 		MainOnly:  true,
 		Events:    []string{"push", "workflow_dispatch"},
 	},
+	RouteBudgetActuals: {}, // shared internal token only: no workflow is on the list
 }
 
 // AuthorizeRoute checks a caller's workflow identity against the route class policy.

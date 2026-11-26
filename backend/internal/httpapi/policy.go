@@ -68,6 +68,11 @@ func DefaultPolicies() PolicyTable {
 		"POST /v1/requests": {Action: rbac.ActionRequestCreate, Scope: ScopeAuthenticated},
 		// The caller's own profile and session.
 		"GET /v1/me": {Action: rbac.ActionRead, Scope: ScopeAuthenticated},
+		// Team budgets are admin-only (docs/07 matrix). The route policy requires the admin role
+		// in some team; BudgetAdminService then requires it in the team named in the path.
+		"GET /v1/teams/{slug}/budgets":         {Action: rbac.ActionBudgetSet, Scope: ScopeAnyTeam},
+		"GET /v1/teams/{slug}/budgets/{month}": {Action: rbac.ActionBudgetSet, Scope: ScopeAnyTeam},
+		"PUT /v1/teams/{slug}/budgets/{month}": {Action: rbac.ActionBudgetSet, Scope: ScopeAnyTeam},
 	}
 }
 

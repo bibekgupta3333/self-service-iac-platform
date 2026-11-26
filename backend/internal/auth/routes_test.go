@@ -47,6 +47,9 @@ func TestAuthorizeRoute(t *testing.T) {
 		{"apply from a PR ref may not look up the request", RouteRequestLookup, wfFor("apply.yml", pr, "pull_request"), false},
 		{"apply on a schedule may not look up the request", RouteRequestLookup, wfFor("apply.yml", main, "schedule"), false},
 		{"ttl reaper may not look up the request", RouteRequestLookup, wfFor("ttl-reaper.yml", main, "schedule"), false},
+		{"shared token may record budget actuals", RouteBudgetActuals, nil, true},
+		{"apply may not record budget actuals", RouteBudgetActuals, wfFor("apply.yml", main, "push"), false},
+		{"pr-validate may not record budget actuals", RouteBudgetActuals, wfFor("pr-validate.yml", pr, "pull_request"), false},
 		{"unknown class denies", RouteClass("other"), wfFor("apply.yml", main, "push"), false},
 	}
 	for _, tt := range tests {
