@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { SchemaAdapter } from "./adapter";
 import { toField } from "./fields";
 import { lambdaSchema, sqsSchema } from "./fixtures";
-import { initialValues, parseValue, toText } from "./values";
+import { clearBehaviour, emptyValueFor, initialValues, parseValue, toInputs, toText } from "./values";
 
 const sqs = new SchemaAdapter({ module: "sqs", version: "1.0.0", inputs_schema: sqsSchema });
 const lambda = new SchemaAdapter({ module: "lambda", version: "1.0.0", inputs_schema: lambdaSchema });
@@ -114,6 +114,45 @@ describe("toInputs", () => {
 
   it("falls back to defaults for fields missing from the values", () => {
     expect(sqs.toInputs({ name: "orders" })).toEqual({ inputs: { name: "orders" }, errors: {} });
+  });
+});
+
+describe("clearing optional fields", () => {
+  const list = toField("l", { type: "array", items: { type: "string" }, default: ["a"] }, false);
+  const map = toField("m", { type: "object", additionalProperties: { type: "string" }, default: { a: "1" } }, false);
+  const str = toField("s", { type: "string", default: "x" }, false);
+  const strPattern = toField("p", { type: "string", pattern: "^[a-z]+$", default: "x" }, false);
+  const nonEmptyList = toField("n", { type: "array", items: { type: "string" }, minItems: 1, default: ["a"] }, false);
+  const int = toField("i", { type: "integer", default: 3 }, false);
+  const nullable = toField("z", { type: ["integer", "null"], default: 10 }, false);
+  const nullDefault = toField("k", { type: ["string", "null"], default: null }, false);
+  const noDefault = toField("t", { type: "object", additionalProperties: { type: "string" } }, false);
+  const emptyDefault = toField("e", { type: "array", items: { type: "string" }, default: [] }, false);
+
+  it.each([
+    [list, "empty", { value: [] }],
+    [map, "empty", { value: {} }],
+    [str, "empty", { value: "" }],
+    [strPattern, "default", undefined],
+    [nonEmptyList, "default", undefined],
+    [int, "default", undefined],
+    [nullable, "null", undefined],
+    [nullDefault, "default", { value: "" }],
+    [noDefault, "omit", { value: {} }],
+    [emptyDefault, "default", { value: [] }],
+  ])("%#: %o", (field, behaviour, empty) => {
+    expect(clearBehaviour(field)).toBe(behaviour);
+    expect(emptyValueFor(field)).toEqual(empty);
+  });
+
+  it("sends the explicit empty value only where the schema allows it", () => {
+    const fields = [list, map, str, strPattern, nonEmptyList, int, nullable, nullDefault, noDefault, emptyDefault];
+    const cleared = Object.fromEntries(fields.map((f) => [f.name, ""]));
+    expect(toInputs(fields, cleared)).toEqual({ inputs: { l: [], m: {}, s: "", z: null }, errors: {} });
+  });
+
+  it("is required for required fields", () => {
+    expect(clearBehaviour(toField("r", { type: "string" }, true))).toBe("required");
   });
 });
 

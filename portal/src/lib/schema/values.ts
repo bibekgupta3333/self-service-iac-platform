@@ -120,6 +120,50 @@ export function parseValue(field: FieldModel, raw: FieldValue): Parsed {
 
 const sameValue = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
 
+/** isEmptyValue reports "", [] and {}. Pure. */
+export function isEmptyValue(v: unknown): boolean {
+  if (v === "") return true;
+  if (Array.isArray(v)) return v.length === 0;
+  return typeof v === "object" && v !== null && Object.keys(v).length === 0;
+}
+
+/**
+ * emptyValueFor returns the empty value of a text-like field ("" for strings, [] for lists,
+ * {} for maps) when the schema allows it, or undefined. Numbers, booleans, enums and JSON
+ * fields have no empty value other than null. Pure.
+ */
+export function emptyValueFor(field: FieldModel): { value: unknown } | undefined {
+  switch (field.kind) {
+    case "string":
+      return (field.minLength ?? 0) === 0 && matches(field.pattern, "") ? { value: "" } : undefined;
+    case "string-list":
+      return (field.minItems ?? 0) === 0 ? { value: [] } : undefined;
+    case "key-value":
+      return (field.minProperties ?? 0) === 0 ? { value: {} } : undefined;
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * What clearing an optional control sends:
+ * - "null": the field is nullable and its default is not null, so clearing means null;
+ * - "empty": the default is non-empty and the schema allows "", [] or {}, so clearing sends it;
+ * - "default": nothing is sent and the module default applies (no empty value is allowed, or
+ *   the default is already empty or null);
+ * - "omit": there is no default; nothing is sent.
+ */
+export type ClearBehaviour = "required" | "null" | "empty" | "default" | "omit";
+
+/** clearBehaviour decides what an empty control means for field. Pure. */
+export function clearBehaviour(field: FieldModel): ClearBehaviour {
+  if (field.required) return "required";
+  if (!field.hasDefault) return "omit";
+  if (field.nullable && field.default !== null) return "null";
+  if (field.default !== null && !isEmptyValue(field.default) && emptyValueFor(field) !== undefined) return "empty";
+  return "default";
+}
+
 export interface InputsResult {
   inputs: Record<string, unknown>;
   /** Client-side problems keyed by field name. */
@@ -140,10 +184,18 @@ export function toInputs(fields: readonly FieldModel[], values: FormValues): Inp
       continue;
     }
     if (parsed.empty) {
-      if (f.required) errors[f.name] = "is required";
-      // Clearing a nullable field whose default is not null means "null" (e.g. unreserved
-      // Lambda concurrency); otherwise the module default (often null) applies.
-      else if (f.nullable && f.hasDefault && f.default !== null) inputs[f.name] = null;
+      switch (clearBehaviour(f)) {
+        case "required":
+          errors[f.name] = "is required";
+          break;
+        case "null": // e.g. unreserved Lambda concurrency
+          inputs[f.name] = null;
+          break;
+        case "empty": // e.g. an explicitly empty list where the default has entries
+          inputs[f.name] = emptyValueFor(f)?.value;
+          break;
+        default: // the module default applies
+      }
       continue;
     }
     if (!f.required && f.hasDefault && sameValue(parsed.value, f.default)) continue;

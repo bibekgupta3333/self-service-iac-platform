@@ -1,7 +1,7 @@
 "use client";
 
 import type { FieldModel } from "@/lib/schema/fields";
-import type { FieldValue } from "@/lib/schema/values";
+import { clearBehaviour, type FieldValue, isEmptyValue } from "@/lib/schema/values";
 
 const CONTROL =
   "mt-1 block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm aria-[invalid=true]:border-red-600";
@@ -14,17 +14,26 @@ export interface SchemaFieldProps {
   onChange: (name: string, value: FieldValue) => void;
 }
 
-function hintFor(field: FieldModel): string | undefined {
-  switch (field.kind) {
-    case "string-list":
-      return "One value per line.";
-    case "key-value":
-      return "One key=value pair per line.";
-    case "json":
-      return "JSON value. Leave empty to use the module default.";
+const FORMAT_HINTS: Partial<Record<FieldModel["kind"], string>> = {
+  "string-list": "One value per line.",
+  "key-value": "One key=value pair per line.",
+  json: "JSON value.",
+};
+
+/** hintFor explains the input format and what clearing the control sends. Pure. */
+export function hintFor(field: FieldModel): string | undefined {
+  const clear: Record<ReturnType<typeof clearBehaviour>, string | undefined> = {
+    required: undefined,
+    null: "Clear to set null.",
+    empty: "Clear to send an empty value.",
     default:
-      return field.nullable && field.default !== null && field.hasDefault ? "Clear to set null." : undefined;
-  }
+      field.kind === "boolean" || field.default === null || isEmptyValue(field.default)
+        ? undefined
+        : "Leave empty to use the module default.",
+    omit: field.kind === "boolean" ? undefined : "Leave empty to leave it unset.",
+  };
+  const parts = [FORMAT_HINTS[field.kind], clear[clearBehaviour(field)]].filter(Boolean);
+  return parts.length > 0 ? parts.join(" ") : undefined;
 }
 
 /** SchemaField renders the control for one module input with its label, help and errors. */

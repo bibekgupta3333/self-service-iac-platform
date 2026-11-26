@@ -35,6 +35,8 @@ export interface FieldModel {
   exclusiveMaximum?: number;
   minLength?: number;
   maxLength?: number;
+  minItems?: number;
+  minProperties?: number;
   group: string;
   immutable: boolean;
   /** x-iacp-ui hint from module.yaml (select, key-value, danger-toggle, stack-output, …). */
@@ -147,6 +149,8 @@ export function toField(name: string, prop: Record<string, unknown>, required: b
     exclusiveMaximum: num(prop.exclusiveMaximum),
     minLength: num(prop.minLength),
     maxLength: num(prop.maxLength),
+    minItems: num(prop.minItems),
+    minProperties: num(prop.minProperties),
     group: str(prop["x-iacp-group"]) ?? DEFAULT_GROUP,
     immutable: prop["x-iacp-immutable"] === true,
     ui: str(prop["x-iacp-ui"]),
