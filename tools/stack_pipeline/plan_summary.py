@@ -1,7 +1,7 @@
 """Plan summary for the sticky PR comment (and, later, the platform API report).
 
-Everything here is pure: plan JSON, conftest JSON and step outcomes go in, a
-``PlanSummary`` value and its Markdown rendering come out.
+Everything here is pure: plan JSON, conftest JSON, step outcomes and an optional
+Infracost estimate go in, a ``PlanSummary`` value and its Markdown rendering come out.
 """
 
 from __future__ import annotations
@@ -12,6 +12,8 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
+
+from .cost import CostEstimate
 
 COMMENT_MARKER = "<!-- iacp-plan:{id} -->"
 MAX_PLAN_TEXT = 40_000  # GitHub comments are capped at 65 536 characters
@@ -44,6 +46,8 @@ class PlanSummary:
     policy: PolicyResult = PolicyResult()
     steps: Mapping[str, str] = field(default_factory=dict)
     plan_hash: str | None = None
+    # Informational only (WBS 5.5): never part of ``ok``.
+    cost: CostEstimate | None = None
 
     @property
     def counts(self) -> dict[str, int]:
@@ -65,6 +69,7 @@ class PlanSummary:
             "steps": dict(self.steps),
             "policy": {"failures": list(self.policy.failures), "warnings": list(self.policy.warnings)},
             "changes": [{"address": c.address, "action": c.action} for c in self.changes],
+            "cost": self.cost.to_dict() if self.cost is not None else None,
         }
 
 
@@ -122,6 +127,7 @@ def summarize(
     plan: Mapping[str, Any] | None,
     conftest_output: Sequence[Mapping[str, Any]] | None,
     steps: Mapping[str, str],
+    cost: CostEstimate | None = None,
 ) -> PlanSummary:
     return PlanSummary(
         stack_id=stack_id,
@@ -130,6 +136,7 @@ def summarize(
         policy=policy_result(conftest_output),
         steps=dict(steps),
         plan_hash=plan_hash(plan) if plan is not None else None,
+        cost=cost,
     )
 
 
@@ -173,6 +180,8 @@ def render_markdown(summary: PlanSummary, plan_text: str | None = None, commit: 
             lines += ["", "</details>"]
     else:
         lines.append("**Plan:** not produced (an earlier step failed).")
+    if summary.cost is not None:
+        lines += ["", summary.cost.render_markdown()]
     if summary.policy.failures or summary.policy.warnings:
         lines += ["", "**Policy findings**", ""]
         lines += [f"- deny: {m}" for m in summary.policy.failures]

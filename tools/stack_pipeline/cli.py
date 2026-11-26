@@ -13,6 +13,7 @@ from typing import Any, Mapping, Sequence
 
 from .adapters import FileSystemStackRepository, GitCli, GitDiff
 from .api_client import ApiError, FreshCredentials, IacpApiClient, TokenSource
+from .cost import parse_infracost
 from .detection import DEFAULT_MAX_STACKS, DetectionError, DetectionPolicy, DetectionResult, StackDetector
 from .models import StackMetadataError
 from .module_install import MANIFEST, ModuleInstallVerifier, parse_manifest
@@ -68,6 +69,8 @@ def build_parser() -> argparse.ArgumentParser:
     summary.add_argument("--plan", type=Path, help="terraform show -json output (may be missing)")
     summary.add_argument("--conftest", type=Path, help="conftest --output json result (may be missing)")
     summary.add_argument("--plan-text", type=Path, help="terraform plan text output (may be missing)")
+    summary.add_argument("--cost", type=Path,
+                         help="infracost breakdown --format json output (informational; may be missing)")
     summary.add_argument("--step", action="append", default=[], metavar="NAME=OUTCOME", help="step outcome (repeatable)")
     summary.add_argument("--commit", default="", help="head commit shown in the comment")
     summary.add_argument("--run-url", default="", help="workflow run URL shown in the comment")
@@ -207,6 +210,7 @@ def run_summary(args: argparse.Namespace) -> int:
         plan=_read_json(args.plan),
         conftest_output=conftest_output if isinstance(conftest_output, list) else None,
         steps=parse_steps(args.step),
+        cost=parse_infracost(_read_json(args.cost)),
     )
     args.markdown_out.write_text(
         render_markdown(result, _read_text(args.plan_text), commit=args.commit, run_url=args.run_url), encoding="utf-8"
