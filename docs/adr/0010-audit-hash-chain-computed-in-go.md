@@ -1,0 +1,41 @@
+# ADR-0010: Audit hash chain computed in Go, enforced by PostgreSQL
+
+- Status: Proposed
+- Date: 2026-11-25
+- Deciders: Platform team
+- Related: [03-data-model-and-api.md §3](../03-data-model-and-api.md#3-hash-chained-audit-log), [ADR-0007](0007-go-backend-postgresql.md)
+
+## Context
+
+The first design of `audit_events` computed each row's hash inside a `BEFORE INSERT` trigger, over a `|`-joined string that included `payload::text`. Two problems showed up when building the backend:
+
+- The verifier has to reproduce PostgreSQL's `jsonb` text output (key order by length then bytes, number formatting) exactly. That is hard to do outside the database and easy to break.
+- The chain logic lived in plpgsql, so it could only be tested against a live database.
+
+`AGENTS.md` asks for pure, side-effect-free logic with I/O only in adapters.
+
+## Decision
+
+1. The hash is computed by the Go audit writer with a pure function: `hash = sha256(prev_hash || CanonicalJSON(event))`. The canonical form is a JSON object with alphabetically ordered keys (including `actor_ip`), a fixed microsecond timestamp format, and a canonical payload: keys sorted, and every number rewritten as a plain decimal with all significant digits kept (`1e2` becomes `100`, `2.50` becomes `2.5`, `9007199254740993` is unchanged). That form is a fixed point of PostgreSQL's `jsonb` number output, so the writer stores the canonical bytes and reads the same bytes back.
+2. The writer takes the advisory lock `727274` inside the caller's transaction, reads the chain head, seals the event, and inserts it. The audit row commits or rolls back with the state change it describes.
+3. PostgreSQL still guarantees the invariants: a `BEFORE INSERT` trigger takes the same lock and rejects a row whose `prev_hash` is not the current head. Separate triggers reject `UPDATE`, `DELETE` and `TRUNCATE`.
+4. The API connects as `iacp_app` (`IACP_DATABASE_URL`), which has DML on platform tables but only `INSERT` and `SELECT` on `audit_events`. Migrations run as the schema owner over a separate connection (`IACP_MIGRATE_DATABASE_URL`). The app role cannot update or delete audit rows, disable triggers, or set `session_replication_role`. If the API is pointed at an owner or superuser connection, it logs a warning at startup.
+5. `VerifyChain` (pure) and `GET /v1/audit/verify` recompute a `seq` range from stored rows, at most 10,000 events per call (`has_more` signals the rest).
+
+## Consequences
+
+Positive:
+- Chain logic is unit-tested without a database, with a pinned known-value test.
+- Verification works on exported NDJSON with the same Go code, independent of PostgreSQL's `jsonb` formatting.
+- Linkage and immutability are still enforced in the database, not trusted to the application, and the runtime role cannot get around them.
+- Payload numbers keep full precision, so changing a large integer is detected.
+
+Negative:
+- A writer that bypasses the Go code must reproduce the canonical form. The only supported write path is `audit.Writer`.
+- Changing the canonical form invalidates existing chains, so it needs a versioned migration of the format.
+- A superuser can still bypass the triggers; that is detectable by verification and, later, by the S3 anchors, not preventable inside PostgreSQL.
+
+## Alternatives considered
+
+- **Keep hashing in the trigger:** single source of truth in SQL, but the verifier must mirror `jsonb` text output and tests need a database.
+- **Hash in Go with no database check:** simpler, but a buggy or compromised writer could fork the chain without detection until the nightly verification.

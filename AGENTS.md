@@ -40,7 +40,7 @@ If code and docs disagree, fix one of them in the same change. A significant des
 5. **Modules keep secure defaults:** encryption with KMS, public access blocked, least-privilege IAM, required tags (`iacp:team`, `iacp:environment`, `iacp:stack`, `iacp:managed-by`).
 6. **Breaking module change means a major version bump** plus upgrade notes. Use `moved` blocks where possible.
 7. **`environments/` is generated** by `backend/internal/generator`. To change output, change the templates and update the golden files.
-8. **Audit log is append-only.** Never add UPDATE or DELETE paths for `audit_events`.
+8. **Audit log is append-only.** Never add UPDATE or DELETE paths for `audit_events`. The API connects as `iacp_app`, which can only INSERT and SELECT on audit rows. Migrations run as the owner through `IACP_MIGRATE_DATABASE_URL`.
 9. **State surgery** goes only through the break-glass `state-surgery` workflow.
 
 ## Commands
@@ -58,6 +58,9 @@ opa test policies/opa -v
 
 # Go
 cd backend && go test ./... && go vet ./...
+make go-integration                      # IACP_INTEGRATION=1, against local Postgres
+make generator-update                    # refresh golden files after an intended template change
+make api                                 # run the API locally (dev auth)
 cd tests && go test -timeout 30m ./...   # Terratest (LocalStack)
 
 # Portal
@@ -68,7 +71,7 @@ cd portal && npm ci && npm run lint && npm test
 ```
 
 ## Coding conventions
-- **Go:** standard layout (`cmd/`, `internal/`), chi router, pgx and sqlc, context everywhere, structured JSON logs, table-driven tests, wrapped errors (`fmt.Errorf("…: %w", err)`).
+- **Go:** standard layout (`cmd/`, `internal/`), chi router, hand-written pgx repositories (parameterised SQL only), context everywhere, structured JSON logs, table-driven tests, wrapped errors (`fmt.Errorf("…: %w", err)`).
 - **Terraform:** one resource concern per file. Every variable has a `description`, a `type`, and `validation` where useful. Outputs are documented. Run `terraform-docs` for READMEs.
 - **Rego:** each policy has positive and negative tests and a clear `deny` message naming the resource and the fix.
 - **Python:** only for tooling (`tools/`) and diagrams (`docs/diagrams/src/`). Use type hints, dataclasses and pytest.

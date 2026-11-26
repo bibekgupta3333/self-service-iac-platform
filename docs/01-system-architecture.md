@@ -155,7 +155,7 @@ environments/development/payments/order-events/
 ├── providers.tf
 ├── main.tf
 ├── outputs.tf
-├── variables.tf                  # only when the stack has upstream dependencies
+├── variables.tf                  # always (standard module structure); declares deps_* variables when the stack has upstream dependencies
 ├── iacp.deps.auto.tfvars.json # upstream stack outputs injected by the platform
 └── .terraform.lock.hcl           # provider lockfile (multi-platform hashes)
 ```
@@ -206,11 +206,11 @@ provider "aws" {
 
   default_tags {
     tags = {
-      "iacp:env"        = "development"
-      "iacp:managed-by" = "iacp"
-      "iacp:stack"      = "order-events"
-      "iacp:team"       = "payments"
-      "cost-center"        = "cc-4102"
+      cost-center        = "cc-4102"
+      "iacp:environment" = "development"
+      "iacp:managed-by"  = "iacp"
+      "iacp:stack"       = "order-events"
+      "iacp:team"        = "payments"
     }
   }
 }

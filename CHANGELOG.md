@@ -29,7 +29,19 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
   - Every action is pinned by commit SHA, permissions are read-only, and each job skips when its code doesn't exist yet.
 - `.github/pull_request_template.md` and `.github/CODEOWNERS`.
 
+- Go control plane `backend/` (WBS 4.1–4.3, 4.5 partial, 4.7, 4.11):
+  - chi API with slog JSON logs, server timeouts and graceful shutdown
+  - goose migrations with an advisory lock
+  - catalog endpoints, and an internal index endpoint behind a token
+  - `POST/GET /v1/requests` with a pure state machine (apply retries capped at 2), Idempotency-Key replay (24 h window) and JSON Schema input validation
+  - deterministic config generator (golden-tested, `terraform fmt` and TFLint clean) with local and S3 backend strategies
+  - hash-chained audit log computed in Go (ADR-0010), with a bounded `/v1/audit/verify`
+  - distroless nonroot Dockerfile and an opt-in `backend` compose service
+- Make targets `go-integration`, `generator-update` and `api`.
+
 ### Security
+- The backend fails closed: it binds to loopback by default, refuses to start without `IACP_AUTH_MODE`, keeps internal endpoints behind a constant-time token check, and enforces team membership on request creation.
+- The API runs as the `iacp_app` role, which can only INSERT and SELECT on `audit_events`. Triggers block UPDATE, DELETE and TRUNCATE.
 - The local stack binds LocalStack and Postgres to loopback only. Images are pinned by digest.
 - `make` forces LocalStack dummy credentials and unexports `AWS_PROFILE` and session tokens.
 
@@ -39,7 +51,7 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 ### Planned
 - M0 Foundations (remaining): smoke stack against LocalStack. The real-AWS state bucket and OIDC roles are deferred by ADR-0009.
 - M1 Module registry: `modules/s3`, `modules/sqs`, `modules/lambda`, `module.yaml` schema, `module-release.yml`.
-- M2 Orchestration engine: Go API, config generator, GitHub App PRs, webhooks, `pr-validate.yml`, `apply.yml`.
+- M2 Orchestration engine (remaining): stack lock and queue, GitHub App PRs, webhooks, OIDC verifier, OAuth/RBAC, `pr-validate.yml`, `apply.yml`.
 - M3 Security gates (remaining): SARIF upload, budget context, approval and budget policies, environment protection.
 - M4 Portal and destroy: Next.js dashboard, destroy flow, Infracost comments.
 

@@ -52,7 +52,7 @@ Migrations live in `backend/migrations/` (goose, `NNNN_name.sql`); queries in `b
 
 ```sql
 -- 0001_init.sql
-CREATE EXTENSION IF NOT EXISTS pgcrypto;   -- gen_random_uuid(), digest()
+-- gen_random_uuid() is built in (PostgreSQL 13+); audit hashes are computed in Go, so no pgcrypto.
 CREATE EXTENSION IF NOT EXISTS citext;
 
 -- ---------- enums ----------
@@ -421,8 +421,8 @@ RETURNING request_id, fencing_token;
 -- 0002_audit.sql
 CREATE TABLE audit_events (
     seq           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    id            uuid        NOT NULL UNIQUE DEFAULT gen_random_uuid(),
-    occurred_at   timestamptz NOT NULL DEFAULT clock_timestamp(),
+    id            uuid        NOT NULL UNIQUE,       -- set by the writer (part of the hash)
+    occurred_at   timestamptz NOT NULL,              -- set by the writer, microsecond precision
     actor_type    text        NOT NULL CHECK (actor_type IN ('user', 'system', 'github_actions', 'github_webhook')),
     actor_id      text        NOT NULL,              -- user uuid | "worker" | workflow_ref + run_id
     actor_ip      inet,
@@ -439,27 +439,23 @@ CREATE INDEX audit_events_subject_idx ON audit_events (subject_type, subject_id,
 CREATE INDEX audit_events_team_idx    ON audit_events (team_id, seq DESC);
 CREATE INDEX audit_events_action_idx  ON audit_events (action, occurred_at DESC);
 
--- Chain: hash = sha256(prev_hash || canonical row). Serialised via advisory lock so seq order == chain order.
-CREATE OR REPLACE FUNCTION audit_events_chain() RETURNS trigger LANGUAGE plpgsql AS $$
+-- Chain: hash = sha256(prev_hash || canonical JSON of the event), computed by the Go writer
+-- (backend/internal/audit, pure function ChainHash). The database enforces linkage: inside the
+-- shared advisory lock, prev_hash must equal the hash of the current head, so seq order == chain order.
+CREATE OR REPLACE FUNCTION audit_events_link_check() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
-    last_hash bytea;
+    head bytea;
 BEGIN
-    PERFORM pg_advisory_xact_lock(727274);   -- 'audit' chain lock
-    SELECT hash INTO last_hash FROM audit_events ORDER BY seq DESC LIMIT 1;
-    NEW.prev_hash := COALESCE(last_hash, decode(repeat('00', 32), 'hex'));
-    NEW.hash := digest(
-        NEW.prev_hash ||
-        convert_to(
-            concat_ws('|', NEW.id::text, to_char(NEW.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
-                      NEW.actor_type, NEW.actor_id, NEW.action, NEW.subject_type, NEW.subject_id,
-                      coalesce(NEW.team_id::text, ''), coalesce(NEW.correlation_id, ''), NEW.payload::text),
-            'UTF8'),
-        'sha256');
+    PERFORM pg_advisory_xact_lock(727274);   -- 'audit' chain lock, also taken by the writer
+    SELECT hash INTO head FROM audit_events ORDER BY seq DESC LIMIT 1;
+    IF NEW.prev_hash IS DISTINCT FROM COALESCE(head, decode(repeat('00', 32), 'hex')) THEN
+        RAISE EXCEPTION 'audit_events: prev_hash does not match chain head';
+    END IF;
     RETURN NEW;
 END $$;
 
-CREATE TRIGGER audit_events_chain_trg BEFORE INSERT ON audit_events
-    FOR EACH ROW EXECUTE FUNCTION audit_events_chain();
+CREATE TRIGGER audit_events_link_trg BEFORE INSERT ON audit_events
+    FOR EACH ROW EXECUTE FUNCTION audit_events_link_check();
 
 -- Append-only: reject UPDATE/DELETE/TRUNCATE even for the table owner path used by the app.
 CREATE OR REPLACE FUNCTION audit_events_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -471,14 +467,17 @@ CREATE TRIGGER audit_events_no_update BEFORE UPDATE OR DELETE ON audit_events
 CREATE TRIGGER audit_events_no_truncate BEFORE TRUNCATE ON audit_events
     FOR EACH STATEMENT EXECUTE FUNCTION audit_events_immutable();
 
--- Privileges: application role may only INSERT and SELECT.
+-- Privileges: application role may only INSERT and SELECT (the migration creates iacp_app
+-- when the migrating role is allowed to, and skips with a notice otherwise).
 REVOKE ALL ON audit_events FROM iacp_app;
 GRANT INSERT, SELECT ON audit_events TO iacp_app;
 ```
 
 Notes:
 
-- `payload::text` of `jsonb` is canonical (keys sorted, whitespace normalised by Postgres), so the verifier can recompute hashes from exported rows.
+- **Canonical form** (`audit.CanonicalJSON`): a JSON object with keys in alphabetical order: `action`, `actor_id`, `actor_ip` (canonical address text, empty when null), `actor_type`, `correlation_id`, `id`, `occurred_at` (`YYYY-MM-DDTHH:MM:SS.ffffffZ`), `payload`, `subject_id`, `subject_type`, `team_id` (empty string when null). The payload is decoded with exact numbers and re-encoded with sorted keys, and every number is rewritten as a plain decimal that keeps all significant digits (`1e2` becomes `100`, `2.50` becomes `2.5`). The writer stores those canonical bytes; they are a fixed point of jsonb's output, so the round trip does not change the hash, the verifier can recompute it from stored or exported rows, and changing any digit (even beyond float64 precision) is detected. A known-value test pins the format; changing it invalidates existing chains.
+- Hashing in Go rather than in the trigger ([ADR-0010](adr/0010-audit-hash-chain-computed-in-go.md)) keeps the chain logic a pure, unit-testable function (`ChainHash`, `VerifyChain`) while the database still guarantees linkage and immutability. `GET /v1/audit/verify` recomputes a `seq` range of at most 10,000 events per call and returns `has_more` when the chain continues.
+- **Roles:** the API connects as `iacp_app` (INSERT and SELECT on `audit_events`, DML elsewhere, nothing on `goose_db_version`); migrations run as the schema owner on a separate connection (migration `0004_app_role_grants.sql`). The app role cannot disable triggers or set `session_replication_role`.
 - **Verification job** (worker, nightly): streams `audit_events` in `seq` order, recomputes the chain, emits metric `the platform/AuditChainValid` (alarm on 0).
 - **Anchoring:** at 00:15 UTC the worker writes `{seq, hash, occurred_at}` of the chain head plus an NDJSON export of the previous day to `s3://iacp-audit-anchor-111111111111/yyyy/mm/dd/` (Object Lock compliance, 7 y). Any later tampering with Postgres (even by a superuser disabling triggers) is detectable against the anchors.
 - The single advisory lock serialises audit inserts (~ tens/sec sustained); measured headroom is ample for 500 requests/day. If needed, partition chains per team.
@@ -501,6 +500,13 @@ stateDiagram-v2
     plan_ready --> validating: new commit pushed (re-plan)
     plan_ready --> rejected: PR closed unmerged / review rejected
     pr_open --> rejected: PR closed unmerged
+    pr_open --> cancelled: user cancels
+    validating --> validating: new commit pushed (restart)
+    validating --> rejected: PR closed unmerged
+    plan_ready --> cancelled: user cancels
+    approved --> plan_ready: review dismissed
+    approved --> validating: new commit pushed (re-plan)
+    approved --> rejected: PR closed unmerged
     approved --> applying: merged → apply.yml started
     applying --> applied: apply ok + outputs reported
     applying --> failed: non-transient error / plan mismatch
@@ -516,18 +522,21 @@ stateDiagram-v2
 | — | `POST /v1/requests` | `draft` | validate, acquire lock or queue, audit `request.created` |
 | `draft` | PR opened by GitHub App | `pr_open` | store branch/PR, audit |
 | `draft` | cancel / queued > 7 d | `cancelled` | dequeue |
+| `pr_open`/`plan_ready` | `POST /requests/{id}/cancel` | `cancelled` | close PR, release lock |
 | `pr_open` | `workflow_run` (pr-validate) in_progress | `validating` | create `pipeline_runs` |
 | `validating` | callback `stage=summary, passed=true` | `plan_ready` | store plan summary + cost, PR comment |
 | `validating` | callback `passed=false` | `failed` | store findings; close PR with comment (configurable); release lock |
 | `plan_ready` | `pull_request_review` approved + required checks green | `approved` | `approved_plan_hash = plan_summaries.plan_hash`, audit |
 | `plan_ready` | TTL-expiry `destroy` request in **non-prod**, checks green | `approved` | `iacp-approver` machine user (member of `@acme/self-service-iac-platform-approvers`; GitHub Apps cannot be code owners) submits the approving review and the worker merges; production is never auto-approved; audit `request.auto_approved` |
-| `plan_ready`/`approved` | `pull_request.synchronize` | `validating` | clear approval & pinned hash |
-| `pr_open`/`plan_ready`/`approved` | `pull_request.closed` (unmerged) | `rejected` | release lock |
+| `validating`/`plan_ready`/`approved` | `pull_request.synchronize` | `validating` | clear approval & pinned hash; restart validation |
+| `approved` | `pull_request_review` dismissed | `plan_ready` | clear approval & pinned hash |
+| `pr_open`/`validating`/`plan_ready`/`approved` | `pull_request.closed` (unmerged) | `rejected` | release lock |
 | `approved` | `push` to main / `workflow_run` apply in_progress | `applying` | stack → `updating`/`provisioning`/`destroying` |
 | `applying` | callback apply succeeded | `applied` | stack outputs, `last_applied_sha`; stack → `active`/`destroyed`; release lock; dispatch next queued |
-| `applying` | callback apply failed (non-transient) | `failed` | stack → `failed`; notify; release lock |
+| `applying` | callback apply failed (transient), `retry_count < 2` | `applying` | `retry_count += 1`; re-dispatch with backoff |
+| `applying` | callback apply failed (non-transient, or transient with retries used up) | `failed` | stack → `failed`; notify; release lock |
 
-Transitions are enforced in `internal/requests/statemachine.go` with a table-driven `CanTransition(from, to, event)`; DB updates use `UPDATE … WHERE id=$1 AND status=$2` (optimistic check) so concurrent webhook + callback races resolve deterministically.
+Transitions are enforced in `internal/requests/statemachine.go` by a pure transition table, `Transition(from, event) (to, error)`, and `Next(snapshot, event)`, which also enforces the retry budget (`MaxApplyRetries = 2`, counted in `requests.retry_count`). The `Request` entity wraps them (`Fire`, and `Approve`, which also pins the plan hash); DB updates use `UPDATE … WHERE id=$1 AND status=$2` (optimistic check) so concurrent webhook + callback races resolve deterministically.
 
 ### 4.2 Stack
 
@@ -559,7 +568,7 @@ stateDiagram-v2
 - **Timestamps:** RFC 3339 UTC.
 - **Pagination:** cursor-based. `?limit=50` (max 200) `&cursor=<opaque>`. Response `{"data":[…], "next_cursor":"eyJzZXEiOjEyMzR9"|null}`. Cursor = base64 of the last sort key; stable under inserts.
 - **Filtering/sorting:** explicit query params per endpoint (`status`, `team`, `env`, `module`); `sort=-created_at`.
-- **Idempotency:** all `POST` creating resources accept `Idempotency-Key` (required for `POST /requests`). Same key + same body hash within 24 h → stored response replayed with header `Idempotent-Replayed: true`; same key + different body → `422 idempotency_key_reuse`.
+- **Idempotency:** all `POST` creating resources accept `Idempotency-Key` (required for `POST /requests`). Same key + same body hash within 24 h → the original resource is returned with header `Idempotent-Replayed: true` (the key row stores `{"request_id": …}`, so a replay shows the request's current state; a create that fails validation stores nothing, so the key can be retried); same key + different body → `422 idempotency_key_reuse`. Keys expire after 24 h: a claim deletes an expired row for the same key first, and `PurgeExpiredIdempotencyKeys` lets the worker sweep old rows.
 - **Concurrency control:** resources return `ETag` (row version); `PATCH`/`DELETE` honour `If-Match` → `412` on mismatch.
 - **Rate limits:** 600 req/min per user, 60 req/min for `POST /requests`; headers `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`.
 - **Correlation:** `X-Request-Id` echoed/generated; appears in logs and audit events.
@@ -606,7 +615,7 @@ RBAC column uses team roles (see [07-security-and-policy.md](07-security-and-pol
 | GET | `/catalog/modules/{name}/upgrade-path?from=1.2.0&to=latest` | Intermediate versions, breaking flags, concatenated changelog. | any |
 | GET | `/catalog/modules/{name}/usage` | Stacks using each version (fleet view). | maintainer of owning team / admin |
 | POST | `/catalog/modules/{name}/versions/{version}/deprecate` | Mark deprecated with note. | module owner / admin |
-| POST | `/internal/catalog/index` | Index a released version: `{module, version, git_tag, commit_sha}`; backend fetches `module.yaml` at that SHA (called by `module-release.yml`). | OIDC JWT: `module-release.yml@refs/heads/main` |
+| POST | `/internal/catalog/index` | Index a released version: `{module, version, git_tag, commit_sha}`; backend fetches `module.yaml` at that SHA (called by `module-release.yml`). Until the GitHub client lands, the parsed manifest is sent inline. A re-index that changes owners or other metadata writes a `module.updated` audit event. | OIDC JWT: `module-release.yml@refs/heads/main` (interim: shared bearer token `IACP_INTERNAL_TOKEN`, constant-time compare; no token configured means 401) |
 
 `GET /v1/catalog/modules/sqs/versions/1.3.0`
 
@@ -662,7 +671,7 @@ Stacks are never created or destroyed directly; mutation is always a request.
 
 | Method | Path | Description | RBAC |
 |---|---|---|---|
-| POST | `/requests` | Create request (`kind`: create, update, upgrade, destroy, reconcile, rollback). Requires `Idempotency-Key`. | developer (any env); maintainer to create `destroy` in production |
+| POST | `/requests` | Create request (`kind`: create, update, upgrade, destroy, reconcile, rollback). Requires `Idempotency-Key`. | developer (any env); maintainer to create `destroy` in production. Enforced now from `memberships` (platform admins count as admin); full RBAC middleware arrives with WBS 4.4 |
 | GET | `/requests?team=&status=&kind=&mine=true` | List. | viewer |
 | GET | `/requests/{id}` | Detail incl. PR, pipeline runs, plan, cost, timeline. | viewer |
 | POST | `/requests/{id}/preview` | Dry-run render: returns generated files + diff without opening a PR. | developer |
@@ -981,7 +990,7 @@ All errors use RFC 9457 Problem Details (`application/problem+json`) with the pl
 ```
 backend/
 ├── cmd/
-│   └── iacp/                 # single binary: `iacp api | worker | migrate | verify-audit`
+│   └── api/                     # HTTP API (worker and CLI entrypoints arrive with WBS 4.8/4.9)
 │       └── main.go
 ├── api/
 │   └── openapi.yaml             # source of truth; oapi-codegen → internal/httpapi/gen
