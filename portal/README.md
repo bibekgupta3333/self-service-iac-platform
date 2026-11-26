@@ -2,7 +2,7 @@
 
 Next.js developer portal: browse the module catalog, request a stack from a module version's
 input schema, and track requests. WBS §7 (M4): 7.1 scaffold, 7.2 catalog, 7.3 request form,
-7.5 requests list and detail.
+7.4 live request status, 7.5 requests and stacks, 7.6 update and destroy.
 
 The portal only talks to the control-plane API ([backend/](../backend/README.md),
 [docs/03 §6](../docs/03-data-model-and-api.md#6-rest-api-reference)). It never runs Terraform
@@ -161,12 +161,69 @@ The form is generated from the selected version's `inputs_schema` (JSON Schema 2
 ## Requests
 
 `/requests` lists requests newest first (All/Mine, team filter, keyset paging).
-`/requests/{id}` places the current status on the request state machine and shows the
-normalised spec. The API returns only the current status, so a failed, rejected or cancelled
-request shows its outcome without the steps it reached. While a request is not terminal the
-page refreshes every 5 seconds; the SSE stream (`/v1/requests/{id}/events`) replaces polling
-in WBS 7.4, together with PR, plan, cost and run links. A stacks list (rest of 7.5) needs
-`GET /v1/stacks`, which is not built yet.
+`/requests/{id}` shows the request, its normalised spec and, in the client component
+`RequestLive`, its live status.
+
+### Live status (WBS 7.4)
+
+`RequestLive` reads `GET /v1/requests/{id}/events` through the proxy (`/api/iacp/...`; the proxy
+streams it unbuffered, GET only, and forwards `Last-Event-ID`). `StatusStream`
+(`src/lib/events/stream.ts`) reads it with `fetch`, not `EventSource`, because `EventSource`
+hides the HTTP status and cannot tell a 429 from a dropped connection:
+
+- the first connection sends `Last-Event-ID: 0`, which replays every status change of the
+  request (the history list), then follows live; a reconnect sends the id of the last frame;
+- `end` stops the stream for good; a stream that closes without it (the server's lifetime cap)
+  is resumed;
+- 401, 403, 404 and 429 `too_many_streams` stop with a message instead of retrying;
+- other failures back off exponentially with equal jitter (1 s base, 30 s cap); after 5 failed
+  attempts in a row, or when the answer is not `text/event-stream`, the page falls back to
+  polling `GET /v1/requests/{id}` every 5 seconds;
+- unmounting aborts the request and releases the reader.
+
+The pure parts are tested without a network: `sse.ts` (framing), `status.ts` (frame decoding and
+the reducer that folds events into the timeline state, ignoring repeated seqs). Each status
+change also calls `router.refresh()` so the server-rendered details, queue note and pull request
+link follow. The status text sits in a polite live region and announces only status changes.
+The API returns a pull request link (`github`) but no plan summary, cost or workflow run links
+for a request yet; the page says so.
+
+## Stacks (WBS 7.5)
+
+`/stacks` lists stacks (filters `team`, `env`, `status` in a plain GET form; keyset paging with
+the API's cursor, "Older stacks" and "Back to newest"). `/stacks/{id}` shows status, a health
+sentence, the latest request with a link, details and the outputs exactly as the API returns
+them (the API already leaves sensitive values out; the portal does not reveal anything more).
+Stack pages are server components, so they need no proxy route.
+
+## Update and destroy (WBS 7.6)
+
+Both create a request through `POST /v1/requests` with the stack named by `stack_id`, and open a
+pull request; nothing changes until it is merged.
+
+- **Update** (`/stacks/{id}/update`) reuses `RequestForm` with an `update` context. The stack
+  API has no spec, so the form is prefilled from the spec of the request that carries the
+  current one (the stack's latest request if it is a create, update or upgrade that did not
+  fail, get rejected or get cancelled, otherwise the newest such request of the team). If none
+  is found the page asks for a module and the form says it starts from module defaults. A
+  stack with several resources edits one at a time (`?resource=name`) and sends the others
+  unchanged. `resources_removed` shows a checkbox that sends `allow_removals`; the body change
+  mints a new Idempotency-Key.
+- **Destroy** is a modal `<dialog>` on the stack page: a plain warning that merging the destroy
+  PR removes the infrastructure, the exact stack name to type (the submit button stays disabled
+  until it matches) and a required justification. The Idempotency-Key is bound to the payload
+  as in the create form.
+- **Errors**: `stack_busy`, `destroy_pending`, `stack_destroyed`, `resources_removed`, 404 and
+  403 get a title and a next step (`explainLifecycleError`); validation pointers map onto the
+  form fields; the error summary takes focus.
+- **Roles**: `decide()` (`src/lib/auth/permissions.ts`) mirrors the backend RBAC matrix (update
+  needs developer; destroy needs developer outside production and maintainer in production,
+  unknown environments count as production; platform admins can do all). The GitHub provider
+  reads the roles from `GET /v1/me`; dev auth cannot (there is no session) and assumes the
+  local user may act, so the API answers. `stackActions` also disables both while the stack is
+  not `active`, `drifted` or `failed` or while a destroy is open. A disabled action stays in the
+  tab order as `aria-disabled` with its reason as the description. The API remains the
+  authority; a disagreement shows its 403.
 
 ## Security headers
 
@@ -188,7 +245,9 @@ src/components/           presentational components; request/ holds the form
 src/lib/api/              ApiClient (I/O), types, errors, config, proxy rules, factory
 src/lib/auth/             AuthProvider, DevAuthProvider, GithubAuthProvider
 src/lib/schema/           pure schema -> field model, form values <-> inputs, SchemaAdapter
-src/lib/request/          pure stack-field checks, payload builder, pointer -> field mapping, Idempotency-Key rules
+src/lib/request/          pure stack-field checks, payload builders (create, update, destroy), pointer -> field mapping, Idempotency-Key rules, lifecycle error wording
+src/lib/events/           SSE parser and status reducer (pure), StatusStream (injected I/O)
+src/lib/stacks.ts         pure stack filters, health wording, output rows, available actions
 src/lib/format.ts         pure dates, labels, tones, categories, status timeline
 src/lib/security/         pure Content-Security-Policy builder
 ```
