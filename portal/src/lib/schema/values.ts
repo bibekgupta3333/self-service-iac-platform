@@ -34,7 +34,26 @@ export function initialValues(fields: readonly FieldModel[]): Record<string, Fie
   return Object.fromEntries(fields.map((f) => [f.name, toText(f, f.default)]));
 }
 
-type Parsed = { ok: true; value: unknown; empty: boolean } | { ok: false; error: string };
+/**
+ * valuesFromInputs seeds the controls from a resource's stored `inputs`: a field present in
+ * `inputs` shows that value, every other field its schema default. Pure.
+ */
+export function valuesFromInputs(
+  fields: readonly FieldModel[],
+  inputs: Readonly<Record<string, unknown>>,
+): Record<string, FieldValue> {
+  return Object.fromEntries(
+    fields.map((f) => [f.name, toText(f, Object.hasOwn(inputs, f.name) ? inputs[f.name] : f.default)]),
+  );
+}
+
+/** unknownInputs lists stored input names the schema no longer has (they cannot be edited). Pure. */
+export function unknownInputs(fields: readonly FieldModel[], inputs: Readonly<Record<string, unknown>>): string[] {
+  const known = new Set(fields.map((f) => f.name));
+  return Object.keys(inputs).filter((k) => !known.has(k));
+}
+
+type Parsed ={ ok: true; value: unknown; empty: boolean } | { ok: false; error: string };
 
 const ok = (value: unknown, empty = false): Parsed => ({ ok: true, value, empty });
 const fail = (error: string): Parsed => ({ ok: false, error });

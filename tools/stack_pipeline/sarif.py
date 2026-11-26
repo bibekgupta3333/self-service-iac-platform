@@ -10,8 +10,8 @@ needs paths relative to the repository root, so ``rebase_sarif`` rewrites every
 - a file of a downloaded module (``<download dir>/.../modules/<name>/vX.Y.Z/<path>``)
   becomes ``<path>``, the module's file in this repository (at its pinned tag, so
   line numbers can differ from the default branch), and must stay under ``modules/``;
-- anything else, such as an absolute path or one that leaves the repository, the
-  stack root or ``modules/``, points at the stack's ``main.tf``, where the module
+- anything else, such as an absolute path, one with ``%``, ``\\`` or a drive letter, or one
+  that leaves the repository, the stack root or ``modules/``, points at the stack's ``main.tf``, where the module
   calls are.
 
 Everything here is pure.
@@ -30,6 +30,10 @@ RUN_KEYS_SET_BY_UPLOAD = ("automationDetails", "versionControlProvenance")
 # The pinned tag is part of the download path; the repository path follows it.
 _MODULE_FILE_RE = re.compile(r"(?:^|/)modules/[a-z0-9_-]+/v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]*)?/(.+)$")
 _SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
+# A path is plain POSIX text. Percent-escapes (``%2e%2e``), backslashes
+# and a drive letter (``C:``) mean something else to a consumer that decodes or
+# normalises the uri, so such a path is never kept as literal text.
+_NOT_PLAIN_POSIX_RE = re.compile(r"[%\\]|^[a-zA-Z]:")
 
 
 class SarifError(ValueError):
@@ -53,7 +57,7 @@ def rebase_uri(uri: str, stack_path: str, external_dirs: Iterable[str] = (), rep
     stack_path = stack_path.strip("/")
     fallback = f"{stack_path}/{FALLBACK_FILE}"
     path = _strip_scheme(uri.strip())
-    if not path or _SCHEME_RE.match(path):
+    if not path or _SCHEME_RE.match(path) or _NOT_PLAIN_POSIX_RE.search(path):
         return fallback
     for directory in external_dirs:
         rest = _inside(path, directory)
@@ -111,9 +115,19 @@ def rebase_sarif(
                 fix(item)
 
     fix(out["runs"])
-    # The SARIF comes from a job that runs PR code. A run's automationDetails.id would
-    # win over the upload's category input, so drop it (and the run's own idea of
-    # the commit) and let the upload job decide both.
+    return strip_run_properties(out)
+
+
+def strip_run_properties(doc: Any) -> dict[str, Any]:
+    """A copy of the SARIF log without the run properties the upload job owns. Pure.
+
+    The SARIF comes from a job that runs PR code. A run's automationDetails.id would
+    win over the upload's category input, so drop it (and the run's own idea of
+    the commit) and let the upload job decide both. Paths are left as they are.
+    """
+    if not isinstance(doc, Mapping) or not isinstance(doc.get("runs"), list):
+        raise SarifError("not a SARIF log: expected an object with a runs array")
+    out = copy.deepcopy(dict(doc))
     for run in out["runs"]:
         if isinstance(run, dict):
             for key in RUN_KEYS_SET_BY_UPLOAD:

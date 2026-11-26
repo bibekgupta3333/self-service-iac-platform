@@ -9,7 +9,7 @@ Application Load Balancer. Part of the iacp module registry (see
 
 ```hcl
 module "orders_api" {
-  source = "git::https://github.com/bibekgupta3333/self-service-iac-platform.git//modules/ecs-service?ref=modules/ecs-service/v1.0.0"
+  source = "git::https://github.com/bibekgupta3333/self-service-iac-platform.git//modules/ecs-service?ref=modules/ecs-service/v2.0.0"
 
   name        = "orders-api"
   team        = "payments"     # injected by the platform
@@ -56,7 +56,7 @@ together with its postgres database.
 |---|---|
 | Image supply chain | One ECR repository per service with `IMMUTABLE` tags (moving tags such as `latest` are rejected as `image_tag`), scan on push, KMS encryption with the module key, `force_delete = false`, and a lifecycle policy (untagged images expire after 7 days, the newest 30 tagged images are kept). |
 | Runtime | Fargate only, `awsvpc`, no public IP. The container runs as a non-root user (default `1000:1000`; root is rejected) with a read-only root filesystem (writable `/tmp` volume), not privileged, all Linux capabilities dropped, `initProcessEnabled`. ECS Exec is off. |
-| Least privilege | Execution role: `ecr:GetAuthorizationToken` (the only `*` resource, an API limitation), image pull from its own repository, log writes to its own log group, and `GetSecretValue`/`GetParameters`/`kms:Decrypt` on exactly the ARNs in `secrets` and `secrets_kms_key_arns`. Task role: nothing, unless `extra_policy_jsons` grants it (Allow statements may not use `*`, `<service>:*`, non-read wildcards, `NotAction` or `NotResource`, may not allow `iam:PassRole`, and may not use `iam:` actions on `Resource "*"`; this is stricter than `modules/lambda` 1.0.0). Other explicit actions on `Resource "*"` (for example `kms:Decrypt`) are accepted, so review the documents; the permissions boundary is the backstop. |
+| Least privilege | Execution role: `ecr:GetAuthorizationToken` (the only `*` resource, an API limitation), image pull from its own repository, log writes to its own log group, and `GetSecretValue`/`GetParameters`/`kms:Decrypt` on exactly the ARNs in `secrets` and `secrets_kms_key_arns`. Task role: nothing, unless `extra_policy_jsons` grants it (Allow statements may not use `*`, `<service>:*`, non-read wildcards, `NotAction` or `NotResource`, may not allow `iam:PassRole` in any spelling (including `iam:Pass?ole`), and may not use `iam:` actions on `Resource "*"` or a wildcard account such as `arn:aws:iam::*:*`; `modules/lambda` 2.0.0 has the same rule). Other explicit actions on `Resource "*"` (for example `kms:Decrypt`) are accepted, so review the documents; the permissions boundary is the backstop. |
 | IAM guardrails | Both roles live under `/iacp/` and always carry a permissions boundary (`permissions_boundary_arn`, or the account's `iacp-boundary` policy). The trust policy only admits `ecs-tasks.amazonaws.com` for the owning account (`aws:SourceAccount`, `aws:SourceArn`). |
 | Secrets | Injected by reference (`valueFrom`) from Secrets Manager or SSM; plain values are rejected by `secrets` validation. |
 | Network | The tasks' security group admits only the container port from the load balancer's group (nothing at all without a load balancer). Egress: TCP 443 to `https_egress_cidr_blocks` for AWS APIs, plus the security groups listed in `egress_security_group_rules`. The load balancer admits 443 and 80 from `ingress_cidr_blocks` and may only reach the tasks. |
@@ -79,8 +79,8 @@ group.
   VPC has interface endpoints for every API the service uses, set it to the
   VPC CIDR.
 - **Task-role documents are only partly validated.** `extra_policy_jsons`
-  rejects wildcards, `NotAction`, `NotResource`, `iam:PassRole` and `iam:`
-  actions on `Resource "*"`, but other explicit actions on `Resource "*"`
+  rejects wildcards, `NotAction`, `NotResource`, `iam:PassRole` (any
+  spelling) and `iam:` actions on `Resource "*"` or a wildcard account, but other explicit actions on `Resource "*"`
   (for example `sts:AssumeRole` or `kms:Decrypt`) pass. Review the documents;
   the permissions boundary is the backstop.
 - **Execution policy can be unknown at plan time.** When `secrets` come from
@@ -122,7 +122,7 @@ group.
 | `secrets` | `NAME = <Secrets Manager or SSM parameter ARN>`. | `map(string)` | `{}` | no |
 | `secrets_kms_key_arns` | KMS keys encrypting those secrets. | `list(string)` | `[]` | no |
 | `permissions_boundary_arn` | Boundary for both roles. Null uses `arn:<partition>:iam::<account>:policy/iacp-boundary`. | `string` | `null` | no |
-| `extra_policy_jsons` | Up to 10 task-role policy documents keyed by a stable name. Allow statements may not use `*`, `<service>:*`, non-read wildcards, `NotAction`, `NotResource`, `iam:PassRole`, or any `iam:` action on `Resource "*"`. | `map(string)` | `{}` | no |
+| `extra_policy_jsons` | Up to 10 task-role policy documents keyed by a stable name. Allow statements may not use `*`, `<service>:*`, non-read wildcards, `NotAction`, `NotResource`, `iam:PassRole` (any wildcard spelling such as `iam:Pass?ole`), or any `iam:` action on `Resource "*"` or a wildcard account. | `map(string)` | `{}` | no |
 | `ecr_max_image_count` | Tagged images kept (1-1000). | `number` | `30` | no |
 | `log_retention_days` | CloudWatch Logs retention. | `number` | `30` | no |
 | `kms_key_arn` | Existing customer-managed KMS key ARN for the repository and logs. If null, a dedicated key is created. Must be known at plan time. | `string` | `null` | no |
@@ -142,7 +142,7 @@ group.
 | `security_group_id` | Security group of the tasks. |
 | `log_group_name` | Container log group. |
 | `kms_key_arn` | KMS key encrypting the repository and logs. |
-| `iacp_metadata` | `{ module = "ecs-service", version = "1.0.0" }` for inventory and drift correlation. |
+| `iacp_metadata` | `{ module = "ecs-service", version = "2.0.0" }` for inventory and drift correlation. |
 
 ## Resources
 

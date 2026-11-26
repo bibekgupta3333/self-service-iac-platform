@@ -275,6 +275,7 @@ variable "extra_policy_jsons" {
   description = <<-EOT
     Additional IAM policy documents for the execution role, keyed by a stable name (for example { orders-consumer = <sqs consumer_policy_json> }).
     Allow statements may not use NotAction or NotResource, and their actions may not be "*", "<service>:*", or any other wildcard except read prefixes such as s3:Get* or sqs:List*.
+    They may not allow iam:PassRole, or any iam: action on Resource "*".
   EOT
   type        = map(string)
   default     = {}
@@ -298,5 +299,45 @@ variable "extra_policy_jsons" {
       ]), false)
     ])
     error_message = "extra_policy_jsons must be valid IAM policy JSON whose Allow statements use explicit actions (no \"*\", \"<service>:*\", NotAction or NotResource)."
+  }
+
+  # The execution role must not hand roles to services (iam:PassRole is how a
+  # workload escalates beyond its own permissions), and IAM actions must name
+  # the IAM resources they touch. The permissions boundary stays the backstop.
+  # Same rule as modules/ecs-service.
+  validation {
+    condition = alltrue([
+      for doc in values(var.extra_policy_jsons) : try(alltrue([
+        for s in flatten([jsondecode(doc).Statement]) : try(s.Effect, "") != "Allow" || (
+          # Actions are plain IAM names, possibly with * or ? wildcards. IAM reads ? as
+          # one character, so "iam:Pass?ole" and "i?m:PassRole" are PassRole too: no
+          # action may glob-match iam:PassRole.
+          alltrue([
+            for a in flatten([try(s.Action, [])]) :
+            can(regex("^[A-Za-z0-9:*?_-]+$", a)) &&
+            !can(regex("^${replace(replace(lower(a), "*", ".*"), "?", ".")}$", "iam:passrole"))
+          ]) &&
+          # An action that can be an iam: action (no service part, or one that glob-matches
+          # "iam") needs resources that name an account: "*", "arn:aws:iam::*:*" and any
+          # wildcard in the partition, service, region or account fields do not.
+          (
+            !anytrue([
+              for a in flatten([try(s.Action, [])]) :
+              !strcontains(a, ":") || can(regex("^${replace(replace(lower(split(":", a)[0]), "*", ".*"), "?", ".")}$", "iam"))
+            ]) ||
+            (
+              length(flatten([try(s.Resource, [])])) > 0 &&
+              alltrue([
+                for r in flatten([try(s.Resource, [])]) :
+                startswith(r, "arn:") && length(split(":", r)) >= 6 &&
+                !anytrue([for p in slice(split(":", r), 1, 5) : strcontains(p, "*") || strcontains(p, "?")]) &&
+                !can(regex("^[*?]+$", join(":", slice(split(":", r), 5, length(split(":", r))))))
+              ])
+            )
+          )
+        )
+      ]), false)
+    ])
+    error_message = "extra_policy_jsons may not allow iam:PassRole (including wildcard spellings such as iam:Pass?ole), and an action that can be an iam: action needs resources in a named account (not \"*\", not arn:aws:iam::*:*)."
   }
 }

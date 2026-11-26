@@ -284,6 +284,16 @@ class TestAwsCliTagReader:
 
     @pytest.mark.parametrize(
         "endpoint",
+        ["http://evil.com\\@localhost:4566", "http://localhost\\.evil.com", "http://user@localhost:4566",
+         "http://user:pw@localhost:4566", "http://:pw@localhost:4566", "http://evil.com@localhost:4566",
+         "http://@localhost:4566"],
+    )
+    def test_refuses_backslash_and_userinfo(self, endpoint):
+        with pytest.raises(SmokeConfigError):
+            local_endpoint(endpoint)
+
+    @pytest.mark.parametrize(
+        "endpoint",
         ["http://localhost:4566", "http://127.0.0.1:4566", "http://[::1]:4566",
          "http://s3.localhost.localstack.cloud:4566", "https://LOCALHOST:4566"],
     )

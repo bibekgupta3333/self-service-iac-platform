@@ -3,6 +3,33 @@
 All notable changes to this module. Versions follow SemVer and are released
 as git tags `modules/ecs-service/vX.Y.Z`.
 
+## [2.0.0] - 2026-11-26
+
+### Changed (breaking)
+- `extra_policy_jsons` closes a wildcard bypass of the `iam:PassRole` rule. IAM
+  reads `?` as one character, so `iam:Pass?ole`, `iam:?assRole` and
+  `i?m:PassRole` were accepted by 1.0.0 although they allow `iam:PassRole`.
+  No action may now glob-match `iam:PassRole`. An action that can be an `iam:`
+  action (no service part, or a service part that glob-matches `iam`) needs
+  resources that name an account: `"*"`, `arn:aws:iam::*:*` and a wildcard in
+  the partition, service, region or account field are rejected. Actions may
+  only contain letters, digits, `:`, `-`, `_`, `*` and `?`.
+  The release gate classifies a stricter validation as MAJOR because it may
+  reject values that were valid before.
+
+### Upgrade notes
+- No resource changes: this release only tightens a validation (the only plan
+  difference for a stack that passes it is the `iacp_metadata` output, which
+  now reports version 2.0.0).
+- A stack that fails the new validation at plan time has an
+  `extra_policy_jsons` document with a `?` or `*` spelling of `iam:PassRole`,
+  an action without a service part, or an `iam:` action whose resource is
+  `"*"` or has a wildcard account. Remove the PassRole grant, and name the IAM
+  ARNs the task touches, such as `arn:aws:iam::<account>:role/iacp/<team>-*`.
+- Deny statements are not affected.
+- Change `?ref=modules/ecs-service/v1.0.0` to `?ref=modules/ecs-service/v2.0.0`
+  once the policies pass.
+
 ## [1.0.0] - 2026-11-26
 
 ### Added
