@@ -13,6 +13,11 @@
 #   cost      -> per stack: Infracost on the redacted plan; the only job with
 #                INFRACOST_API_KEY, and it runs no PR code (informational)
 #   cost-summary -> per stack: folds the estimate into the summary (no secrets)
+#   budget    -> per stack: the budget gate (policies/opa/budget.rego). Runs the BASE
+#                commit's tools and policies, takes the estimate only from the cost job's
+#                artifact and the budget from the Platform API, and denies a change that
+#                would push the team over a hard budget. Enforces nothing with no budget
+#                configured (docs/07 section 6.7)
 #   comment   -> sticky PR comment per stack (the only job that can write to the PR)
 #   code-scanning -> per stack: uploads the SARIF (the only job with
 #                security-events: write); skipped for fork and Dependabot PRs
@@ -549,6 +554,133 @@ jobs:
           retention-days: 7
           overwrite: true
 
+  # Budget gate (WBS 8.5, policies/opa/budget.rego): denies a stack whose estimated monthly
+  # cost would push the team's month over a hard budget. It is the only place the estimate
+  # meets the policy, and it is built so a pull request cannot move that number:
+  #
+  # - It checks out the BASE commit (the target branch), so the policy, `tools/` and the
+  #   context builder it runs are main's, whatever this PR changes in them. (The workflow
+  #   file itself is the PR's; .github/, policies/ and tools/ are platform-owned in
+  #   CODEOWNERS, the same boundary every gate in this workflow relies on.)
+  # - The estimate is read only from the `cost-<id>` artifact: the output of the pinned
+  #   Infracost binary in the isolated `cost` job, the only job holding INFRACOST_API_KEY.
+  #   This job never sees that key, and nothing from the PR's tree (iacp.stack.json,
+  #   summary.json, the stack directory) is read: identity is the detected stack path.
+  # - The budget and any override come from the Platform API (OIDC), never from the PR.
+  # - A missing estimate is not a pass: with a budget set it is denied in staging and
+  #   production (a warning in development), see budget.rego.
+  #
+  # With no budget configured (the local-first default, ADR-0009: vars.IACP_API_URL is
+  # empty) nothing is enforced and the job only reports. The PR's plan is evaluated as
+  # input so a destroy-only change always passes. id-token: write is safe here because
+  # only the base commit's code runs; contents is the only other permission.
+  budget:
+    name: budget (${{ matrix.stack.path }})
+    needs: [detect, validate, cost]
+    if: always() && needs.detect.result == 'success' && needs.detect.outputs.count != '0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: ${{ fromJSON(needs.detect.outputs.matrix) }}
+    env:
+      STACK_PATH: ${{ matrix.stack.path }}
+      IACP_API_URL: ${{ vars.IACP_API_URL }}
+      IACP_OIDC_AUDIENCE: ${{ vars.IACP_OIDC_AUDIENCE }}
+      PYTHONPATH: ${{ github.workspace }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install tool dependencies
+        run: python -m pip install --quiet "$(grep -E '^pyyaml==' tools/requirements.txt)"
+
+      - name: Install conftest (checksum verified)
+        run: |
+          tarball="conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSLo "$RUNNER_TEMP/$tarball" \
+            "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/${tarball}"
+          echo "${CONFTEST_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/bin" conftest
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # The target branch must already have the gate (this guard only matters for the
+      # change that introduces it). A PR cannot trigger it: the files are main's.
+      - id: ready
+        name: Check the target branch has the budget gate
+        run: |
+          help_text="$(python -m tools.stack_pipeline context --help)"
+          if grep -q -- '--budget-gate' <<<"$help_text" && [ -f policies/opa/budget.rego ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice title=Budget gate not on the target branch::the base commit has no budget gate yet; nothing is enforced for this run"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download the estimate (isolated cost job)
+        if: steps.ready.outputs.ready == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: cost-${{ matrix.stack.id }}
+          path: ${{ runner.temp }}/cost
+
+      - name: Download the plan the estimate was computed from
+        if: steps.ready.outputs.ready == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: cost-input-${{ matrix.stack.id }}
+          path: ${{ runner.temp }}/cost-input
+
+      # Skipped with a notice while vars.IACP_API_URL is empty (no budget then). When the
+      # API is configured a failure here fails the job: a budget that cannot be read is not
+      # a budget that is absent.
+      - name: Fetch the team budget
+        if: steps.ready.outputs.ready == 'true'
+        run: |
+          python -m tools.stack_pipeline fetch-budget-context --stack-path "$STACK_PATH" \
+            --out "$RUNNER_TEMP/api-context.json" --skip-if-unconfigured
+
+      - id: gate
+        name: Budget policy (conftest)
+        if: steps.ready.outputs.ready == 'true'
+        run: |
+          plan="$RUNNER_TEMP/cost-input/plan.json"
+          if [ ! -f "$plan" ]; then echo '{}' > "$RUNNER_TEMP/no-plan.json"; plan="$RUNNER_TEMP/no-plan.json"; fi
+          python -m tools.stack_pipeline context --budget-gate --stack-path "$STACK_PATH" \
+            --cost "$RUNNER_TEMP/cost/infracost.json" \
+            --api-context "$RUNNER_TEMP/api-context.json" > "$RUNNER_TEMP/budget-context.json"
+          if [ "$(jq '.iacp.context.budget != null' "$RUNNER_TEMP/budget-context.json")" != "true" ]; then
+            echo "::notice title=No budget configured::no team budget applies to $STACK_PATH, so the cost estimate is informational"
+          fi
+          status=0
+          conftest test "$plan" \
+            --policy "$GITHUB_WORKSPACE/policies/opa" \
+            --namespace iacp.budget \
+            --data "$RUNNER_TEMP/budget-context.json" \
+            --output json > "$RUNNER_TEMP/budget.json" || status=$?
+          {
+            echo "### Budget: \`$STACK_PATH\`"
+            jq -r '.[] | (.failures[]? | "- **deny** \(.msg)"), (.warnings[]? | "- warn \(.msg)")' "$RUNNER_TEMP/budget.json"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -r '.[] | (.failures[]? | "deny: \(.msg)"), (.warnings[]? | "warn: \(.msg)")' "$RUNNER_TEMP/budget.json" || true
+          exit "$status"
+
   comment:
     name: sticky PR comments
     needs: [detect, validate, cost-summary]
@@ -710,16 +842,18 @@ jobs:
 
   result:
     name: pr-validate-result
-    needs: [detect, validate]
+    needs: [detect, validate, budget]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
-      - name: Require detect to succeed and validate to succeed or skip
+      - name: Require detect to succeed and validate and budget to succeed or skip
         env:
           DETECT: ${{ needs.detect.result }}
           VALIDATE: ${{ needs.validate.result }}
+          BUDGET: ${{ needs.budget.result }}
         run: |
-          echo "detect=$DETECT validate=$VALIDATE"
+          echo "detect=$DETECT validate=$VALIDATE budget=$BUDGET"
           [ "$DETECT" = "success" ] || exit 1
           [ "$VALIDATE" = "success" ] || [ "$VALIDATE" = "skipped" ] || exit 1
+          [ "$BUDGET" = "success" ] || [ "$BUDGET" = "skipped" ] || exit 1
