@@ -165,7 +165,7 @@ class IacpApiClient:
         attempts: int = 3,
         backoff: float = 2.0,
         opener: urllib.request.OpenerDirector | None = None,
-        sleep: Callable[[float], None] = time.sleep,
+        sleep: Callable[[float], None] | None = None,
     ) -> None:
         self.base_url = api_base_url(base_url)
         self._credential = credential
@@ -173,7 +173,7 @@ class IacpApiClient:
         self.attempts = max(1, attempts)
         self.backoff = backoff
         self._opener = opener or build_opener()
-        self._sleep = sleep
+        self._sleep = sleep or (lambda seconds: time.sleep(seconds))
 
     # ---- endpoints ---------------------------------------------------------------
 
@@ -199,6 +199,15 @@ class IacpApiClient:
             raise ApiError("stack lock response carried no fencing token", resp.status)
         return LockClaim(outcome=outcome, fencing_token=token, request_id=rid,
                          expires_at=str(current.get("expires_at", "")))
+
+    def get_lock(self, stack_id: str) -> dict[str, Any] | None:
+        """GET /v1/internal/stacks/{id}/lock: the current lock, or None when unlocked (404)."""
+        try:
+            return self._call("GET", LOCK_PATH.format(stack_id=_uuid(stack_id, "stack id")), None, ok=(200,)).body
+        except ApiError as exc:
+            if exc.status == 404:
+                return None
+            raise
 
     def release_lock(self, stack_id: str, request_id: str, fencing_token: int) -> ApiResponse:
         """DELETE /v1/internal/stacks/{id}/lock?request_id=&fencing_token=. Not retried:

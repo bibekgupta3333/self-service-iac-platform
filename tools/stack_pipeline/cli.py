@@ -118,7 +118,8 @@ def build_parser() -> argparse.ArgumentParser:
     lock.add_argument("action", choices=("acquire", "release"))
     lock.add_argument("--stack-id", required=True, help="stack UUID")
     lock.add_argument("--request-id", required=True, help="request UUID")
-    lock.add_argument("--fencing-token", type=int, help="token from acquire (release only)")
+    lock.add_argument("--fencing-token", type=int,
+                      help="token from acquire (release only); without it, release whatever lock this request holds")
     _api_arguments(lock)
     lock.add_argument(
         "--github-output",
@@ -318,21 +319,47 @@ def run_report(args: argparse.Namespace) -> int:
 def run_lock(args: argparse.Namespace) -> int:
     out = Path(args.github_output) if args.github_output else None
     if _unconfigured(args, f"stack lock {args.action}"):
-        _write_outputs(out, {"claimed": "false"})
+        _write_outputs(out, {"attempted": "false", "claimed": "false"})
         return 0
     client = _client(args, os.environ)
     if args.action == "acquire":
+        # Recorded before the call: when the grant commits but every response is
+        # lost (timeout), the always() release still runs and finds the lock.
+        _write_outputs(out, {"attempted": "true"})
         claim = client.acquire_lock(args.stack_id, args.request_id)
         _write_outputs(out, {"claimed": "true", "fencing_token": str(claim.fencing_token)})
         print(f"stack lock {claim.outcome} for request {claim.request_id}: fencing token {claim.fencing_token}, "
               f"expires {claim.expires_at}")
         return 0
-    if args.fencing_token is None or args.fencing_token <= 0:
-        raise ValueError("lock release needs --fencing-token")
-    body = client.release_lock(args.stack_id, args.request_id, args.fencing_token).body
+    token = args.fencing_token
+    if token is None:
+        token = _own_lock_token(client, args.stack_id, args.request_id)
+        if token is None:
+            return 0
+    if token <= 0:
+        raise ValueError("--fencing-token must be a positive integer")
+    body = client.release_lock(args.stack_id, args.request_id, token).body
     promoted = (body.get("promoted") or {}).get("request_id")
-    print(f"stack lock released (token {args.fencing_token}); promoted: {promoted or 'none'}")
+    print(f"stack lock released (token {token}); promoted: {promoted or 'none'}")
     return 0
+
+
+def _own_lock_token(client: IacpApiClient, stack_id: str, request_id: str) -> int | None:
+    """The fencing token of the stack lock if this request holds it, else None (nothing to release).
+
+    Used when the claim's response was lost: the lock may or may not have been granted.
+    """
+    current = client.get_lock(stack_id)
+    if current is None:
+        print("stack lock not held; nothing to release")
+        return None
+    if str(current.get("request_id", "")).lower() != request_id.strip().lower():
+        print("stack lock is held by another request; nothing to release")
+        return None
+    token = current.get("fencing_token")
+    if not isinstance(token, int) or isinstance(token, bool):
+        raise ApiError("stack lock response carried no fencing token")
+    return token
 
 
 def annotation(text: str) -> str:

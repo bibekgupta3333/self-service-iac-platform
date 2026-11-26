@@ -3,6 +3,7 @@
 import io
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
@@ -23,6 +24,7 @@ class FakeApi:
     def __init__(self):
         self.calls = []
         self.routes = {}
+        self.delay = 0.0  # seconds to stall before answering (timeouts)
 
     def reply(self, method, path, status, body=None, headers=None):
         self.routes.setdefault((method, path), []).append((status, body, headers or {}))
@@ -42,6 +44,8 @@ class FakeApi:
                     "headers": dict(self.headers),
                     "body": json.loads(raw) if raw else None,
                 })
+                if api.delay:
+                    time.sleep(api.delay)
                 replies = api.routes.get((self.command, parts.path)) or [(404, {"code": "not_found"}, {})]
                 status, body, headers = replies.pop(0) if len(replies) > 1 else replies[0]
                 data = json.dumps(body).encode() if body is not None else b""
@@ -61,10 +65,15 @@ class FakeApi:
         return Handler
 
 
+class QuietServer(ThreadingHTTPServer):
+    def handle_error(self, request, client_address):  # a timed-out client hangs up mid-reply
+        pass
+
+
 @pytest.fixture
 def api():
     fake = FakeApi()
-    server = ThreadingHTTPServer(("127.0.0.1", 0), fake.handler())
+    server = QuietServer(("127.0.0.1", 0), fake.handler())
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     fake.url = f"http://127.0.0.1:{server.server_address[1]}"
@@ -142,6 +151,22 @@ class TestIacpApiClient:
         with pytest.raises(ApiError):
             client(api).release_lock(STACK, REQ, 1)
         assert len(api.calls) == 1
+
+    def test_acquire_times_out_on_every_attempt(self, api):
+        api.reply("POST", f"/v1/internal/stacks/{STACK}/lock", 200, {"lock": "granted", "current": LOCK})
+        api.delay = 0.5
+        with pytest.raises(ApiError) as exc:
+            client(api, timeout=0.1, attempts=2).acquire_lock(STACK, REQ)
+        assert exc.value.status is None  # no response: the grant may or may not have committed
+        assert len(api.calls) == 2
+
+    def test_get_lock(self, api):
+        api.reply("GET", f"/v1/internal/stacks/{STACK}/lock", 200, LOCK)
+        assert client(api).get_lock(STACK)["fencing_token"] == 48214
+
+    def test_get_lock_unlocked(self, api):
+        api.reply("GET", f"/v1/internal/stacks/{STACK}/lock", 404, {"code": "not_found"})
+        assert client(api).get_lock(STACK) is None
 
     def test_ids_must_be_uuids(self, api):
         with pytest.raises(ValueError, match="stack id"):
@@ -293,20 +318,51 @@ class TestLockCommand:
         rc = main(["lock", "acquire", "--stack-id", STACK, "--request-id", REQ, "--api-url", api.url,
                    "--github-output", str(out)])
         assert rc == 0
-        assert out.read_text() == "claimed=true\nfencing_token=48214\n"
+        assert out.read_text() == "attempted=true\nclaimed=true\nfencing_token=48214\n"
+
+    def test_failed_acquire_still_records_the_attempt(self, tmp_path, runner_env, api, monkeypatch):
+        monkeypatch.setattr("tools.stack_pipeline.api_client.time.sleep", lambda _: None)
+        api.reply("POST", f"/v1/internal/stacks/{STACK}/lock", 503, {"code": "unavailable"})
+        out = tmp_path / "out"
+        rc = main(["lock", "acquire", "--stack-id", STACK, "--request-id", REQ, "--api-url", api.url,
+                   "--github-output", str(out)])
+        assert rc == 1
+        assert out.read_text() == "attempted=true\n"
+        assert len(api.calls) == 3
+
+    def test_release_without_token_releases_our_lock(self, runner_env, api, capsys):
+        api.reply("GET", f"/v1/internal/stacks/{STACK}/lock", 200, LOCK)
+        api.reply("DELETE", f"/v1/internal/stacks/{STACK}/lock", 200, {"released": LOCK, "promoted": None})
+        assert main(["lock", "release", "--stack-id", STACK, "--request-id", REQ, "--api-url", api.url]) == 0
+        assert api.calls[1]["query"]["fencing_token"] == ["48214"]
+        assert "released (token 48214)" in capsys.readouterr().out
+
+    def test_release_without_token_when_unlocked(self, runner_env, api, capsys):
+        api.reply("GET", f"/v1/internal/stacks/{STACK}/lock", 404, {"code": "not_found"})
+        assert main(["lock", "release", "--stack-id", STACK, "--request-id", REQ, "--api-url", api.url]) == 0
+        assert [c["method"] for c in api.calls] == ["GET"]
+        assert "nothing to release" in capsys.readouterr().out
+
+    def test_release_without_token_leaves_another_requests_lock(self, runner_env, api, capsys):
+        other = {**LOCK, "request_id": "33333333-3333-4333-8333-333333333333"}
+        api.reply("GET", f"/v1/internal/stacks/{STACK}/lock", 200, other)
+        assert main(["lock", "release", "--stack-id", STACK, "--request-id", REQ, "--api-url", api.url]) == 0
+        assert [c["method"] for c in api.calls] == ["GET"]
 
     def test_unconfigured_skip(self, tmp_path, runner_env, capsys):
         out = tmp_path / "out"
         rc = main(["lock", "acquire", "--stack-id", STACK, "--request-id", REQ, "--skip-if-unconfigured",
                    "--github-output", str(out)])
         assert rc == 0
-        assert out.read_text() == "claimed=false\n"
+        assert out.read_text() == "attempted=false\nclaimed=false\n"
         assert "::notice" in capsys.readouterr().out
 
-    def test_release_needs_token(self, runner_env, api, capsys):
-        rc = main(["lock", "release", "--stack-id", STACK, "--request-id", REQ, "--api-url", api.url])
+    def test_release_rejects_a_bad_token(self, runner_env, api, capsys):
+        rc = main(["lock", "release", "--stack-id", STACK, "--request-id", REQ, "--api-url", api.url,
+                   "--fencing-token", "0"])
         assert rc == 2
         assert "--fencing-token" in capsys.readouterr().err
+        assert api.calls == []
 
     def test_queued_fails(self, runner_env, api, capsys):
         api.reply("POST", f"/v1/internal/stacks/{STACK}/lock", 202, {"lock": "queued", "queued_behind": REQ, "current": LOCK})
