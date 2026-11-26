@@ -6,7 +6,7 @@ from .diffing import diff_interfaces, is_release_relevant
 from .interface import InterfaceError, parse_interface
 from .models import Interface, SemVer
 from .sources import GitHistory, ModuleWorkspace
-from .versioning import GateInput, GateResult, evaluate, git_tag, latest_release
+from .versioning import GateInput, GateResult, evaluate, git_tag, latest_release, tagged_versions
 
 
 class ReleaseGate:
@@ -16,8 +16,16 @@ class ReleaseGate:
         self.workspace = workspace
         self.git = git
 
-    def previous_version(self, module: str) -> SemVer | None:
-        return latest_release(module, self.git.tags(f"modules/{module}/v*"))
+    def module_tags(self, module: str) -> list[str]:
+        return self.git.tags(f"modules/{module}/v*")
+
+    def previous_version(self, module: str, below: SemVer | None = None) -> SemVer | None:
+        return latest_release(module, self.module_tags(module), below)
+
+    def changed_since(self, module: str, version: SemVer) -> bool:
+        """True if release-relevant files differ from the module at tag ``version``."""
+        changed = self.git.changed_files(git_tag(module, version), self.workspace.relative_dir(module))
+        return any(is_release_relevant(p) for p in changed)
 
     def declared_version(self, module: str) -> SemVer:
         version = (self.workspace.manifest(module).get("metadata") or {}).get("version")
@@ -31,16 +39,24 @@ class ReleaseGate:
         new = parse_interface(self.workspace.terraform_files(module))
         return old, new
 
-    def check(self, module: str) -> GateResult:
+    def check(self, module: str, before_declared: bool = False) -> GateResult:
+        """Gate ``module``.
+
+        ``before_declared`` compares against the last final release below the
+        declared version, which is what release notes need when the declared
+        version is already tagged (a re-run).
+        """
         declared = self.declared_version(module)
-        previous = self.previous_version(module)
+        tagged = tagged_versions(module, self.module_tags(module))
+        previous = self.previous_version(module, declared if before_declared else None)
+        since_declared = declared in tagged and self.changed_since(module, declared)
+        extra = {"tagged": tagged, "changed_since_declared": since_declared}
         if previous is None:
-            return evaluate(GateInput(module, declared, None))
-        tag = git_tag(module, previous)
-        relative = self.workspace.relative_dir(module)
-        content_changed = any(is_release_relevant(p) for p in self.git.changed_files(tag, relative))
+            return evaluate(GateInput(module, declared, None, **extra))
+        content_changed = self.changed_since(module, previous)
         try:
             old, new = self.interfaces(module, previous)
         except InterfaceError as exc:
-            return evaluate(GateInput(module, declared, previous, (), content_changed, (str(exc),)))
-        return evaluate(GateInput(module, declared, previous, tuple(diff_interfaces(old, new)), content_changed))
+            return evaluate(GateInput(module, declared, previous, (), content_changed, (str(exc),), **extra))
+        return evaluate(GateInput(module, declared, previous, tuple(diff_interfaces(old, new)), content_changed,
+                                  **extra))

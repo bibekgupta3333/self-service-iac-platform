@@ -22,10 +22,30 @@ def version_from_tag(module: str, tag: str) -> SemVer | None:
     return SemVer.try_parse(tag[len(prefix):]) if tag.startswith(prefix) else None
 
 
-def latest_release(module: str, tags: Iterable[str]) -> SemVer | None:
-    """Highest final (non-prerelease) version among the module's tags."""
-    versions = [v for v in (version_from_tag(module, t) for t in tags) if v and not v.is_prerelease]
+def tagged_versions(module: str, tags: Iterable[str]) -> tuple[SemVer, ...]:
+    """Every version (final and prerelease) tagged for ``module``, sorted."""
+    return tuple(sorted(v for v in (version_from_tag(module, t) for t in tags) if v))
+
+
+def latest_release(module: str, tags: Iterable[str], below: SemVer | None = None) -> SemVer | None:
+    """Highest final (non-prerelease) version among the module's tags, optionally below ``below``."""
+    versions = [v for v in tagged_versions(module, tags) if not v.is_prerelease and (below is None or v < below)]
     return max(versions, default=None)
+
+
+def tag_errors(declared: SemVer, tagged: Iterable[SemVer], changed_since_declared: bool,
+               previous: SemVer | None) -> list[str]:
+    """Errors from existing tags: a reused tag with changes, or a prerelease below an existing one. Pure."""
+    tagged = tuple(tagged)
+    errors: list[str] = []
+    if declared in tagged and changed_since_declared and declared != previous:
+        errors.append(f"tag v{declared} already exists and the module changed since it was tagged; "
+                      "bump metadata.version")
+    if declared.is_prerelease:
+        higher = [v for v in tagged if v.is_prerelease and v.core == declared.core and v > declared]
+        if higher:
+            errors.append(f"prerelease {declared} is lower than the existing prerelease {max(higher)}")
+    return errors
 
 
 def bump_between(previous: SemVer, declared: SemVer) -> Bump:
@@ -115,14 +135,17 @@ class GateInput:
     changes: tuple[Change, ...] = ()
     content_changed: bool = False
     extra_errors: tuple[str, ...] = field(default=())
+    tagged: tuple[SemVer, ...] = ()
+    changed_since_declared: bool = False
 
 
 def evaluate(gate: GateInput) -> GateResult:
     """Decide whether ``gate.declared`` is an acceptable version. Pure."""
+    previous, declared = gate.previous, gate.declared
     errors = list(gate.extra_errors)
+    errors.extend(tag_errors(declared, gate.tagged, gate.changed_since_declared, previous))
     warnings: list[str] = []
     changes = tuple(gate.changes)
-    previous, declared = gate.previous, gate.declared
 
     if previous is None:
         return GateResult(gate.module, declared, None, Bump.NONE, Bump.NONE, changes,

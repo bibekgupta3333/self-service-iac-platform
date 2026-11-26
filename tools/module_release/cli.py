@@ -141,7 +141,7 @@ def _info(app: App, args: argparse.Namespace) -> int:
 
 def _notes(app: App, args: argparse.Namespace) -> int:
     (module,) = app.resolve_modules([args.module], False)
-    print(release_notes(app.workspace.changelog(module), app.gate.check(module)))
+    print(release_notes(app.workspace.changelog(module), app.gate.check(module, before_declared=True)))
     return 0
 
 

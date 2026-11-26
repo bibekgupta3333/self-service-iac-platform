@@ -25,6 +25,7 @@ from tools.module_release import (
 )
 from tools.module_release.interface import normalise_expression
 from tools.module_release.models import Change, Subject
+from tools.module_release.versioning import tag_errors
 
 BASE_TF = """
 variable "name" {
@@ -477,3 +478,36 @@ class TestNormalisation:
         text = BASE_TF.replace('can(regex("^[a-z]+$", var.name))', 'contains(["a b"], var.name)')
         narrowed = text.replace('["a b"]', '["ab"]')
         assert labels(diff_interfaces(iface(text), iface(narrowed))) == [("variable", "name", Bump.MAJOR)]
+
+
+class TestTagErrors:
+    V = SemVer.parse
+
+    def test_reused_tag_with_changes(self):
+        errors = tag_errors(self.V("2.0.0-rc.1"), [self.V("1.0.0"), self.V("2.0.0-rc.1")], True, self.V("1.0.0"))
+        assert len(errors) == 1 and "already exists" in errors[0]
+
+    def test_reused_tag_without_changes(self):
+        assert tag_errors(self.V("2.0.0-rc.1"), [self.V("2.0.0-rc.1")], False, None) == []
+
+    def test_equal_final_is_left_to_the_bump_check(self):
+        assert tag_errors(self.V("1.0.0"), [self.V("1.0.0")], True, self.V("1.0.0")) == []
+
+    @pytest.mark.parametrize(
+        "declared,tagged,lower",
+        [
+            ("2.0.0-rc.0", ["2.0.0-rc.1"], True),
+            ("2.0.0-rc.2", ["2.0.0-rc.1"], False),
+            ("2.0.0-beta.9", ["2.0.0-rc.1"], True),
+            ("2.1.0-rc.0", ["2.0.0-rc.1"], False),
+        ],
+    )
+    def test_lower_prerelease(self, declared, tagged, lower):
+        errors = tag_errors(self.V(declared), [self.V(t) for t in tagged], False, None)
+        assert bool(errors) is lower
+
+    def test_evaluate_includes_tag_errors(self):
+        result = evaluate(GateInput("demo", SemVer.parse("2.0.0-rc.1"), SemVer.parse("1.0.0"),
+                                    (Change(Subject.VARIABLE, "x", "x", Bump.MAJOR),), True,
+                                    tagged=(SemVer.parse("2.0.0-rc.1"),), changed_since_declared=True))
+        assert not result.ok

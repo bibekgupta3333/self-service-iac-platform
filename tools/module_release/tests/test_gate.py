@@ -104,6 +104,44 @@ class TestReleaseGate:
             check(repo)
 
 
+class TestPrereleaseTags:
+    def prerelease(self, repo, version: str = "2.0.0-rc.1"):
+        repo.write("modules/demo/variables.tf", NEW_REQUIRED)
+        repo.set_version("demo", version)
+        repo.commit("rc")
+        repo.tag(f"modules/demo/v{version}")
+        return repo
+
+    def test_unchanged_tagged_prerelease_passes(self, released_repo):
+        assert check(self.prerelease(released_repo)).ok
+
+    def test_changed_tagged_prerelease_fails(self, released_repo):
+        repo = self.prerelease(released_repo)
+        repo.write("modules/demo/outputs.tf", NEW_OUTPUT)
+        result = check(repo)
+        assert not result.ok and "v2.0.0-rc.1 already exists" in result.errors[0]
+
+    def test_changed_tagged_prerelease_without_any_final_release_fails(self, repo):
+        repo.add_module(version="1.0.0-rc.1")
+        repo.commit()
+        repo.tag("modules/demo/v1.0.0-rc.1")
+        assert check(repo).ok
+        repo.write("modules/demo/outputs.tf", NEW_OUTPUT)
+        assert not check(repo).ok
+
+    def test_lower_prerelease_than_existing_fails(self, released_repo):
+        repo = self.prerelease(released_repo, "2.0.0-rc.2")
+        repo.set_version("demo", "2.0.0-rc.1")
+        result = check(repo)
+        assert not result.ok and "lower than the existing prerelease 2.0.0-rc.2" in result.errors[-1]
+
+    def test_next_prerelease_passes(self, released_repo):
+        repo = self.prerelease(released_repo)
+        repo.write("modules/demo/outputs.tf", NEW_OUTPUT)
+        repo.set_version("demo", "2.0.0-rc.2")
+        assert check(repo).ok
+
+
 class TestAdapters:
     def test_files_at_missing_ref_or_dir(self, released_repo):
         git = GitRepository(released_repo.root)
@@ -197,6 +235,15 @@ class TestCli:
         released_repo.write("modules/demo/outputs.tf", OUTPUTS_TF)
         assert run(released_repo, "notes", "demo") == 0
         assert capsys.readouterr().out.strip() == "### Added\n- Initial release."
+
+    def test_notes_on_rerun_compare_with_the_release_before(self, released_repo, capsys):
+        released_repo.write("modules/demo/outputs.tf", NEW_OUTPUT)
+        released_repo.set_version("demo", "1.1.0")
+        released_repo.commit()
+        released_repo.tag("modules/demo/v1.1.0")
+        assert run(released_repo, "notes", "demo") == 0
+        out = capsys.readouterr().out
+        assert "Previous release: 1.0.0" in out and "[minor] output 'arn': added" in out
 
     def test_index_rejects_bad_sha(self, released_repo, capsys):
         assert run(released_repo, "index", "demo", "--commit-sha", "HEAD") == 2
