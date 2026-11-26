@@ -49,7 +49,10 @@ export default async function RequestPage({ params }: Props) {
         <dl className="grid gap-x-6 gap-y-3 rounded-lg border border-slate-200 bg-white p-5 text-sm sm:grid-cols-2">
           <Item label="Kind">{r.kind}</Item>
           <Item label="Stack">
-            <span className="font-mono text-xs">{r.stack.path}</span> ({r.stack.status})
+            <Link href={`/stacks/${encodeURIComponent(r.stack.id)}`} className="font-mono text-xs text-indigo-700 hover:underline">
+              {r.stack.path}
+            </Link>{" "}
+            ({r.stack.status})
           </Item>
           {r.spec && (
             <>
