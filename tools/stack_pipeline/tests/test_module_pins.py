@@ -1,3 +1,4 @@
+import os
 import subprocess
 from pathlib import Path
 
@@ -75,7 +76,7 @@ class TestPure:
 
 class TestVerifier:
     def check(self, git, ref="modules/s3/v1.0.0", sha=SHA):
-        return ModulePinVerifier(git, Path("/tmp/mirror")).check("development/platform/smoke", "bucket", ModulePin(ref, sha))
+        return ModulePinVerifier(git, Path("/tmp/mirror"), allow_unpublished=True).check("development/platform/smoke", "bucket", ModulePin(ref, sha))
 
     def test_published_tag_matching_sha(self):
         git = FakeGit(published={"modules/s3/v1.0.0": SHA})
@@ -107,9 +108,21 @@ class TestVerifier:
             self.check(git, sha=sha)
         assert git.pushed == []
 
+    def test_unpublished_tag_refused_without_switch(self):
+        git = FakeGit()
+        verifier = ModulePinVerifier(git, Path("/tmp/m"))
+        with pytest.raises(PinError, match="not published on the remote.*--allow-unpublished"):
+            verifier.check("development/platform/smoke", "bucket", ModulePin("modules/s3/v1.0.0", SHA))
+        assert git.pushed == []
+
+    def test_published_tag_needs_no_switch(self):
+        git = FakeGit(published={"modules/s3/v1.0.0": SHA})
+        check = ModulePinVerifier(git, Path("/tmp/m")).check("s", "bucket", ModulePin("modules/s3/v1.0.0", SHA))
+        assert check.resolution is Resolution.PUBLISHED
+
     def test_verify_all_stacks(self):
         stacks = [metadata("development", "platform", "smoke", modules={"bucket": {"ref": "modules/s3/v1.0.0", "sha": SHA}})]
-        checks = ModulePinVerifier(FakeGit(), Path("/tmp/m")).verify(stacks)
+        checks = ModulePinVerifier(FakeGit(), Path("/tmp/m"), allow_unpublished=True).verify(stacks)
         assert [c.render() for c in checks] == ["development/platform/smoke: module.bucket modules/s3/v1.0.0 @ aaaaaaaaaaaa (bootstrapped)"]
 
 
@@ -167,7 +180,8 @@ class TestGitCliIntegration:
             f' "modules": {{"bucket": {{"ref": "modules/s3/v1.0.0", "sha": "{sha}"}}}}}}'
         )
         mirror = tmp_path / "mirror.git"
-        argv = ["--repo-root", str(clone), "verify-pins", str(stack), "--mirror", str(mirror), "--github-env", ""]
+        argv = ["--repo-root", str(clone), "verify-pins", str(stack), "--mirror", str(mirror), "--allow-unpublished"]
+        argv += ["--github-env", ""]
         assert main(argv) == 0
         captured = capsys.readouterr()
         assert "export GIT_CONFIG_COUNT=2" in captured.out
@@ -189,6 +203,35 @@ class TestGitCliIntegration:
             ' "lifecycle": "active", "backend": "local",'
             f' "modules": {{"bucket": {{"ref": "modules/s3/v1.0.0", "sha": "{sha}"}}}}}}'
         )
-        argv = ["--repo-root", str(clone), "verify-pins", str(stack), "--mirror", str(tmp_path / "m.git"), "--github-env", ""]
+        argv = ["--repo-root", str(clone), "verify-pins", str(stack), "--mirror", str(tmp_path / "m.git")]
+        argv += ["--allow-unpublished", "--github-env", ""]
         assert main(argv) == 1
         assert "is not on origin/main" in capsys.readouterr().err
+
+
+class TestMirrorEndToEnd:
+    def test_insteadof_env_makes_clone_resolve_tag_from_mirror(self, clone, tmp_path):
+        """The exported GIT_CONFIG_* variables make a clone of <repo>.git at the tag read the mirror."""
+        sha = _git(clone, "rev-parse", "HEAD")
+        stack = clone / "environments" / "development" / "platform" / "smoke"
+        stack.mkdir(parents=True)
+        (stack / "iacp.stack.json").write_text(
+            '{"environment": "development", "team": "platform", "stack": "smoke", "region": "us-east-1",'
+            ' "lifecycle": "active", "backend": "local",'
+            f' "modules": {{"bucket": {{"ref": "modules/s3/v1.0.0", "sha": "{sha}"}}}}}}'
+        )
+        env_file = tmp_path / "github_env"
+        repo_url = "https://github.invalid/acme/modules.git"
+        argv = ["--repo-root", str(clone), "verify-pins", str(stack), "--mirror", str(tmp_path / "mirror.git")]
+        argv += ["--allow-unpublished", "--repo-url", repo_url, "--github-env", str(env_file)]
+        assert main(argv) == 0
+        env = dict(os.environ, **dict(line.split("=", 1) for line in env_file.read_text().splitlines()))
+        for i, url in enumerate((repo_url, repo_url.removesuffix(".git"))):  # Terraform and Checkov spellings
+            dest = tmp_path / f"out{i}"
+            subprocess.run(
+                ["git", "clone", "-q", "--depth=1", "-b", "modules/s3/v1.0.0", url, str(dest)],
+                check=True,
+                capture_output=True,
+                env=env,
+            )
+            assert _git(dest, "rev-parse", "HEAD") == sha

@@ -6,8 +6,9 @@ and record the commit each tag resolved to. Before ``terraform init`` this step:
 * **published tag** - checks that the tag on ``origin`` still resolves to the
   recorded commit (the integrity check Checkov's CKV_TF_1 asks for, done
   against the recorded SHA instead of in the source string);
-* **unpublished tag** - while module-release (WBS 3.6) has not cut tags yet,
-  checks that the recorded commit is on the trusted branch (``origin/main``)
+* **unpublished tag** - refused unless the caller opts in with
+  ``allow_unpublished`` (``--allow-unpublished``; the workflow passes it only
+  while ``IACP_PIN_BOOTSTRAP`` is ``true`` under ADR-0009). When allowed, it checks that the recorded commit is on the trusted branch (``origin/main``)
   and that its ``modules/<name>/module.yaml`` declares exactly that version,
   then pushes that one commit as the tag into a throwaway bare mirror and
   routes the repository URL to it with ``url.<mirror>.insteadOf``.
@@ -114,10 +115,13 @@ class GitPort(Protocol):
 class ModulePinVerifier:
     """Checks every pin, bootstrapping unpublished tags into a local mirror."""
 
-    def __init__(self, git: GitPort, mirror: Path, trusted_ref: str = DEFAULT_TRUSTED_REF) -> None:
+    def __init__(
+        self, git: GitPort, mirror: Path, trusted_ref: str = DEFAULT_TRUSTED_REF, allow_unpublished: bool = False
+    ) -> None:
         self.git = git
         self.mirror = Path(mirror)
         self.trusted_ref = trusted_ref
+        self.allow_unpublished = allow_unpublished
 
     def check(self, stack: str, instance: str, pin: ModulePin) -> PinCheck:
         name, version = parse_tag(pin.ref)
@@ -129,6 +133,11 @@ class ModulePinVerifier:
             if published != pin.sha:
                 raise PinError(f"{where}: tag resolves to {published} but iacp.stack.json records {pin.sha}")
             return PinCheck(stack, instance, pin, Resolution.PUBLISHED)
+        if not self.allow_unpublished:
+            raise PinError(
+                f"{where}: tag is not published on the remote; unpublished tags are only served with "
+                "--allow-unpublished (IACP_PIN_BOOTSTRAP, ADR-0009)"
+            )
         if not self.git.is_commit(pin.sha):
             raise PinError(f"{where}: commit {pin.sha} is not in this clone (fetch full history)")
         if not self.git.is_ancestor(pin.sha, self.trusted_ref):

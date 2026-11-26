@@ -63,6 +63,11 @@ def build_parser() -> argparse.ArgumentParser:
     pins.add_argument("stack_dirs", type=Path, nargs="+")
     pins.add_argument("--mirror", type=Path, required=True, help="bare mirror for unpublished tags (created if needed)")
     pins.add_argument("--trusted-ref", default=DEFAULT_TRUSTED_REF, help="unpublished pins must be on this ref")
+    pins.add_argument(
+        "--allow-unpublished",
+        action="store_true",
+        help="serve unpublished tags from the mirror (only while IACP_PIN_BOOTSTRAP / ADR-0009 is in force)",
+    )
     pins.add_argument("--remote", default="origin", help="remote that holds published tags")
     pins.add_argument("--repo-url", default=DEFAULT_REPO_URL, help="module repository URL used in stack sources")
     pins.add_argument(
@@ -159,7 +164,9 @@ def run_summary(args: argparse.Namespace) -> int:
 def run_verify_pins(args: argparse.Namespace) -> int:
     repo = FileSystemStackRepository(args.repo_root)
     stacks = [repo.load_dir(d) for d in args.stack_dirs]
-    verifier = ModulePinVerifier(GitCli(args.repo_root, args.remote), args.mirror, args.trusted_ref)
+    verifier = ModulePinVerifier(
+        GitCli(args.repo_root, args.remote), args.mirror, args.trusted_ref, allow_unpublished=args.allow_unpublished
+    )
     checks = verifier.verify(stacks)
     for check in checks:
         print(check.render(), file=sys.stderr)
