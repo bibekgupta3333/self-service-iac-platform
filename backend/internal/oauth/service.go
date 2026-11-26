@@ -13,6 +13,7 @@ import (
 
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/audit"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/observability"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
 )
 
@@ -61,6 +62,8 @@ type UserSyncer interface {
 // SessionIssuer mints a session for a user (session.Service).
 type SessionIssuer interface {
 	Issue(ctx context.Context, userID uuid.UUID) (string, error)
+	// Revoke ends a session just issued when the login cannot be completed.
+	Revoke(ctx context.Context, id string) error
 }
 
 // Auditor appends stand-alone audit events (audit.Recorder).
@@ -142,15 +145,13 @@ func (s *Service) Complete(ctx context.Context, code, queryState, cookieState st
 		return Result{}, fmt.Errorf("%w: %w", ErrGitHubUnavailable, err)
 	}
 	if !gu.OrgMember {
-		s.record(ctx, meta, audit.Event{ActorType: "user", ActorID: gu.Login, Action: "auth.login_denied",
-			SubjectType: "user", SubjectID: gu.Login, Payload: payload(map[string]any{"reason": "not_org_member"})})
+		s.recordDenied(ctx, meta, gu.Login, "not_org_member")
 		return Result{}, ErrNotOrgMember
 	}
 	user, err := s.syncer.SyncLogin(ctx, gu)
 	if err != nil {
 		if errors.Is(err, ErrUserDisabled) {
-			s.record(ctx, meta, audit.Event{ActorType: "user", ActorID: gu.Login, Action: "auth.login_denied",
-				SubjectType: "user", SubjectID: gu.Login, Payload: payload(map[string]any{"reason": "user_disabled"})})
+			s.recordDenied(ctx, meta, gu.Login, "user_disabled")
 		}
 		return Result{}, err
 	}
@@ -158,16 +159,31 @@ func (s *Service) Complete(ctx context.Context, code, queryState, cookieState st
 	if err != nil {
 		return Result{}, err
 	}
+	// A login that cannot be audited must not leave a live session behind: revoke it and
+	// fail the login (the user signs in again once the audit store is back).
 	if err := s.record(ctx, meta, audit.Event{ActorType: "user", ActorID: user.UserID.String(), Action: "auth.login",
 		SubjectType: "user", SubjectID: user.UserID.String(),
 		Payload: payload(map[string]any{"login": user.Login, "platform_admin": user.PlatformAdmin})}); err != nil {
+		rbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if rerr := s.sessions.Revoke(rbCtx, id); rerr != nil {
+			observability.Logger(ctx).ErrorContext(ctx, "revoke session after failed login audit", "error", rerr)
+		}
 		return Result{}, fmt.Errorf("audit login: %w", err)
 	}
 	return Result{SessionID: id, ReturnTo: rec.ReturnTo, User: user}, nil
 }
 
-// record appends an audit event; failures of denial events are logged by the caller's
-// error path rather than masking the denial.
+// recordDenied audits a refused login. The refusal stands either way, so an audit failure
+// is logged, not returned.
+func (s *Service) recordDenied(ctx context.Context, m Meta, login, reason string) {
+	if err := s.record(ctx, m, audit.Event{ActorType: "user", ActorID: login, Action: "auth.login_denied",
+		SubjectType: "user", SubjectID: login, Payload: payload(map[string]any{"reason": reason})}); err != nil {
+		observability.Logger(ctx).ErrorContext(ctx, "audit login denial failed", "login", login, "reason", reason, "error", err)
+	}
+}
+
+// record appends an audit event.
 func (s *Service) record(ctx context.Context, m Meta, e audit.Event) error {
 	e.ActorIP, e.CorrelationID = m.IP, m.CorrelationID
 	return s.audit.Record(ctx, e)

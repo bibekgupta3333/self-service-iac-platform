@@ -60,16 +60,30 @@ func (f *fakeSyncer) SyncLogin(context.Context, identity.GitHubUser) (SyncResult
 	return f.res, f.err
 }
 
-type fakeSessions struct{ issued []uuid.UUID }
+type fakeSessions struct {
+	issued  []uuid.UUID
+	revoked []string
+}
 
 func (f *fakeSessions) Issue(_ context.Context, u uuid.UUID) (string, error) {
 	f.issued = append(f.issued, u)
 	return "session-for-" + u.String(), nil
 }
 
-type fakeAudit struct{ events []audit.Event }
+func (f *fakeSessions) Revoke(_ context.Context, id string) error {
+	f.revoked = append(f.revoked, id)
+	return nil
+}
+
+type fakeAudit struct {
+	events []audit.Event
+	fail   error
+}
 
 func (f *fakeAudit) Record(_ context.Context, e audit.Event) error {
+	if f.fail != nil {
+		return f.fail
+	}
 	f.events = append(f.events, e)
 	return nil
 }
