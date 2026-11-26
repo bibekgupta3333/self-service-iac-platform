@@ -34,6 +34,7 @@
           { "context": "policy (opa, conftest, checkov checks)" },
           { "context": "go (backend)" },
           { "context": "python (tools)" },
+          { "context": "portal (lint, typecheck, test, build)" },
           { "context": "pr-validate-result" }
         ]
       }
