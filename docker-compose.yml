@@ -38,6 +38,23 @@ services:
       timeout: 3s
       retries: 30
 
+  # Control-plane API. Opt in with: docker compose --profile app up -d --build
+  backend:
+    profiles: ["app"]
+    build: ./backend
+    container_name: iacp-backend
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      IACP_AUTH_MODE: dev                                   # local only; production uses GitHub OAuth
+      IACP_INTERNAL_TOKEN: local-dev-internal-token-0123456789abcdef
+      IACP_MIGRATE_DATABASE_URL: postgres://iacp:iacp-local-only@postgres:5432/iacp?sslmode=disable
+      IACP_DATABASE_URL: postgres://iacp_app:iacp-app-local-only@postgres:5432/iacp?sslmode=disable
+      IACP_APP_DB_PASSWORD: iacp-app-local-only
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   localstack-data:
   postgres-data:
