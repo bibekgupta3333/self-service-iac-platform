@@ -5,7 +5,8 @@
 #
 #   detect    -> changed stacks as a JSON matrix (tools/stack_pipeline)
 #   validate  -> per stack: fmt, module pins, init, validate, TFLint, Checkov,
-#                plan, show -json, conftest; uploads the plan summary
+#                plan, show -json, conftest, hermetic LocalStack apply round
+#                trip; uploads the plan summary
 #   comment   -> sticky PR comment per stack (the only job that can write to the PR)
 #   result    -> single required status check, independent of matrix size
 name: pr-validate
@@ -248,6 +249,17 @@ jobs:
           jq -r '.[] | (.failures[]? | "deny: \(.msg)"), (.warnings[]? | "warn: \(.msg)")' "$RUNNER_TEMP/conftest.json" || true
           exit "$status"
 
+      - id: roundtrip
+        name: Apply round trip on LocalStack (ADR-0009)
+        # Hermetic check while local-first: apply the reviewed plan to this job's
+        # throwaway LocalStack container, require an empty re-plan (exit code 2
+        # means the stack is not idempotent), then destroy. No state or resources
+        # outside the job are touched; real accounts change only through apply.yml.
+        run: |
+          terraform apply -input=false -lock=false -no-color tfplan
+          terraform plan -input=false -lock=false -no-color -detailed-exitcode
+          terraform destroy -input=false -lock=false -no-color -auto-approve
+
       # TODO(WBS 4.10): report plan_ready / plan_failed with the summary JSON to
       # POST /v1/runs through the OIDC-authenticated iacp-report action (WBS 5.6)
       # once the API's OIDC JWT verifier exists. Skipped until then.
@@ -263,6 +275,7 @@ jobs:
           OUT_CHECKOV: ${{ steps.checkov.outcome }}
           OUT_PLAN: ${{ steps.plan.outcome }}
           OUT_SHOW: ${{ steps.show.outcome }}
+          OUT_ROUNDTRIP: ${{ steps.roundtrip.outcome }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -274,7 +287,7 @@ jobs:
             --plan-text "$RUNNER_TEMP/plan.txt" \
             --step "fmt=$OUT_FMT" --step "module pins=$OUT_PINS" --step "init=$OUT_INIT" \
             --step "validate=$OUT_VALIDATE" --step "tflint=$OUT_TFLINT" --step "checkov=$OUT_CHECKOV" \
-            --step "plan=$OUT_PLAN" --step "show -json=$OUT_SHOW" \
+            --step "plan=$OUT_PLAN" --step "show -json=$OUT_SHOW" --step "LocalStack apply round trip=$OUT_ROUNDTRIP" \
             --commit "$HEAD_SHA" --run-url "$RUN_URL" \
             --markdown-out "$out/comment.md" --json-out "$out/summary.json"
           cat "$out/comment.md" >> "$GITHUB_STEP_SUMMARY"
