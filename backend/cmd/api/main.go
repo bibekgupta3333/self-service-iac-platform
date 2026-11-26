@@ -65,13 +65,12 @@ func run() error {
 		slog.Warn("IACP_DATABASE_URL connects as a superuser or schema owner: audit_events append-only grants are not enforced; use the iacp_app role")
 	}
 
-	auth, err := newAuthenticator(ctx, cfg, identity.NewUserStore(pool))
+	clock, ids := platform.SystemClock{}, platform.RandomIDs{}
+	auditWriter := audit.NewWriter(clock, ids)
+	ua, err := newUserAuth(ctx, cfg, pool, clock, auditWriter, logger)
 	if err != nil {
 		return err
 	}
-
-	clock, ids := platform.SystemClock{}, platform.RandomIDs{}
-	auditWriter := audit.NewWriter(clock, ids)
 	catalogSvc := catalog.NewService(catalog.NewPostgresRepository(pool, auditWriter), clock, cfg.ModuleRepoURL)
 	requestRepo := requests.NewPostgresRepository(pool, auditWriter)
 	lockSvc := locks.NewService(locks.NewPostgresRepository(pool, auditWriter), clock, locks.DefaultLease)
@@ -86,14 +85,19 @@ func run() error {
 
 	handler := httpapi.NewRouter(httpapi.Deps{
 		Logger:   logger,
-		Auth:     auth,
+		Auth:     ua.Authenticator,
 		Internal: internalAuth,
 		Ready:    pool,
 		Catalog:  httpapi.NewCatalogHandler(catalogSvc),
 		Public: []httpapi.RouteRegistrar{
 			httpapi.NewRequestHandler(requestSvc),
 			httpapi.NewAuditHandler(audit.NewVerifier(pool)),
+			ua.Handler,
 		},
+		PublicHandlers: ua.Public,
+		Policies:       httpapi.DefaultPolicies(),
+		Roles:          ua.Roles,
+		DenialAudit:    ua.Denials,
 		InternalHandlers: []httpapi.RouteRegistrar{
 			httpapi.NewLockHandler(lockSvc),
 			httpapi.NewBudgetContextHandler(budgets.NewService(budgets.NewPostgresRepository(pool), clock)),
@@ -147,19 +151,6 @@ func migrate(ctx context.Context, cfg config.Config, logger *slog.Logger) error 
 		}
 	}
 	return nil
-}
-
-func newAuthenticator(ctx context.Context, cfg config.Config, users *identity.UserStore) (httpapi.Authenticator, error) {
-	switch cfg.AuthMode {
-	case config.AuthModeDev:
-		p, err := users.EnsureDevUser(ctx, cfg.DevUserLogin)
-		if err != nil {
-			return nil, err
-		}
-		slog.Warn("dev authentication enabled: every caller acts as the local user", "login", p.Login)
-		return httpapi.DevAuthenticator{Principal: p}, nil
-	}
-	return nil, fmt.Errorf("unsupported auth mode %q", cfg.AuthMode)
 }
 
 // newMachineAuthenticator builds the authenticator for /v1/internal/* and /v1/runs. It
