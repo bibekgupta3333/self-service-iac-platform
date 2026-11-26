@@ -12,7 +12,7 @@ from tools.manifest_validator import (
 )
 from tools.manifest_validator.cli import main
 
-from .conftest import REPO_ROOT, SCHEMA_PATH, VARIABLES_TF
+from .conftest import REPO_ROOT, SCHEMA_PATH, VARIABLES_TF, VERSIONS_TF
 
 
 def codes(report):
@@ -164,6 +164,46 @@ class TestManifestValidator:
         make_module(manifest=manifest)
         report = ManifestValidator.for_root(modules_root).run()
         assert "inputs is not a valid JSON Schema" in messages(report)
+
+    def test_compatibility_matches_with_different_spacing(self, make_module, manifest, modules_root):
+        manifest["compatibility"]["terraform"] = ">=1.10,<2.0"
+        make_module(manifest=manifest)
+        assert ManifestValidator.for_root(modules_root).run().ok
+
+    @pytest.mark.parametrize(
+        "mutate,fragment",
+        [
+            (lambda m: m["compatibility"].update(terraform=">= 1.11, < 2.0"),
+             "compatibility.terraform '>= 1.11, < 2.0' does not match required_version '>= 1.10, < 2.0'"),
+            (lambda m: m["compatibility"]["providers"].update({"hashicorp/aws": ">= 6.0"}),
+             "compatibility.providers['hashicorp/aws'] '>= 6.0' does not match required_providers version"),
+            (lambda m: m["compatibility"]["providers"].update({"hashicorp/random": ">= 3.0"}),
+             "compatibility.providers missing from required_providers: 'hashicorp/random'"),
+        ],
+    )
+    def test_compatibility_drift(self, make_module, manifest, modules_root, mutate, fragment):
+        mutate(manifest)
+        make_module(manifest=manifest)
+        report = ManifestValidator.for_root(modules_root).run()
+        assert codes(report) == ["compatibility-parity"]
+        assert fragment in messages(report)
+
+    def test_versions_tf_drift(self, make_module, manifest, modules_root):
+        extra = VERSIONS_TF.replace('    aws = {', '    random = {\n      source  = "hashicorp/random"\n'
+                                                  '      version = ">= 3.0"\n    }\n    aws = {')
+        make_module(manifest=manifest, versions_tf=extra)
+        report = ManifestValidator.for_root(modules_root).run()
+        assert "required_providers missing from compatibility.providers: 'hashicorp/random'" in messages(report)
+
+    def test_missing_required_version(self, make_module, manifest, modules_root):
+        make_module(manifest=manifest, versions_tf=VERSIONS_TF.replace('  required_version = ">= 1.10, < 2.0"\n', ""))
+        report = ManifestValidator.for_root(modules_root).run()
+        assert "terraform.required_version is not set" in messages(report)
+
+    def test_unparsable_terraform_is_reported(self, make_module, manifest, modules_root):
+        make_module(manifest=manifest, versions_tf="terraform {")
+        report = ManifestValidator.for_root(modules_root).run()
+        assert "compatibility-parity" in codes(report) and "cannot parse HCL" in messages(report)
 
     def test_checks_are_pluggable(self, make_module, manifest, modules_root):
         manifest["outputs"].append({"name": "arn", "description": "ARN"})
