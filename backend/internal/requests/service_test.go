@@ -33,6 +33,8 @@ type memState struct {
 	events   []audit.Event
 	jobs     []outbox.Message
 	status   map[uuid.UUID]StackStatus // stack status; a stack not listed is provisioning
+	// environmentOf overrides the environment name of a stack (default development).
+	environmentOf map[uuid.UUID]string
 }
 
 type memKey struct {
@@ -91,7 +93,7 @@ func (s memState) clone() memState {
 		status[k] = v
 	}
 	return memState{keys: keys, stacks: slices.Clone(s.stacks), requests: slices.Clone(s.requests), events: slices.Clone(s.events),
-		jobs: slices.Clone(s.jobs), status: status}
+		jobs: slices.Clone(s.jobs), status: status, environmentOf: cloneStrMap(s.environmentOf)}
 }
 
 func (m *memRepo) InTx(_ context.Context, fn func(Store) error) error {
@@ -133,8 +135,13 @@ func memStackTarget(s memState, id uuid.UUID) (StackTarget, error) {
 		if !ok {
 			status = StackProvisioning
 		}
+		env := "development"
+		if e, ok := s.environmentOf[id]; ok {
+			env = e
+		}
 		return StackTarget{ID: id, TeamID: st.TeamID, TeamSlug: "payments", EnvironmentID: st.EnvironmentID,
-			Environment: "development", Name: st.Name, Path: st.Path, Region: st.Region, Status: status}, nil
+			Environment: env, Name: st.Name, Path: st.Path, Region: st.Region, Status: status,
+			IsEphemeral: st.IsEphemeral, ExpiresAt: st.ExpiresAt}, nil
 	}
 	return StackTarget{}, apperr.NotFound("stack %s not found", id)
 }
