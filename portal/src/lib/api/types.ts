@@ -50,6 +50,38 @@ export interface VersionSummary {
   released_at: string;
 }
 
+export type UpgradeChange = "none" | "patch" | "minor" | "major";
+
+/** A step of GET /v1/catalog/modules/{name}/upgrade-path: one released version, oldest first. */
+export interface UpgradeStep {
+  version: string;
+  git_tag: string;
+  status: CatalogStatus;
+  deprecation_note?: string;
+  released_at: string;
+  /** SemVer class of the move from the previous step (or from the pinned version). */
+  change: UpgradeChange;
+  breaking: boolean;
+  /** The version's CHANGELOG section. */
+  changelog_md: string;
+  /** The version's migration notes ("### Migration" subsection or module.yaml upgrade.notes). */
+  upgrade_notes: string;
+}
+
+/** GET /v1/catalog/modules/{name}/upgrade-path?from=X.Y.Z (backend httpapi upgradePathDTO). */
+export interface UpgradePath {
+  module: string;
+  from: string;
+  to: string;
+  up_to_date: boolean;
+  change: UpgradeChange;
+  majors_crossed: number;
+  /** The newest version one upgrade request may pin (one major at a time); null when up to date. */
+  next: string | null;
+  targets: { patch: string | null; minor: string | null; major: string | null };
+  steps: UpgradeStep[];
+}
+
 export interface ModuleFilter {
   category?: string;
   status?: CatalogStatus;
@@ -106,8 +138,18 @@ export interface DestroyRequestInput {
   justification: string;
 }
 
+/** Body of POST /v1/requests with kind "upgrade": resources keep their inputs and move to to_version. */
+export interface UpgradeRequestInput {
+  kind: "upgrade";
+  stack_id: string;
+  justification?: string;
+  /** Required when a move crosses a major: the caller read the migration notes. */
+  acknowledge_breaking?: boolean;
+  upgrades: { resource: string; to_version: string }[];
+}
+
 /** Everything POST /v1/requests accepts from the portal. */
-export type RequestInput = CreateRequestInput | UpdateRequestInput | DestroyRequestInput;
+export type RequestInput = CreateRequestInput | UpdateRequestInput | UpgradeRequestInput | DestroyRequestInput;
 
 export type StackStatus = "provisioning" | "active" | "drifted" | "updating" | "destroying" | "destroyed" | "failed";
 
@@ -179,6 +221,8 @@ export interface RequestSummary {
     ephemeral?: { ttl_hours: number };
     resources: ResourceInput[];
     depends_on: string[];
+    /** What an upgrade request moved. */
+    upgrades?: { resource: string; module: string; from_version: string; to_version: string; change: UpgradeChange }[];
   };
   created_by: string;
   created_at: string;
