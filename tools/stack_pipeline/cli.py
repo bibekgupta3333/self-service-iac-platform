@@ -20,7 +20,7 @@ from .models import StackMetadataError, StackRef
 from .module_install import MANIFEST, ModuleInstallVerifier, parse_manifest
 from .module_pins import DEFAULT_REPO_URL, DEFAULT_TRUSTED_REF, ModulePinVerifier, PinError, Resolution, insteadof_config
 from .plan_summary import render_markdown, summarize
-from .stack_guard import LOCK_FILE, Violation, check_stack
+from .stack_guard import LOCK_FILE, Violation, check_entries, check_stack, lock_allowlist
 from .policy_context import ContextError, build_budget_context, build_context
 from .sarif import SarifError, rebase_sarif, result_count
 from .smoke import SmokeTester
@@ -81,6 +81,9 @@ def build_parser() -> argparse.ArgumentParser:
     guard = sub.add_parser("check-stack",
                            help="static check of a stack root's HCL before init and plan (no plan-time code)")
     guard.add_argument("stack_dir", type=Path)
+    guard.add_argument("--lock-from", type=Path, metavar="DIR",
+                       help="a checkout of the base commit: every .terraform.lock.hcl under DIR/environments is the "
+                            "allow-list of provider versions and hashes the stack's lock may carry")
 
     fetch = sub.add_parser("fetch-budget-context",
                            help="GET /v1/internal/budget-context for a stack root and write it to a file")
@@ -294,17 +297,21 @@ MAX_GUARDED_FILE_BYTES = 1 << 20
 
 
 def _read_stack_files(root: Path) -> tuple[dict[str, str], list[Violation]]:
-    """The scannable top-level files of a stack root, and a violation for every entry that
-    cannot be trusted as a plain file (a symlink, an oversized or non-UTF-8 file). I/O adapter."""
+    """The scannable top-level files of a stack root, and a violation for every entry that is not
+    a plain allow-listed file (a directory, a symlink, an oversized or non-UTF-8 file). I/O adapter."""
     files: dict[str, str] = {}
     refused: list[Violation] = []
     if not root.is_dir():
         raise ValueError(f"{root} is not a directory")
+    kinds: dict[str, str] = {}
     for entry in sorted(root.iterdir()):
         name = entry.name
-        if entry.is_symlink():
-            refused.append(Violation(name, 1, "symlink", "symbolic links are not allowed in a stack root"))
-        elif entry.is_file() and (name.endswith((".tf", ".tf.json")) or name == LOCK_FILE):
+        kinds[name] = ("symlink" if entry.is_symlink() else "dir" if entry.is_dir() else
+                       "file" if entry.is_file() else "other")
+    refused += check_entries(kinds)
+    for entry in sorted(root.iterdir()):
+        name = entry.name
+        if kinds[name] == "file" and (name.endswith((".tf", ".tf.json")) or name == LOCK_FILE):
             if entry.stat().st_size > MAX_GUARDED_FILE_BYTES:
                 refused.append(Violation(name, 1, "size", f"the file is larger than {MAX_GUARDED_FILE_BYTES} bytes"))
                 continue
@@ -315,9 +322,24 @@ def _read_stack_files(root: Path) -> tuple[dict[str, str], list[Violation]]:
     return files, refused
 
 
+def _read_lock_pins(base: Path) -> dict:
+    """The lock allow-list from every stack lock file of the base checkout. I/O adapter."""
+    locks = sorted((base / "environments").glob(f"*/*/*/{LOCK_FILE}"))
+    texts = []
+    for p in locks:
+        if p.is_file() and not p.is_symlink() and p.stat().st_size <= MAX_GUARDED_FILE_BYTES:
+            texts.append(p.read_text(encoding="utf-8", errors="replace"))
+    return lock_allowlist(texts)
+
+
 def run_check_stack(args: argparse.Namespace) -> int:
     files, refused = _read_stack_files(args.stack_dir)
-    violations = refused + check_stack(files)
+    pins = None
+    if args.lock_from is not None:
+        pins = _read_lock_pins(args.lock_from)
+        if not pins:
+            raise ValueError(f"no provider pins found under {args.lock_from}/environments: the lock cannot be checked")
+    violations = refused + check_stack(files, pins=pins)
     for v in violations:
         print(f"::error file={args.stack_dir / v.path},line={v.line}::{annotation(v.render())}")
     if violations:

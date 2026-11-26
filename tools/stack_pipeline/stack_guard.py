@@ -17,7 +17,14 @@ provisioner. It then checks what may be *loaded*:
   (``git::<repo>.git//modules/<name>?ref=modules/<name>/vX.Y.Z``), never a local path;
 - backend: only ``local`` and ``s3``, the two the generator emits (``cloud``, ``http`` and the rest are refused);
 - ``provisioner`` and ``connection`` blocks anywhere, and ``*.tf.json`` files, which this
-  scanner does not read.
+  scanner does not read;
+- the *entries* of the root: only the files the generator writes plus the lock file. Any
+  directory (``.terraform``, ``.terraform.d``: a committed provider binary there is reused by
+  ``terraform init`` without any download or signature check), symlink, dotfile or other file
+  is refused;
+- the lock file's *pins*: every provider version and every hash in it must already be in the
+  lock files of the base commit (``lock_allowlist``), so a provider package the PR made up,
+  with a matching ``h1:`` hash, is refused.
 
 Everything here is pure: it takes file contents and returns violations. Reading the
 directory (and refusing symlinks) is the adapter's job (``cli.run_check_stack``).
@@ -36,6 +43,9 @@ ALLOWED_TOP_LEVEL = frozenset({"terraform", "provider", "module", "variable", "o
 ALLOWED_BACKENDS = frozenset({"local", "s3"})  # what the generator emits (s3 after local-first, ADR-0009)
 FORBIDDEN_ANYWHERE = frozenset({"provisioner", "connection"})
 LOCK_FILE = ".terraform.lock.hcl"
+# What a stack root may contain: the files backend/internal/generator writes (render.go) and the lock.
+ALLOWED_FILES = frozenset({"main.tf", "versions.tf", "providers.tf", "backend.tf", "outputs.tf", "variables.tf",
+                           "iacp.stack.json", LOCK_FILE})
 _REGISTRY = "registry.terraform.io/"
 
 
@@ -281,12 +291,84 @@ def check_lock(path: str, text: str, providers: Iterable[str] = ALLOWED_PROVIDER
     return found
 
 
+_LOCK_VERSION = re.compile(r'(?m)^[ \t]*version[ \t]*=[ \t]*"([^"\n]*)"')
+_LOCK_HASH = re.compile(r'"((?:h1|zh):[A-Za-z0-9+/=]+)"')
+
+PinTable = Mapping[tuple[str, str], frozenset[str]]
+
+
+def lock_entries(text: str) -> list[tuple[str, str, frozenset[str]]]:
+    """``(provider address, version, hashes)`` of every provider block in a lock file. Pure."""
+    out = []
+    for b in parse_blocks(text):
+        if b.depth == 0 and b.kind == "provider" and b.labels:
+            m = _LOCK_VERSION.search(b.body)
+            out.append((_normalise_source(b.labels[0]), m.group(1) if m else "", frozenset(_LOCK_HASH.findall(b.body))))
+    return out
+
+
+def lock_allowlist(texts: Iterable[str]) -> PinTable:
+    """The pins the base commit already trusts: ``{(address, version): hashes}``, the union over
+    the given lock files (the base commit's stack locks). Unreadable files contribute nothing. Pure."""
+    table: dict[tuple[str, str], frozenset[str]] = {}
+    for text in texts:
+        try:
+            entries = lock_entries(text)
+        except HclScanError:
+            continue
+        for address, version, hashes in entries:
+            table[(address, version)] = table.get((address, version), frozenset()) | hashes
+    return table
+
+
+def check_lock_pins(path: str, text: str, allowed: PinTable) -> list[Violation]:
+    """Violations for a lock file whose provider versions or hashes are not in ``allowed``. Pure.
+
+    A provider package the PR committed under ``.terraform`` is only accepted by ``terraform init``
+    when the lock lists its hash; requiring every hash to be one the base commit already knows
+    (the registry's, recorded by an earlier reviewed lock) closes that route even for a lock file.
+    """
+    try:
+        entries = lock_entries(text)
+    except HclScanError:
+        return []  # reported as unreadable by check_lock
+    found: list[Violation] = []
+    for address, version, hashes in entries:
+        known = allowed.get((address, version))
+        if known is None:
+            found.append(Violation(path, 1, "lock", f"provider {address} {version or '(no version)'} is not pinned by any "
+                                   "lock file on the base commit; a new provider version needs a platform change first"))
+        elif not hashes:
+            found.append(Violation(path, 1, "lock", f"provider {address} {version} lists no hashes"))
+        elif not hashes <= known:
+            extra = sorted(hashes - known)
+            found.append(Violation(path, 1, "lock", f"provider {address} {version} carries {len(extra)} hash(es) the base "
+                                   f"commit does not know ({extra[0]}...); a provider package the PR made up cannot be pinned"))
+    return found
+
+
+def check_entries(entries: Mapping[str, str]) -> list[Violation]:
+    """Violations for the entries of a stack root, given ``{name: kind}`` with kind ``file``, ``dir``,
+    ``symlink`` or ``other``. Only ALLOWED_FILES as regular files pass. Pure."""
+    found: list[Violation] = []
+    for name in sorted(entries):
+        kind = entries[name]
+        if kind == "file" and name in ALLOWED_FILES:
+            continue
+        what = {"dir": "directories", "symlink": "symbolic links", "other": "special files"}.get(kind, "other files")
+        found.append(Violation(name, 1, "entry", f"{what} such as {name!r} are not allowed in a stack root: it holds only "
+                               f"{', '.join(sorted(ALLOWED_FILES))}. A directory like .terraform can hold provider "
+                               "binaries that terraform init reuses without a download"))
+    return found
+
+
 def check_stack(files: Mapping[str, str], repo_url: str = DEFAULT_REPO_URL,
-                providers: Iterable[str] = ALLOWED_PROVIDERS) -> list[Violation]:
+                providers: Iterable[str] = ALLOWED_PROVIDERS, pins: PinTable | None = None) -> list[Violation]:
     """Violations in a stack root, given ``{file name: text}`` for its top-level files. Pure.
 
     ``*.tf`` files and the lock file are scanned; a ``*.tf.json`` file is refused because
-    Terraform would load it and this scanner does not read JSON configuration.
+    Terraform would load it and this scanner does not read JSON configuration. With ``pins``
+    (the base commit's lock allow-list) the lock file's versions and hashes are checked too.
     """
     found: list[Violation] = []
     for name in sorted(files):
@@ -296,4 +378,6 @@ def check_stack(files: Mapping[str, str], repo_url: str = DEFAULT_REPO_URL,
             found += check_tf(name, files[name], repo_url, providers)
         elif name == LOCK_FILE:
             found += check_lock(name, files[name], providers)
+            if pins is not None:
+                found += check_lock_pins(name, files[name], pins)
     return found
