@@ -59,7 +59,7 @@ func TestPostgresRecordRun(t *testing.T) {
 	prRef := "refs/pull/812/merge"
 	bot := identity.Principal{Login: "acme/iacp/.github/workflows/pr-validate.yml@" + prRef, Type: identity.ActorGitHubActions,
 		Workflow: &identity.Workflow{Ref: prRef, JobWorkflowRef: "acme/iacp/.github/workflows/pr-validate.yml@" + prRef,
-			RunID: 11873399021, RunAttempt: 1}}
+			RunID: 11873399021, RunAttempt: 1, SHA: strings.Repeat("e4", 20), EventName: "pull_request"}}
 	report := func(stage string, status runs.StageStatus, tok int64) runs.Report {
 		return runs.Report{Pipeline: runs.KindValidate, StackPath: stackPath, RequestShortID: "req-7k3p9x", FencingToken: &tok,
 			Stage: stage, Status: status, Plan: json.RawMessage(`{"hash":"3f9a"}`),

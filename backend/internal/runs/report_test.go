@@ -60,9 +60,14 @@ func TestValidate(t *testing.T) {
 }
 
 func TestCheckProvenance(t *testing.T) {
+	events := map[string]string{"pr-validate.yml": "pull_request", "apply.yml": "push", "drift.yml": "schedule", "ttl-reaper.yml": "schedule"}
 	wf := func(file, ref string) *identity.Workflow {
 		return &identity.Workflow{Repository: repo, Ref: ref, JobWorkflowRef: repo + "/.github/workflows/" + file + "@" + ref,
-			RunID: 11873399021, RunAttempt: 1}
+			RunID: 11873399021, RunAttempt: 1, SHA: strings.Repeat("e4", 20), EventName: events[file]}
+	}
+	withEvent := func(w *identity.Workflow, event string) *identity.Workflow {
+		w.EventName = event
+		return w
 	}
 	tests := []struct {
 		name     string
@@ -92,6 +97,16 @@ func TestCheckProvenance(t *testing.T) {
 			w.RunAttempt = 2
 			return w
 		}(), code: "run_mismatch"},
+		{name: "another commit's report", pipeline: KindValidate, wf: func() *identity.Workflow {
+			w := wf("pr-validate.yml", "refs/pull/812/merge")
+			w.SHA = strings.Repeat("ab", 20)
+			return w
+		}(), code: "run_mismatch"},
+		{name: "apply dispatched by hand", pipeline: KindApply, wf: withEvent(wf("apply.yml", MainRef), "workflow_dispatch")},
+		{name: "apply via workflow_run", pipeline: KindApply, wf: withEvent(wf("apply.yml", MainRef), "workflow_run"), code: "workflow_not_allowed"},
+		{name: "apply via pull_request_target", pipeline: KindApply, wf: withEvent(wf("apply.yml", MainRef), "pull_request_target"), code: "workflow_not_allowed"},
+		{name: "drift via push", pipeline: KindDrift, wf: withEvent(wf("drift.yml", MainRef), "push"), code: "workflow_not_allowed"},
+		{name: "validate via pull_request_target", pipeline: KindValidate, wf: withEvent(wf("pr-validate.yml", "refs/pull/812/merge"), "pull_request_target"), code: "workflow_not_allowed"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

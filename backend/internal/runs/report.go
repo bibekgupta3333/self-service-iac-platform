@@ -35,6 +35,15 @@ var workflowFiles = map[Kind]string{
 	KindTTLDestroy: "ttl-reaper.yml",
 }
 
+// pipelineEvents is the event_name allow-list per pipeline. pull_request_target and
+// workflow_run never qualify: they run main-ref workflows on behalf of untrusted input.
+var pipelineEvents = map[Kind][]string{
+	KindValidate:   {"pull_request"},
+	KindApply:      {"push", "workflow_dispatch"},
+	KindDrift:      {"schedule", "workflow_dispatch"},
+	KindTTLDestroy: {"schedule", "workflow_dispatch"},
+}
+
 // MainRef is the ref every mutating or scheduled pipeline must run from.
 const MainRef = identity.MainRef
 
@@ -162,9 +171,10 @@ func Validate(r Report) []apperr.FieldError {
 }
 
 // CheckProvenance matches a report against the verified OIDC identity of its caller:
-// the run must be the caller's own, the workflow must be the one that owns the pipeline,
-// and mutating or scheduled pipelines must run from main. A nil workflow (shared internal
-// token) skips these checks. Pure.
+// the run and commit must be the caller's own (head_sha is the job's github.sha, the
+// token's sha claim), the workflow must be the one that owns the pipeline, triggered by an
+// allowed event, and mutating or scheduled pipelines must run from main. A nil workflow
+// (shared internal token) skips these checks. Pure.
 func CheckProvenance(r Report, wf *identity.Workflow) error {
 	if wf == nil {
 		return nil
@@ -172,6 +182,13 @@ func CheckProvenance(r Report, wf *identity.Workflow) error {
 	if r.GitHub.RunID != wf.RunID || r.GitHub.RunAttempt != wf.RunAttempt {
 		return &apperr.Error{Kind: apperr.KindForbidden, Code: "run_mismatch",
 			Message: fmt.Sprintf("report for run %d/%d sent by run %d/%d", r.GitHub.RunID, r.GitHub.RunAttempt, wf.RunID, wf.RunAttempt)}
+	}
+	if r.GitHub.HeadSHA != wf.SHA {
+		return &apperr.Error{Kind: apperr.KindForbidden, Code: "run_mismatch",
+			Message: fmt.Sprintf("report for commit %s sent by a run of %s", r.GitHub.HeadSHA, wf.SHA)}
+	}
+	if !slices.Contains(pipelineEvents[r.Pipeline], wf.EventName) {
+		return workflowNotAllowed(fmt.Sprintf("%s reports may not come from a %q event", r.Pipeline, wf.EventName))
 	}
 	if want := workflowFiles[r.Pipeline]; wf.File() != want {
 		return workflowNotAllowed(fmt.Sprintf("%s reports must come from %s, not %s", r.Pipeline, want, wf.JobWorkflowRef))
