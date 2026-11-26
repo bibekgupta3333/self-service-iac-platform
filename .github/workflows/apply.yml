@@ -199,7 +199,6 @@ jobs:
       AWS_ENDPOINT_URL: http://localhost:4566
       STACK_ID: ${{ matrix.stack.id }}
       STACK_PATH: ${{ matrix.stack.path }}
-      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform.d/plugin-cache
       PYTHONPATH: ${{ github.workspace }}
       IACP_API_URL: ${{ vars.IACP_API_URL }}
       IACP_OIDC_AUDIENCE: ${{ vars.IACP_OIDC_AUDIENCE }}
@@ -214,6 +213,12 @@ jobs:
           # Full history: module pins are checked against origin.
           fetch-depth: 0
           persist-credentials: false
+
+      # A plugin cache inside the checkout would let the PR commit provider binaries that
+      # `terraform init` reuses without any download or signature check; keep it outside.
+      - name: Keep the Terraform plugin cache outside the checkout
+        working-directory: .
+        run: echo "TF_PLUGIN_CACHE_DIR=$RUNNER_TEMP/terraform-plugin-cache" >> "$GITHUB_ENV"
 
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
@@ -285,6 +290,7 @@ jobs:
       - id: init
         name: terraform init (local backend)
         run: |
+          rm -rf .terraform
           mkdir -p "$TF_PLUGIN_CACHE_DIR"
           terraform init -input=false -lockfile=readonly -no-color
 

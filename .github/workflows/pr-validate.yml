@@ -163,7 +163,6 @@ jobs:
       AWS_ENDPOINT_URL: http://localhost:4566
       STACK_ID: ${{ matrix.stack.id }}
       STACK_PATH: ${{ matrix.stack.path }}
-      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform.d/plugin-cache
       TFLINT_PLUGIN_DIR: ${{ github.workspace }}/.tflint.d/plugins
       # Steps run inside the stack root; keep `python -m tools.stack_pipeline` importable.
       PYTHONPATH: ${{ github.workspace }}
@@ -177,6 +176,12 @@ jobs:
           # Full history: module pins are checked against origin/main.
           fetch-depth: 0
           persist-credentials: false
+
+      # A plugin cache inside the checkout would let the PR commit provider binaries that
+      # `terraform init` reuses without any download or signature check; keep it outside.
+      - name: Keep the Terraform plugin cache outside the checkout
+        working-directory: .
+        run: echo "TF_PLUGIN_CACHE_DIR=$RUNNER_TEMP/terraform-plugin-cache" >> "$GITHUB_ENV"
 
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
@@ -229,9 +234,18 @@ jobs:
       # `terraform plan` runs code: data "external" starts a program, data "http" calls out,
       # and a provider is a binary. The stack root is written by the PR, so before init and
       # plan its HCL is checked statically with the BASE commit's tools: only module calls
-      # pinned to platform releases, allow-listed providers and the local or s3 backend. No
-      # PR-authored program then runs on the runner that holds the plan, the tools and the
-      # policy (the OPA forbidden.* rules only see these constructs after plan time).
+      # pinned to platform releases, allow-listed providers and the local or s3 backend. The
+      # root may hold only the files the generator writes (no .terraform directory of provider
+      # binaries), and its lock file may carry only provider versions and hashes the base
+      # commit already has. No PR-authored program then runs on the runner that holds the
+      # plan, the tools and the policy (the OPA forbidden.* rules only see these constructs
+      # after plan time).
+      #
+      # The guard that runs is the base commit's, from a separate checkout, under `python -I`
+      # (no PYTHONPATH, no working directory on sys.path), so nothing in the PR's tree can
+      # shadow it. If the base has the guard and it fails or errors, the step fails: there is
+      # no fallback. Only the one change that introduces the guard has no base copy to run,
+      # and uses its own; delete that branch once this has merged.
       - id: guard
         name: Check the stack root for plan-time code
         working-directory: .
@@ -239,15 +253,14 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           git worktree add --detach "$RUNNER_TEMP/base" "$BASE_SHA"
-          tools_root="$RUNNER_TEMP/base"
-          help_text="$(cd "$tools_root" && python -m tools.stack_pipeline check-stack --help 2>&1 || true)"
-          if ! grep -q 'check-stack \[-h\]' <<<"$help_text"; then
-            # Only the change that introduces the check: the target branch has none yet.
-            echo "::notice title=Base commit has no stack check::using this PR's copy of the check for this run"
+          if git cat-file -e "$BASE_SHA:tools/stack_pipeline/stack_guard.py"; then
+            tools_root="$RUNNER_TEMP/base"
+          else
+            echo "::notice title=Base commit has no stack check::the change that introduces the check runs its own copy"
             tools_root="$GITHUB_WORKSPACE"
           fi
-          cd "$tools_root"
-          PYTHONPATH="$tools_root" python -m tools.stack_pipeline check-stack "$GITHUB_WORKSPACE/$STACK_PATH"
+          python -I -c 'import sys; sys.path.insert(0, sys.argv[1]); from tools.stack_pipeline.cli import main; sys.exit(main(sys.argv[2:]))' \
+            "$tools_root" check-stack "$GITHUB_WORKSPACE/$STACK_PATH" --lock-from "$RUNNER_TEMP/base"
 
       - id: fmt
         name: terraform fmt
@@ -267,6 +280,8 @@ jobs:
       - id: init
         name: terraform init (local backend)
         run: |
+          # Nothing a PR committed may be reused: no leftover providers or modules.
+          rm -rf .terraform
           mkdir -p "$TF_PLUGIN_CACHE_DIR"
           terraform init -input=false -lockfile=readonly -no-color
 
