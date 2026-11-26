@@ -24,6 +24,20 @@ type Principal struct {
 	UserID uuid.UUID // users.id; uuid.Nil for non-user callers
 	Login  string    // GitHub login, or workflow ref for Actions callers
 	Type   ActorType
+	// Workflow is set when the caller proved a GitHub Actions OIDC identity. Callers
+	// using the shared internal token have none.
+	Workflow *Workflow
+}
+
+// Workflow is the verified GitHub Actions run behind an OIDC token.
+type Workflow struct {
+	Repository     string // owner/name
+	Ref            string // refs/heads/main, refs/pull/812/merge
+	JobWorkflowRef string // owner/name/.github/workflows/apply.yml@refs/heads/main
+	SHA            string
+	EventName      string
+	RunID          int64
+	RunAttempt     int
 }
 
 // AuditActorID is the actor_id recorded in audit events.
