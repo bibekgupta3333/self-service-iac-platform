@@ -226,6 +226,29 @@ jobs:
           path: ${{ env.TFLINT_PLUGIN_DIR }}
           key: tflint-${{ runner.os }}-${{ env.TFLINT_VERSION }}-${{ hashFiles('.tflint.hcl') }}
 
+      # `terraform plan` runs code: data "external" starts a program, data "http" calls out,
+      # and a provider is a binary. The stack root is written by the PR, so before init and
+      # plan its HCL is checked statically with the BASE commit's tools: only module calls
+      # pinned to platform releases, allow-listed providers and the local or s3 backend. No
+      # PR-authored program then runs on the runner that holds the plan, the tools and the
+      # policy (the OPA forbidden.* rules only see these constructs after plan time).
+      - id: guard
+        name: Check the stack root for plan-time code
+        working-directory: .
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/base" "$BASE_SHA"
+          tools_root="$RUNNER_TEMP/base"
+          help_text="$(cd "$tools_root" && python -m tools.stack_pipeline check-stack --help 2>&1 || true)"
+          if ! grep -q 'check-stack \[-h\]' <<<"$help_text"; then
+            # Only the change that introduces the check: the target branch has none yet.
+            echo "::notice title=Base commit has no stack check::using this PR's copy of the check for this run"
+            tools_root="$GITHUB_WORKSPACE"
+          fi
+          cd "$tools_root"
+          PYTHONPATH="$tools_root" python -m tools.stack_pipeline check-stack "$GITHUB_WORKSPACE/$STACK_PATH"
+
       - id: fmt
         name: terraform fmt
         run: terraform fmt -check -recursive -diff
@@ -561,20 +584,32 @@ jobs:
           retention-days: 7
 
   # Budget gate (WBS 8.5, policies/opa/budget.rego): denies a stack whose estimated monthly
-  # cost would push the team's month over a hard budget. It is the only place the estimate
-  # meets the policy, and it is built so a pull request cannot move that number:
+  # cost, added to what the team has already committed, would push the month over a hard
+  # budget. It is the only place the estimate meets the policy. What it does and does not
+  # guarantee (docs/07 section 6.7):
   #
   # - It checks out the BASE commit (the target branch), so the policy, `tools/` and the
   #   context builder it runs are main's, whatever this PR changes in them. (The workflow
   #   file itself is the PR's; .github/, policies/ and tools/ are platform-owned in
   #   CODEOWNERS, the same boundary every gate in this workflow relies on.)
-  # - The estimate is read only from the `cost-<id>` artifact: the output of the pinned
-  #   Infracost binary in the isolated `cost` job, the only job holding INFRACOST_API_KEY.
-  #   This job never sees that key, and nothing from the PR's tree (iacp.stack.json,
-  #   summary.json, the stack directory) is read: identity is the detected stack path.
+  # - The estimate is read only from the `cost-<id>` artifact of THIS run, and only when the
+  #   cost job succeeded: the output of the pinned Infracost binary in the isolated `cost`
+  #   job, the only job holding INFRACOST_API_KEY. This job never sees that key, and nothing
+  #   from the PR's tree (iacp.stack.json, summary.json, the stack directory) is read:
+  #   identity is the detected stack path.
+  # - The plan Infracost prices still comes from the validate job, which runs `terraform plan`
+  #   on the PR's stack root. The "Check the stack root for plan-time code" step there (base
+  #   commit tools) refuses everything that could run a program at plan time (data
+  #   "external"/"http", provisioners, resources, other providers, local or third-party
+  #   modules), so the plan is what Terraform makes of platform modules. The residual risk is
+  #   a change to .github/, tools/ or policies/ (platform review, CODEOWNERS) and a hole in
+  #   that check; the pre-apply gate that re-evaluates policy from main (WBS 8.8) is the
+  #   backstop, and until it exists this gate is a strong early check, not the last word.
   # - The budget and any override come from the Platform API (OIDC), never from the PR.
   # - A missing estimate is not a pass: with a budget set it is denied in staging and
-  #   production (a warning in development), see budget.rego.
+  #   production (a warning in development), see budget.rego. With Infracost disabled
+  #   (vars.INFRACOST_ENABLED not "true") that means every staging and production change of
+  #   a team with a budget is denied: enable Infracost before setting such budgets.
   #
   # With no budget configured (the local-first default, ADR-0009: vars.IACP_API_URL is
   # empty) nothing is enforced and the job only reports. The PR's plan is evaluated as
@@ -637,8 +672,10 @@ jobs:
             echo "ready=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Only a cost job that succeeded in this run may supply the estimate; otherwise there is
+      # none, and budget.rego treats that as missing (denied in staging and production).
       - name: Download the estimate (isolated cost job)
-        if: steps.ready.outputs.ready == 'true'
+        if: steps.ready.outputs.ready == 'true' && needs.cost.result == 'success'
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -646,7 +683,7 @@ jobs:
           path: ${{ runner.temp }}/cost
 
       - name: Download the plan the estimate was computed from
-        if: steps.ready.outputs.ready == 'true'
+        if: steps.ready.outputs.ready == 'true' && needs.cost.result == 'success'
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
