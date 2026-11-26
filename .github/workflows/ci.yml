@@ -509,7 +509,7 @@ jobs:
             echo "::group::terraform test $name on its provider floors"
             if python -m tools.provider_floor stage "$dir" "$stage" \
                 && terraform -chdir="$stage" init -backend=false -input=false -upgrade >/dev/null \
-                && terraform -chdir="$stage" providers | grep 'provider\[' \
+                && python -m tools.provider_floor verify "$stage" \
                 && terraform -chdir="$stage" test; then
               :
             else

@@ -113,10 +113,14 @@ module-test-floor: ## Offline terraform test suites on the minimum provider vers
 	mkdir -p "$$TF_PLUGIN_CACHE_DIR"; stage=$$(mktemp -d); trap 'rm -rf "$$stage"' EXIT; \
 	for m in $(MODULES); do \
 	  name=$$(basename $$m); \
-	  grep -q '^mock_provider "aws"' $$m/tests/*.tftest.hcl 2>/dev/null || continue; \
+	  files=($$m/tests/*.tftest.hcl); \
+	  [ -e "$${files[0]}" ] || continue; \
+	  offline=1; for f in "$${files[@]}"; do grep -q '^mock_provider "aws"' "$$f" || offline=0; done; \
+	  [ $$offline = 1 ] || continue; \
 	  echo "==> test $$name on its provider floors"; \
 	  $(PYTHON) -m tools.provider_floor stage $$m "$$stage/$$name" \
 	    && terraform -chdir="$$stage/$$name" init -backend=false -input=false -upgrade >/dev/null \
+	    && $(PYTHON) -m tools.provider_floor verify "$$stage/$$name" \
 	    && terraform -chdir="$$stage/$$name" test || exit 1; \
 	done
 
