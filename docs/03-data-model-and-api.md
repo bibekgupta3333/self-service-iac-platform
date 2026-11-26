@@ -134,7 +134,7 @@ CREATE TABLE module_versions (
     tf_version_range  text        NOT NULL,              -- ">= 1.10, < 2.0"
     aws_provider_range text       NOT NULL,              -- "~> 5.80"
     changelog_md      text,
-    upgrade_notes     text,                              -- migration notes (migration 0015); NULL: read from changelog_md
+    upgrade_notes     text,                              -- migration notes (migration 0016); NULL: read from changelog_md
     status            module_status NOT NULL DEFAULT 'active',
     deprecation_note  text,
     released_by       text        NOT NULL,              -- github login of tagger
@@ -711,7 +711,7 @@ RBAC column uses team roles (see [07-security-and-policy.md](07-security-and-pol
 }
 ```
 
-The logic is pure (`catalog.BuildUpgradePath`): steps are the usable (not yanked), released versions after `from` up to and including `to` (a pre-release only when it is `to`); each step's `change` is its SemVer class relative to the previous step. `from` must be a version in the catalog, a yanked one too. `next` is the newest step at most one major above `from`, because one upgrade request crosses at most one major. `upgrade_notes` falls back to the `### Migration` subsection of `changelog_md` for versions indexed before migration 0015. Errors: `400` without `from`, `422 validation_failed` for a malformed `from`/`to`, `404` for an unknown module or version, `422 module_version_unavailable` for a yanked `to`, `422 not_an_upgrade` for a `to` older than `from`.
+The logic is pure (`catalog.BuildUpgradePath`): steps are the usable (not yanked), released versions after `from` up to and including `to` (a pre-release only when it is `to`); each step's `change` is its SemVer class relative to the previous step. `from` must be a version in the catalog, a yanked one too. `next` is the newest step at most one major above `from`, because one upgrade request crosses at most one major. `upgrade_notes` falls back to the `### Migration` subsection of `changelog_md` for versions indexed before migration 0016. Errors: `400` without `from`, `422 validation_failed` for a malformed `from`/`to`, `404` for an unknown module or version, `422 module_version_unavailable` for a yanked `to`, `422 not_an_upgrade` for a `to` older than `from`.
 
 ### 6.3 Stacks
 

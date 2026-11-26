@@ -82,7 +82,7 @@ together apply each migration once.
 | `0009_sessions.sql` | `sessions` (hashed opaque session ids, absolute and idle expiry, revocation) |
 | `0010_outbox_purge.sql` | `purge_processed_outbox(cutoff, max_rows)`, a `SECURITY DEFINER` function that deletes only processed outbox rows; `iacp_app` gets `EXECUTE` on it and still no `DELETE` on `outbox` |
 | `0011_stack_health.sql` | `stacks.health` (`unknown`, `healthy`, `degraded`), set from the post-apply smoke test |
-| `0015_module_upgrade_notes.sql` | `module_versions.upgrade_notes` (migration notes sent by `module-release`; NULL for older versions, which fall back to the `### Migration` subsection of `changelog_md`) |
+| `0016_module_upgrade_notes.sql` | `module_versions.upgrade_notes` (migration notes sent by `module-release`; NULL for older versions, which fall back to the `### Migration` subsection of `changelog_md`) |
 
 ### Database roles
 
