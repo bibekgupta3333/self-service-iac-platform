@@ -15,12 +15,12 @@ func TestLoadTTL(t *testing.T) {
 	}
 
 	c, err := load(nil)
-	if err != nil || c.TTL != (TTLConfig{MinHours: 1, MaxHours: 720, DefaultHours: 72, MaxExtensionHours: 168}) {
+	if err != nil || c.TTL != (TTLConfig{MinHours: 1, MaxHours: 720, DefaultHours: 72, MaxExtensionHours: 168, BackoffHours: 24, MaxAttempts: 3}) {
 		t.Fatalf("defaults: %+v, %v", c.TTL, err)
 	}
 	c, err = load(map[string]string{"IACP_TTL_MIN_HOURS": "2", "IACP_TTL_MAX_HOURS": "48",
-		"IACP_TTL_DEFAULT_HOURS": "12", "IACP_TTL_MAX_EXTENSION_HOURS": "24"})
-	want := TTLConfig{MinHours: 2, MaxHours: 48, DefaultHours: 12, MaxExtensionHours: 24}
+		"IACP_TTL_DEFAULT_HOURS": "12", "IACP_TTL_MAX_EXTENSION_HOURS": "24", "IACP_TTL_RETRY_BACKOFF_HOURS": "6", "IACP_TTL_MAX_ATTEMPTS": "2"})
+	want := TTLConfig{MinHours: 2, MaxHours: 48, DefaultHours: 12, MaxExtensionHours: 24, BackoffHours: 6, MaxAttempts: 2}
 	if err != nil || c.TTL != want {
 		t.Fatalf("overrides: %+v, %v", c.TTL, err)
 	}
@@ -30,6 +30,8 @@ func TestLoadTTL(t *testing.T) {
 		"default above max": {"IACP_TTL_MAX_HOURS": "24", "IACP_TTL_DEFAULT_HOURS": "48"},
 		"max below min":     {"IACP_TTL_MIN_HOURS": "10", "IACP_TTL_MAX_HOURS": "5", "IACP_TTL_DEFAULT_HOURS": "10"},
 		"zero minimum":      {"IACP_TTL_MIN_HOURS": "0"},
+		"above the ceiling": {"IACP_TTL_MAX_HOURS": "8761"},
+		"negative attempts": {"IACP_TTL_MAX_ATTEMPTS": "-1"},
 	} {
 		if _, err := load(env); err == nil || !strings.Contains(err.Error(), "IACP_TTL") {
 			t.Errorf("%s: want a TTL configuration error, got %v", name, err)
