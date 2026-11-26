@@ -101,7 +101,7 @@ func run() error {
 	retrier := recovery.NewRetrier(recoveryRepo, clock, ids)
 	if pub != nil {
 		// Transient apply failures are retried by dispatching apply.yml again (docs/06 §5).
-		handlers[recovery.TopicApplyRetry] = recovery.NewDispatcher(recoveryRepo, pub, clock, cfg.Publisher.BaseBranch)
+		handlers[recovery.TopicApplyRetry] = recovery.NewDispatcher(recoveryRepo, pub, lockSvc, clock, cfg.Publisher.BaseBranch)
 	} else {
 		retrier.DisableRetries() // nothing could dispatch a retry: classify and record only
 	}

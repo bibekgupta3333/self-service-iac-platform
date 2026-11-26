@@ -129,6 +129,13 @@ func (s *pgStore) CurrentLock(ctx context.Context, stackID uuid.UUID) (*locks.Lo
 	return locks.NewTxStore(s.tx, s.audit).Current(ctx, stackID)
 }
 
+func (s *pgStore) HasWaiters(ctx context.Context, stackID uuid.UUID) (bool, error) {
+	w, err := locks.NewTxStore(s.tx, s.audit).Waiters(ctx, stackID)
+	return len(w) > 0, err
+}
+
+func (s *pgStore) LockStore() locks.Store { return locks.NewTxStore(s.tx, s.audit) }
+
 func (s *pgStore) InsertFailure(ctx context.Context, f FailureRecord) (bool, error) {
 	var (
 		retry *int

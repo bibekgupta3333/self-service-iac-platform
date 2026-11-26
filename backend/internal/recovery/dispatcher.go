@@ -34,19 +34,30 @@ const (
 // claimed (scheduled → dispatching) in a transaction before GitHub is called, a failure
 // is recorded as dispatch_failed and the job ends as dead (outbox.ErrPermanent), and a job
 // that runs again after a crash finds the row already claimed and does nothing.
+//
+// apply.yml releases the stack lock when a run ends, and its next run only applies for the
+// request that holds the lock (GET /v1/internal/requests/by-path). So before dispatching,
+// the Dispatcher takes the lock back for the request when it is free and nobody waits for
+// it; a lock held by, or promised to, another request skips the retry (lock_lost).
 type Dispatcher struct {
-	repo  RetryRepository
-	pub   publish.Publisher
-	clock platform.Clock
-	ref   string // branch the workflow runs on (main)
+	repo   RetryRepository
+	pub    publish.Publisher
+	locker Relocker
+	clock  platform.Clock
+	ref    string // branch the workflow runs on (main)
+}
+
+// Relocker grants the stack lock inside a transaction (locks.Service).
+type Relocker interface {
+	AcquireIn(ctx context.Context, st locks.Store, cmd locks.AcquireCommand) (locks.Result, error)
 }
 
 // NewDispatcher returns a Dispatcher dispatching on ref (the publish base branch, main).
-func NewDispatcher(repo RetryRepository, pub publish.Publisher, clock platform.Clock, ref string) *Dispatcher {
+func NewDispatcher(repo RetryRepository, pub publish.Publisher, locker Relocker, clock platform.Clock, ref string) *Dispatcher {
 	if ref == "" {
 		ref = "main"
 	}
-	return &Dispatcher{repo: repo, pub: pub, clock: clock, ref: ref}
+	return &Dispatcher{repo: repo, pub: pub, locker: locker, clock: clock, ref: ref}
 }
 
 var _ outbox.Handler = (*Dispatcher)(nil)
@@ -127,7 +138,7 @@ func (d *Dispatcher) claim(ctx context.Context, p RetryPayload, correlationID st
 		if err != nil {
 			return fmt.Errorf("read stack lock: %w", err)
 		}
-		if reason := SkipReason(t, p.RetryNumber, lock); reason != "" {
+		skip := func(reason string) error {
 			if err := st.FinishDispatch(ctx, t.ID, p.RetryNumber, DispatchSkipped, reason, now); err != nil {
 				return err
 			}
@@ -135,6 +146,26 @@ func (d *Dispatcher) claim(ctx context.Context, p RetryPayload, correlationID st
 				"short_id": t.ShortID, "retry_number": p.RetryNumber, "reason": reason, "status": t.Status,
 				"retry_count": t.RetryCount,
 			})
+		}
+		if reason := SkipReason(t, p.RetryNumber, lock); reason != "" {
+			return skip(reason)
+		}
+		if lock == nil {
+			waiting, err := st.HasWaiters(ctx, t.StackID)
+			if err != nil {
+				return fmt.Errorf("read lock queue: %w", err)
+			}
+			if waiting {
+				return skip(DecisionLockLost) // the next request in the queue goes first
+			}
+			res, err := d.locker.AcquireIn(ctx, st.LockStore(), locks.AcquireCommand{StackID: t.StackID, RequestID: t.ID,
+				By: recoveryPrincipal, CorrelationID: correlationID})
+			if err != nil {
+				return fmt.Errorf("take the stack lock back: %w", err)
+			}
+			if res.Outcome == locks.OutcomeQueued {
+				return fmt.Errorf("stack lock of %s was not granted back: %w", t.ShortID, outbox.ErrPermanent)
+			}
 		}
 		claimed = true
 		return nil

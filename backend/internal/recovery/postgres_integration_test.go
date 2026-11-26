@@ -102,7 +102,12 @@ func TestPostgresRetryLifecycle(t *testing.T) {
 	}
 
 	pub := &fakePublisher{}
-	d := NewDispatcher(repo, pub, clock, "main")
+	lockSvc := locks.NewService(locks.NewPostgresRepository(pool, w), platform.SystemClock{}, time.Hour)
+	// apply.yml released the lock when the failed run ended.
+	if _, err := pool.Exec(ctx, `DELETE FROM locks WHERE request_id = $1`, reqID); err != nil {
+		t.Fatal(err)
+	}
+	d := NewDispatcher(repo, pub, lockSvc, clock, "main")
 	job := outbox.Job{ID: jobID, Topic: TopicApplyRetry, Payload: payload, Attempts: 1, MaxAttempts: 6}
 	if err := d.Handle(ctx, job); err != nil {
 		t.Fatal(err)
@@ -112,6 +117,12 @@ func TestPostgresRetryLifecycle(t *testing.T) {
 	}
 	if len(pub.dispatches) != 1 || pub.dispatches[0].Inputs["request_id"] != reqID.String() {
 		t.Fatalf("dispatches %+v", pub.dispatches)
+	}
+	// The free lock was taken back for the request, with a new fencing token.
+	var newToken int64
+	mustScan(t, pool.QueryRow(ctx, `SELECT fencing_token FROM locks WHERE request_id = $1`, reqID).Scan(&newToken))
+	if newToken <= token {
+		t.Fatalf("token %d after relock, was %d", newToken, token)
 	}
 	var dispatchedAt *time.Time
 	mustScan(t, pool.QueryRow(ctx, `SELECT dispatch_state, dispatched_at FROM apply_failures WHERE request_id = $1`, reqID).Scan(&state, &dispatchedAt))
@@ -123,6 +134,7 @@ func TestPostgresRetryLifecycle(t *testing.T) {
 	for i, want := range []string{DecisionRetryScheduled, DecisionBudgetExhausted} {
 		f := failure
 		f.Run.RunID = int64(9002 + i)
+		f.FencingToken = &newToken // the retried run reports with the lock it claimed
 		got, err := retrier.OnApplyFailure(ctx, f)
 		if err != nil || got.Decision != want {
 			t.Fatalf("failure %d: %+v, %v", i+2, got, err)
@@ -166,7 +178,8 @@ func TestPostgresDispatchFailureIsRecordedAndFinal(t *testing.T) {
 	var payload json.RawMessage
 	mustScan(t, pool.QueryRow(ctx, `SELECT payload FROM outbox WHERE topic = $1`, TopicApplyRetry).Scan(&payload))
 	pub := &fakePublisher{err: errors.New("github is down")}
-	err := NewDispatcher(repo, pub, clock, "main").Handle(ctx, outbox.Job{ID: 1, Payload: payload, Attempts: 1, MaxAttempts: 6})
+	err := NewDispatcher(repo, pub, locks.NewService(locks.NewPostgresRepository(pool, audit.NewWriter(platform.SystemClock{}, platform.RandomIDs{})),
+		platform.SystemClock{}, time.Hour), clock, "main").Handle(ctx, outbox.Job{ID: 1, Payload: payload, Attempts: 1, MaxAttempts: 6})
 	if !errors.Is(err, outbox.ErrPermanent) {
 		t.Fatalf("err %v", err)
 	}

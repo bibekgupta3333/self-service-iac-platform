@@ -82,6 +82,10 @@ type RetryStore interface {
 	TargetByID(ctx context.Context, id uuid.UUID) (Target, error)
 	// CurrentLock is the stack's lock row (nil when unlocked).
 	CurrentLock(ctx context.Context, stackID uuid.UUID) (*locks.Lock, error)
+	// HasWaiters reports whether requests are queued for the stack's lock.
+	HasWaiters(ctx context.Context, stackID uuid.UUID) (bool, error)
+	// LockStore is the stack-lock store bound to the same transaction.
+	LockStore() locks.Store
 	// InsertFailure records a classified failure; false when the run was already recorded.
 	InsertFailure(ctx context.Context, f FailureRecord) (bool, error)
 	// IncrementRetry moves retry_count from → from+1 on a request that is still applying

@@ -25,6 +25,7 @@ import (
 type memStore struct {
 	target   Target
 	lock     *locks.Lock
+	waiting  bool
 	failures map[string]FailureRecord // key: run id/attempt
 	retries  map[int]string           // retry number -> dispatch state
 	jobs     []outbox.Message
@@ -74,6 +75,22 @@ func (m *memStore) TargetByID(_ context.Context, id uuid.UUID) (Target, error) {
 }
 
 func (m *memStore) CurrentLock(context.Context, uuid.UUID) (*locks.Lock, error) { return m.lock, nil }
+func (m *memStore) HasWaiters(context.Context, uuid.UUID) (bool, error)         { return m.waiting, nil }
+func (m *memStore) LockStore() locks.Store                                      { return nil }
+
+// fakeLocker grants (or queues) the lock without a store.
+type fakeLocker struct {
+	calls   []locks.AcquireCommand
+	outcome locks.Outcome
+}
+
+func (f *fakeLocker) AcquireIn(_ context.Context, _ locks.Store, cmd locks.AcquireCommand) (locks.Result, error) {
+	f.calls = append(f.calls, cmd)
+	if f.outcome == "" {
+		f.outcome = locks.OutcomeGranted
+	}
+	return locks.Result{Outcome: f.outcome}, nil
+}
 
 func runKey(r RunRef) string { return fmt.Sprintf("%d/%d", r.RunID, r.Attempt) }
 
@@ -329,7 +346,8 @@ func scheduled(t *testing.T) (*memRepo, Target, outbox.Job) {
 func TestDispatcherDispatchesOnce(t *testing.T) {
 	repo, tgt, job := scheduled(t)
 	pub := &fakePublisher{}
-	d := NewDispatcher(repo, pub, platform.FixedClock{T: now.Add(2 * time.Minute)}, "main")
+	locker := &fakeLocker{}
+	d := NewDispatcher(repo, pub, locker, platform.FixedClock{T: now.Add(2 * time.Minute)}, "main")
 	if err := d.Handle(context.Background(), job); err != nil {
 		t.Fatal(err)
 	}
@@ -344,6 +362,10 @@ func TestDispatcherDispatchesOnce(t *testing.T) {
 	if repo.s.retries[1] != DispatchDispatched {
 		t.Fatalf("state %s", repo.s.retries[1])
 	}
+	// The lock was free (apply.yml released it), so it was taken back for the request.
+	if len(locker.calls) != 1 || locker.calls[0].RequestID != tgt.ID || locker.calls[0].StackID != tgt.StackID {
+		t.Fatalf("relock calls %+v", locker.calls)
+	}
 	if a := repo.s.actions(); a[len(a)-1] != "request.apply_retry_dispatched" {
 		t.Fatalf("audit %v", a)
 	}
@@ -356,7 +378,7 @@ func TestDispatcherDispatchesOnce(t *testing.T) {
 func TestDispatcherNeverRetriesAFailedDispatch(t *testing.T) {
 	repo, _, job := scheduled(t)
 	pub := &fakePublisher{err: errors.New("github: 502 bad gateway")}
-	d := NewDispatcher(repo, pub, platform.FixedClock{T: now}, "main")
+	d := NewDispatcher(repo, pub, &fakeLocker{}, platform.FixedClock{T: now}, "main")
 	err := d.Handle(context.Background(), job)
 	if !errors.Is(err, outbox.ErrPermanent) {
 		t.Fatalf("a failed dispatch must end the job: %v", err)
@@ -381,13 +403,14 @@ func TestDispatcherSkipsWhenTheRequestMovedOn(t *testing.T) {
 		{"request failed", func(m *memStore) { m.target.Status = requests.StatusFailed }, DecisionRequestNotApplying},
 		{"lock taken", func(m *memStore) { m.lock = &locks.Lock{RequestID: uuid.New()} }, DecisionLockLost},
 		{"superseded", func(m *memStore) { m.target.RetryCount = 2 }, "superseded"},
+		{"another request waits for the free lock", func(m *memStore) { m.waiting = true }, DecisionLockLost},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			repo, _, job := scheduled(t)
 			tc.mutate(repo.s)
 			pub := &fakePublisher{}
-			if err := NewDispatcher(repo, pub, platform.FixedClock{T: now}, "").Handle(context.Background(), job); err != nil {
+			if err := NewDispatcher(repo, pub, &fakeLocker{}, platform.FixedClock{T: now}, "").Handle(context.Background(), job); err != nil {
 				t.Fatal(err)
 			}
 			if len(pub.dispatches) != 0 || repo.s.retries[1] != DispatchSkipped {
@@ -404,7 +427,7 @@ func TestDispatcherSkipsWhenTheRequestMovedOn(t *testing.T) {
 }
 
 func TestDispatcherRejectsBadJobs(t *testing.T) {
-	d := NewDispatcher(&memRepo{s: newMem(applyingTarget())}, &fakePublisher{}, platform.FixedClock{T: now}, "main")
+	d := NewDispatcher(&memRepo{s: newMem(applyingTarget())}, &fakePublisher{}, &fakeLocker{}, platform.FixedClock{T: now}, "main")
 	for _, payload := range []string{`{`, `{"request_id":"00000000-0000-0000-0000-000000000000","retry_number":1}`,
 		`{"request_id":"` + uuid.NewString() + `","retry_number":0}`} {
 		if err := d.Handle(context.Background(), outbox.Job{ID: 1, Payload: json.RawMessage(payload)}); !errors.Is(err, outbox.ErrPermanent) {
