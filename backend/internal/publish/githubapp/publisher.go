@@ -57,26 +57,58 @@ func TreeEntries(blobs map[string]string, deletes []string) []TreeEntry {
 	return out
 }
 
-// existingFiles lists the blob paths of a tree (recursively). A truncated listing is an
-// error: deleting stale files from a partial list could miss some.
-func (c *Client) existingFiles(ctx context.Context, treeSHA string) ([]string, error) {
-	var tree struct {
-		Tree []struct {
-			Path string `json:"path"`
-			Type string `json:"type"`
-		} `json:"tree"`
-		Truncated bool `json:"truncated"`
+type treeListing struct {
+	Tree []struct {
+		Path string `json:"path"`
+		Type string `json:"type"`
+		SHA  string `json:"sha"`
+	} `json:"tree"`
+	Truncated bool `json:"truncated"`
+}
+
+func (c *Client) listTree(ctx context.Context, sha string, recursive bool) (treeListing, error) {
+	var t treeListing
+	path := "/git/trees/" + url.PathEscape(sha)
+	if recursive {
+		path += "?recursive=1"
 	}
-	if err := c.do(ctx, http.MethodGet, c.repoPath("/git/trees/"+url.PathEscape(treeSHA)+"?recursive=1"), nil, &tree, authInstallation); err != nil {
-		return nil, fmt.Errorf("list base tree: %w", err)
+	err := c.do(ctx, http.MethodGet, c.repoPath(path), nil, &t, authInstallation)
+	return t, err
+}
+
+// existingFiles lists the blob paths under root on the base tree. It walks down to the
+// root's subtree one level at a time and lists only that subtree recursively, so the
+// size of the rest of the monorepo does not matter. A truncated listing is an error:
+// deleting stale files from a partial list could miss some.
+func (c *Client) existingFiles(ctx context.Context, baseTree, root string) ([]string, error) {
+	sha := baseTree
+	for _, seg := range strings.Split(root, "/") {
+		level, err := c.listTree(ctx, sha, false)
+		if err != nil {
+			return nil, fmt.Errorf("list tree for %s: %w", root, err)
+		}
+		next := ""
+		for _, e := range level.Tree {
+			if e.Path == seg && e.Type == "tree" {
+				next = e.SHA
+			}
+		}
+		if next == "" {
+			return nil, nil // the root does not exist on the base branch yet
+		}
+		sha = next
 	}
-	if tree.Truncated {
-		return nil, errors.New("list base tree: GitHub truncated the recursive listing")
+	sub, err := c.listTree(ctx, sha, true)
+	if err != nil {
+		return nil, fmt.Errorf("list %s: %w", root, err)
+	}
+	if sub.Truncated {
+		return nil, fmt.Errorf("list %s: GitHub truncated the recursive listing", root)
 	}
 	var out []string
-	for _, e := range tree.Tree {
+	for _, e := range sub.Tree {
 		if e.Type == "blob" {
-			out = append(out, e.Path)
+			out = append(out, root+"/"+e.Path)
 		}
 	}
 	return out, nil
@@ -116,7 +148,7 @@ func (c *Client) CommitFiles(ctx context.Context, cm publish.Commit) (publish.Co
 
 	var deletes []string
 	if cm.Root != "" {
-		existing, err := c.existingFiles(ctx, base.Tree.SHA)
+		existing, err := c.existingFiles(ctx, base.Tree.SHA, cm.Root)
 		if err != nil {
 			return publish.CommitRef{}, err
 		}

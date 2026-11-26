@@ -137,18 +137,27 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		reply(http.StatusOK, map[string]any{"object": map[string]string{"sha": sha}})
-	case r.Method == http.MethodGet && p == "/git/trees/basetree":
-		if r.URL.Query().Get("recursive") != "1" {
-			reply(http.StatusBadRequest, map[string]string{"message": "recursive listing expected"})
+	case r.Method == http.MethodGet && strings.HasPrefix(p, "/git/trees/"):
+		// A small base tree: README.md and environments/development/payments/{orders,orders-v2}.
+		sha := strings.TrimPrefix(p, "/git/trees/")
+		listing := map[string][]map[string]string{
+			"basetree": {{"path": "README.md", "type": "blob", "sha": "b-readme"}, {"path": "environments", "type": "tree", "sha": "t-env"}},
+			"t-env":    {{"path": "development", "type": "tree", "sha": "t-dev"}},
+			"t-dev":    {{"path": "payments", "type": "tree", "sha": "t-pay"}},
+			"t-pay":    {{"path": "orders", "type": "tree", "sha": "t-orders"}, {"path": "orders-v2", "type": "tree", "sha": "t-v2"}},
+			"t-orders": {{"path": "main.tf", "type": "blob"}, {"path": "old.tf", "type": "blob"}, {"path": ".terraform.lock.hcl", "type": "blob"},
+				{"path": "modules", "type": "tree"}, {"path": "modules/stale.tf", "type": "blob"}},
+			"t-v2": {{"path": "main.tf", "type": "blob"}},
+		}[sha]
+		if listing == nil {
+			reply(http.StatusNotFound, map[string]string{"message": "Not Found"})
 			return
 		}
-		reply(http.StatusOK, map[string]any{"truncated": false, "tree": []map[string]string{
-			{"path": "README.md", "type": "blob"},
-			{"path": "environments/development/payments/orders", "type": "tree"},
-			{"path": "environments/development/payments/orders/main.tf", "type": "blob"},
-			{"path": "environments/development/payments/orders/old.tf", "type": "blob"},
-			{"path": "environments/development/payments/orders-v2/main.tf", "type": "blob"},
-		}})
+		if sha == "basetree" && r.URL.Query().Get("recursive") != "" {
+			reply(http.StatusBadRequest, map[string]string{"message": "the whole repository must not be listed recursively"})
+			return
+		}
+		reply(http.StatusOK, map[string]any{"truncated": false, "tree": listing})
 	case r.Method == http.MethodGet && strings.HasPrefix(p, "/git/commits/"):
 		reply(http.StatusOK, map[string]any{"tree": map[string]string{"sha": "basetree"}})
 	case r.Method == http.MethodPost && p == "/git/blobs":
@@ -338,9 +347,22 @@ func TestCommitReplacesTheStackRoot(t *testing.T) {
 			deleted = append(deleted, e.Path)
 		}
 	}
-	// Only the stale file under the root goes; README and the sibling orders-v2 stay.
-	if !slices.Equal(deleted, []string{"environments/development/payments/orders/old.tf"}) {
+	// Only stale files under the root go; the committed lock file, README and the sibling
+	// orders-v2 stay.
+	if !slices.Equal(deleted, []string{"environments/development/payments/orders/modules/stale.tf",
+		"environments/development/payments/orders/old.tf"}) {
 		t.Fatalf("deleted = %v", deleted)
+	}
+	// A root that does not exist on the base branch yet deletes nothing.
+	ref, err = c.CommitFiles(context.Background(), publish.Commit{Branch: "iacp/req-newroot1", Message: "m", Root: "environments/staging/x",
+		Files: map[string][]byte{"environments/staging/x/main.tf": []byte("x")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range f.trees[ref.TreeSHA] {
+		if e.SHA == nil {
+			t.Fatalf("unexpected deletion %s", e.Path)
+		}
 	}
 	if _, err := c.CommitFiles(context.Background(), publish.Commit{Branch: "iacp/req-7k3p9x", Files: files, Root: "environments/x"}); !errors.Is(err, publish.ErrInvalidPath) {
 		t.Fatalf("files outside the root: %v", err)
