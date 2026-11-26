@@ -173,3 +173,112 @@ resource "terraform_data" "bootstrap" {
     command = "echo bootstrap"
   }
 }
+
+# iacp.encryption.sns_sse: no server-side encryption.
+resource "aws_sns_topic" "plain" {
+  name = "orders-plain"
+}
+
+# iacp.encryption.sns_kms: the AWS-managed key outside development.
+resource "aws_sns_topic" "aws_managed" {
+  name              = "orders-aws-managed"
+  kms_master_key_id = "alias/aws/sns"
+}
+
+# iacp.encryption.dynamodb_cmk: the AWS owned key (no server_side_encryption
+# block) outside development.
+resource "aws_dynamodb_table" "plain" {
+  name         = "orders-plain"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "pk"
+
+  attribute {
+    name = "pk"
+    type = "S"
+  }
+}
+
+# iacp.encryption.rds_storage and iacp.network.rds_public.
+resource "aws_db_instance" "public_plain" {
+  identifier                  = "orders-public"
+  engine                      = "postgres"
+  instance_class              = "db.t4g.micro"
+  allocated_storage           = 20
+  username                    = "orders"
+  manage_master_user_password = true
+  storage_encrypted           = false
+  publicly_accessible         = true
+  skip_final_snapshot         = true
+}
+
+# iacp.encryption.rds_cmk: encrypted, but with the AWS-managed aws/rds key outside development.
+resource "aws_db_instance" "default_key" {
+  identifier                  = "orders-default-key"
+  engine                      = "postgres"
+  instance_class              = "db.t4g.micro"
+  allocated_storage           = 20
+  username                    = "orders"
+  manage_master_user_password = true
+  storage_encrypted           = true
+  skip_final_snapshot         = true
+}
+
+# iacp.encryption.elasticache_at_rest and iacp.encryption.elasticache_transit.
+resource "aws_elasticache_replication_group" "plain" {
+  replication_group_id       = "orders-plain"
+  description                = "unencrypted cache"
+  engine                     = "redis"
+  node_type                  = "cache.t4g.micro"
+  num_cache_clusters         = 1
+  at_rest_encryption_enabled = false
+  transit_encryption_enabled = false
+}
+
+# iacp.encryption.elasticache_cmk: encrypted with the AWS-managed key outside development.
+resource "aws_elasticache_replication_group" "default_key" {
+  replication_group_id       = "orders-default-key"
+  description                = "cache without a customer-managed key"
+  engine                     = "redis"
+  node_type                  = "cache.t4g.micro"
+  num_cache_clusters         = 1
+  at_rest_encryption_enabled = true
+  transit_encryption_enabled = true
+}
+
+# iacp.ecr.scan_on_push, iacp.ecr.immutable_tags and iacp.encryption.ecr_kms.
+resource "aws_ecr_repository" "loose" {
+  name                 = "orders-loose"
+  image_tag_mutability = "MUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = false
+  }
+}
+
+# iacp.encryption.ecr_kms: KMS without kms_key is the AWS-managed aws/ecr key.
+resource "aws_ecr_repository" "aws_managed_key" {
+  name                 = "orders-aws-managed-key"
+  image_tag_mutability = "IMMUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  encryption_configuration {
+    encryption_type = "KMS"
+  }
+}
+
+# iacp.network.ecs_public_ip.
+resource "aws_ecs_service" "public" {
+  name            = "orders-public"
+  cluster         = "arn:aws:ecs:eu-central-1:000000000000:cluster/orders"
+  task_definition = "orders:1"
+  launch_type     = "FARGATE"
+  desired_count   = 1
+
+  network_configuration {
+    subnets          = ["subnet-0aaaaaaaaaaaaaaa1"]
+    assign_public_ip = true
+  }
+}

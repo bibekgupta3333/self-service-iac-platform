@@ -36,3 +36,35 @@ module "store" {
   name   = "orders"
   secure = true
 }
+
+# A topic and a table encrypted with a customer-managed key created in the
+# same plan (the key ARN is only known after apply).
+resource "aws_kms_key" "data" {
+  description         = "Encrypts the orders topic and table"
+  enable_key_rotation = true
+}
+
+resource "aws_sns_topic" "events" {
+  name              = "orders-events"
+  kms_master_key_id = aws_kms_key.data.arn
+}
+
+resource "aws_dynamodb_table" "orders" {
+  name         = "orders"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "pk"
+
+  attribute {
+    name = "pk"
+    type = "S"
+  }
+
+  point_in_time_recovery {
+    enabled = true
+  }
+
+  server_side_encryption {
+    enabled     = true
+    kms_key_arn = aws_kms_key.data.arn
+  }
+}

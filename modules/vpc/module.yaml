@@ -1,0 +1,141 @@
+apiVersion: iacp.dev/v1
+kind: Module
+metadata:
+  name: vpc
+  version: 1.0.0
+  displayName: VPC
+  description: VPC with public and private subnets across zones, optional NAT, a locked-down default security group and KMS-encrypted flow logs.
+  category: network
+  maturity: beta
+  owners:
+    - "@bibekgupta3333/platform"
+  documentation: https://github.com/bibekgupta3333/self-service-iac-platform/tree/modules/vpc/v1.0.0/modules/vpc
+
+compatibility:
+  terraform: ">= 1.10, < 2.0"
+  providers:
+    hashicorp/aws: ">= 5.60, < 6.0"
+  environments: [development, staging, production]
+
+inputs:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  required: [name]
+  additionalProperties: false
+  properties:
+    name:
+      type: string
+      pattern: "^[a-z][a-z0-9-]{2,40}$"
+      description: Logical VPC name. Final name is <team>-<environment>-<name>.
+      x-iacp-immutable: true
+    cidr_block:
+      type: string
+      pattern: "^(10|172|192)\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}/(1[6-9]|2[0-4])$"
+      default: 10.0.0.0/16
+      description: Private IPv4 network (RFC 1918) from /16 to /24.
+      x-iacp-immutable: true
+      x-iacp-group: Addressing
+    subnet_newbits:
+      type: integer
+      minimum: 2
+      maximum: 8
+      default: 4
+      description: Bits added to the VPC prefix per subnet (a /16 with 4 gives /20 subnets).
+      x-iacp-immutable: true
+      x-iacp-group: Addressing
+    az_count:
+      type: integer
+      minimum: 1
+      maximum: 4
+      default: 2
+      description: Availability zones to spread subnets across. Ignored when availability_zones is set.
+      x-iacp-group: Addressing
+    availability_zones:
+      type: array
+      maxItems: 4
+      uniqueItems: true
+      items: { type: string, pattern: "^[a-z]{2}(-gov)?-[a-z]+-[0-9][a-z]$" }
+      default: []
+      description: Explicit zone names in subnet order. Empty uses the first az_count available zones.
+      x-iacp-group: Addressing
+    enable_nat_gateway:
+      type: [boolean, "null"]
+      default: null
+      description: NAT egress for private subnets. Null turns it off in development and on elsewhere.
+      x-iacp-ui: toggle
+      x-iacp-group: Egress
+    single_nat_gateway:
+      type: [boolean, "null"]
+      default: null
+      description: Share one NAT gateway between zones. Null shares one outside production and uses one per zone in production, where true is rejected.
+      x-iacp-ui: toggle
+      x-iacp-group: Egress
+    flow_log_traffic_type:
+      type: string
+      enum: [ALL, ACCEPT, REJECT]
+      default: ALL
+      description: Traffic recorded by the VPC flow log.
+      x-iacp-ui: select
+      x-iacp-group: Flow logs
+    flow_log_retention_days:
+      type: integer
+      enum: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653]
+      default: 30
+      description: Days CloudWatch keeps flow log records.
+      x-iacp-ui: select
+      x-iacp-group: Flow logs
+    kms_key_arn:
+      type: [string, "null"]
+      default: null
+      pattern: "^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/.+$"
+      description: Existing KMS key ARN for the flow log group. If null, a dedicated key with rotation is created.
+      x-iacp-group: Flow logs
+    permissions_boundary_arn:
+      type: [string, "null"]
+      default: null
+      pattern: "^arn:aws[a-z-]*:iam::[0-9]{12}:policy/[A-Za-z0-9+=,.@_/-]+$"
+      description: Permissions boundary for the flow log role. Null uses the platform's iacp-boundary policy.
+      x-iacp-group: Security
+    tags:
+      type: object
+      additionalProperties: { type: string }
+      propertyNames: { not: { pattern: "^iacp:" } }
+      maxProperties: 30
+      description: Extra tags. The iacp:* prefix is reserved.
+      x-iacp-ui: key-value
+
+outputs:
+  - { name: id, description: VPC ID, wireable: true }
+  - { name: arn, description: VPC ARN, wireable: true }
+  - { name: name, description: Computed VPC name, wireable: false }
+  - { name: vpc_id, description: VPC ID for other modules' vpc_id inputs, wireable: true }
+  - { name: vpc_cidr_block, description: VPC IPv4 CIDR block, wireable: true }
+  - { name: availability_zones, description: Zones used in subnet order, wireable: false }
+  - { name: public_subnet_ids, description: Public subnet IDs in zone order, wireable: true }
+  - { name: private_subnet_ids, description: Private subnet IDs in zone order, wireable: true }
+  - { name: public_route_table_ids, description: Public route table IDs, wireable: true }
+  - { name: private_route_table_ids, description: Private route table IDs in zone order, wireable: true }
+  - { name: nat_gateway_ids, description: NAT gateway IDs (empty when NAT is off), wireable: false }
+  - { name: default_security_group_id, description: Default security group ID (no rules), wireable: false }
+  - { name: flow_log_group_name, description: Flow log CloudWatch log group, wireable: false }
+  - { name: kms_key_arn, description: KMS key ARN of the flow log group, wireable: true }
+  - { name: iacp_metadata, description: Module name and version, wireable: false }
+
+# baseline_monthly_usd is the development default (no NAT): the flow log key and
+# log ingestion. NAT gateways cost about 33 USD a month each plus data processing
+# (us-east-1), so the defaults come to about 34 USD in staging (one shared
+# gateway) and about 67 USD in production with the default two zones (one per
+# zone), or about 100 USD with three.
+cost:
+  baseline_monthly_usd: 1.50
+  drivers:
+    - nat_gateway_hours
+    - nat_data_processed_gb
+    - flow_log_ingestion_gb
+    - kms_requests
+
+upgrade:
+  from: ">= 1.0.0, < 2.0.0"
+  requires_migration: false
+  notes: |
+    Initial release.
