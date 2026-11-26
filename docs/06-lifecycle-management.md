@@ -456,35 +456,16 @@ Enforcement points: API middleware (`authz.Require(team, env, action)`), CODEOWN
 
 **Design.**
 
-- `budgets (team_id, environment_id, month, limit_amount, alert_thresholds={50,80,100}, hard_block=true, override_by)` — see [03-data-model-and-api.md](03-data-model-and-api.md).
-- In `pr-validate.yml`, Infracost produces the monthly delta for the plan; the API supplies `current_committed_usd` (sum of `cost_estimates` for the team's active stacks) via `GET /v1/internal/budget-context`. OPA `budget.rego`:
+- `budgets (team_id, environment_id, month, limit_usd, spent_usd, actual_usd, alert_thresholds={50,80,100}, hard_block=true, override_by, override_reason, override_expires_at)` — see [03-data-model-and-api.md](03-data-model-and-api.md). A team admin sets it with `PUT /v1/teams/{slug}/budgets/{month}` (admin only, validated, audited); an environment row wins over a team-wide row.
+- In `pr-validate.yml` the `cost` job prices each stack's plan with Infracost (the only job with the key). The separate `budget` job turns that output into one number in the conftest context (`estimated_monthly_cost_usd`), fetches the team's budget from `GET /v1/internal/budget-context`, and evaluates `policies/opa/budget.rego`, running the target branch's policy and tools (trust boundary in [07 §6.7](07-security-and-policy.md#67-budget-limit)). Projected spend is the larger of `spent_usd` and `actual_usd` plus the estimate:
+  - **deny** (`iacp.budget.exceeded`) when projected is over the limit, the budget is a hard block and no override is in effect;
+  - **warn** (`iacp.budget.near_limit`) from 80 percent of the limit;
+  - **no estimate** (Infracost not configured, failed, no total, non-USD): a warning in development, a denial (`iacp.budget.no_estimate`) in staging and production while the budget is a hard block, unless an override applies. A budget that cannot be checked is never treated as free. With no budget set nothing is enforced and the cost stays informational.
+- **Override**: an admin includes `override` (reason, expiry of at most 31 days) in the budget's `PUT`; the API records the admin (`override_by`), and the context carries it. It waives a hard limit, and a missing estimate, in **development and staging only**: in production the hard limit stands and the denial says so (raise the limit instead, which is audited). The override expires on its own; removing it is another `PUT` without `override`. Audit: `budget.set`, `budget.override.granted`, `budget.override.revoked`. The per-request override (`POST /requests/{id}/budget-override`, `budget_overrides`) is not built yet.
+- **Actuals**: `POST /v1/internal/budget-actuals` (shared internal token only) records `actual_usd` for a budget; the policy counts it as used when it exceeds the committed estimate. The worker that pulls AWS Cost Explorer daily grouped by `iacp:team`, alerts at `alert_thresholds`, and flags a mismatch above 25% between estimate and actual is **not built**: Cost Explorer is not reachable under LocalStack (ADR-0009). Until it exists, `alert_thresholds` is stored but nothing alerts on it, and `spent_usd` is not filled automatically.
 
-```rego
-package iacp.budget
+**Data touched.** `budgets` (incl. `override_by`, `actual_usd`), `cost_estimates` (planned), `audit_events (budget.set, budget.override.granted, budget.override.revoked, budget.actual.recorded)`.
 
-import rego.v1
-
-projected := data.team.current_committed_usd + input.diffTotalMonthlyCost
-
-deny contains msg if {
-  data.budget.hard_block
-  projected > data.budget.monthly_limit_usd
-  not data.request.budget_override_approved
-  msg := sprintf("Projected monthly cost $%.2f exceeds %s budget $%.2f (delta +$%.2f). Request an admin override.",
-    [projected, data.team.slug, data.budget.monthly_limit_usd, to_number(input.diffTotalMonthlyCost)])
-}
-
-warn contains msg if {
-  projected > data.budget.monthly_limit_usd * data.budget.warn_pct / 100
-  msg := sprintf("Projected cost is %.0f%% of budget.", [100 * projected / data.budget.monthly_limit_usd])
-}
-```
-
-- **Override**: an admin approves in the portal (`POST /v1/requests/{id}/budget-override` with reason, max delta and expiry); the API records the approver (`override_by`) and the override details, sets `budget_override_approved` in the OPA context and re-runs checks (re-run of the `pr-validate` workflow via the App).
-- **Actuals**: the worker pulls AWS Cost Explorer daily grouped by `iacp:team` tag, stores actuals per stack, and alerts at the budget's `alert_thresholds`; a mismatch > 25% between Infracost estimate and actuals for a stack is surfaced on the dashboard (usage-based costs).
-
-**Data touched.** `budgets` (incl. `override_by`), `budget_overrides`, `cost_estimates`, CUR/Cost Explorer actuals, `audit_events (budget.override.granted)`.
-
-**Edge cases.** Destroy requests always pass (negative delta). Usage-based services (Lambda, SQS) estimate from `cost.drivers` defaults in `module.yaml` or from an Infracost usage file the team can supply. If Infracost is unavailable, the check fails closed in production and warns in development.
+**Edge cases.** Destroy requests (a plan that creates or updates nothing) always pass, so a team over budget can free budget. Usage-based services (Lambda, SQS) are priced at zero usage unless the module's `cost.drivers` or an Infracost usage file says otherwise, so the estimate is a floor. The estimate is the stack's whole monthly cost, so for an update the stack's own committed cost is counted twice once `spent_usd` is recorded per stack: this errs towards denying. An unconfigured API (local-first) means no budget is enforced.
 
 **Runbook — team blocked by budget.** Confirm the estimate in the PR comment; check for orphaned ephemeral stacks (§6) consuming budget; either destroy unused stacks or have the team lead request a budget change (admin edits `budgets`, audited) or a one-off override.

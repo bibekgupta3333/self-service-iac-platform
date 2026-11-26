@@ -28,7 +28,7 @@ internal/
   stacks/                read side of stacks: list/show scoped to the caller's teams, Postgres repo
   locks/                 per-stack platform lock: pure Decide/NextInQueue/CheckToken, Service, Postgres repo
   auth/                  GitHub Actions OIDC: claim allow-lists (pure), JWKSCache, Verifier, jti ReplayGuard
-  budgets/               policy context for conftest: pure ParseStackPath / BuildContext, Service, Postgres repo
+  budgets/               policy context for conftest (pure ParseStackPath / BuildContext, Service, Postgres repo) and budget administration (pure NewWrite validation and AuditEvents, AdminService, PostgresAdminRepository)
   runs/                  POST /v1/runs reports: pure Validate/CheckProvenance/RunStatus, Service, Postgres repo
   generator/             pure Terraform renderer + BackendStrategy / ProviderStrategy, golden files
   publish/               Publisher port; pure BranchName/ParseBranch, ValidatePath/StackFiles, PR Title/Body/Labels
@@ -78,6 +78,7 @@ together apply each migration once.
 | `0006_oidc_jti.sql` | `oidc_jti` (used GitHub OIDC token ids until `exp` + leeway, shared by replicas); `iacp_app` gets SELECT/INSERT/DELETE only, no UPDATE |
 | `0007_budgets.sql` | `budgets` (team monthly budget, optionally per environment; `spent_usd` 0 until cost data lands in WBS 8.5) |
 | `0008_webhooks_outbox.sql` | `webhook_deliveries` (delivery id primary key) and `outbox` (job queue: `available_at`, `locked_until`, `attempts`, `dedupe_key`); `iacp_app` gets SELECT/INSERT/DELETE and SELECT/INSERT/UPDATE respectively |
+| `0013_budget_admin.sql` | `budgets`: `updated_by`, `updated_at`, `override_reason`, `override_expires_at` (set or null with `override_by`), `actual_usd`, `actual_recorded_at`; limit and threshold bounds |
 
 ### Database roles
 
@@ -179,6 +180,8 @@ docker run --rm -p 127.0.0.1:8080:8080 -e IACP_AUTH_MODE=dev \
 | GET | `/healthz`, `/readyz` | no auth |
 | GET | `/metrics` | Prometheus exposition; loopback peers without proxy headers, or `Authorization: Bearer $IACP_METRICS_TOKEN` (`403 metrics_forbidden` otherwise) |
 | GET | `/v1/internal/budget-context?stack_path=` | machine auth (`budget_context` class); conftest `--data` document for the stack (below) |
+| GET, PUT | `/v1/teams/{slug}/budgets[/{month}]` | admin only: `GET` lists, `PUT /v1/teams/{slug}/budgets/{month}` sets a monthly budget (below) |
+| POST | `/v1/internal/budget-actuals` | shared internal token only (`budget_actuals` class, no workflow); records `actual_usd` |
 | GET | `/v1/catalog/modules?category=&status=` | modules with `latest_version` |
 | GET | `/v1/catalog/modules/{name}` | module + latest version detail |
 | GET | `/v1/catalog/modules/{name}/versions` | SemVer descending |
@@ -317,12 +320,28 @@ keep `/metrics` off the proxied listener. A separate internal metrics listener i
 `GET /v1/internal/budget-context?stack_path=environments/<env>/<team>/<stack>` (alias `stack=`)
 returns `{"iacp": {"context": {…}}}`, ready for `conftest --data`, where the policies read it as
 `data.iacp.context`: `environment`, `team`, `stack`, `stack_path`, `allowed_regions` (from
-`environments`), `budget` (`month`, `limit_usd`, `spent_usd`, `hard_block`, `scope`; the
+`environments`), `budget` (`month`, `limit_usd`, `spent_usd`, `actual_usd`, `hard_block`, `scope`; the
 environment-specific row wins over a team-wide one; `null` when no budget is set), `budget_override`
-(always `null` until WBS 8.5), `exceptions` (always `[]` until policy exceptions are stored),
+(`granted_by`, `reason`, `expires_at`, or `null`), `exceptions` (always `[]` until policy exceptions are stored),
 `yanked_module_versions` (`module`, `version`, `tag`; every version of a yanked module too) and
 `now`. Everything is derived from the path, so it works for a stack a PR is about to create.
 `422 invalid_stack_path`, `404 environment_not_found`.
+
+## Budgets (docs/06 §10, docs/07 §6.7)
+
+`PUT /v1/teams/{slug}/budgets/{month}` (`month` = `YYYY-MM`) and `GET /v1/teams/{slug}/budgets[/{month}]`
+are admin only. `DefaultPolicies` requires the admin role in some team (`budget.set`) and
+`budgets.AdminService` requires it in the team named in the path (platform admins count
+everywhere); a route with no policy entry is a `403`. `budgets.NewWrite` validates everything in
+one pure pass and reports every problem as a field error: `limit_usd` 0 to 1,000,000 with at most
+two decimals, `currency` empty or `USD`, `environment` one of the three or omitted (team-wide),
+`alert_thresholds` 1 to 200 (default 50, 80, 100), and an `override` (`reason` 20 to 500 characters,
+`expires_at` within 31 days) that waives a hard limit outside production only. Writes and their
+audit events (`budget.set`, `budget.override.granted`, `budget.override.revoked`) share one
+transaction. `POST /v1/internal/budget-actuals` takes `{team, environment?, month, actual_usd}` and
+accepts only the shared internal token: no OIDC workflow is in its route class, so a pull-request
+token cannot move the spend the budget gate reads. Cost Explorer is not wired (not available under
+LocalStack), so nothing calls it yet. Field-level API: [03 §6.7](../docs/03-data-model-and-api.md#67-budgets-and-exceptions).
 
 ## Stack lock (docs/06 §3)
 
