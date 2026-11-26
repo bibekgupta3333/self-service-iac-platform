@@ -23,6 +23,12 @@ const (
 	// RouteBudgetContext: GET /v1/internal/budget-context. Read-only policy input for
 	// conftest, fetched by pr-validate.yml (pull_request) and apply.yml (main).
 	RouteBudgetContext RouteClass = "budget_context"
+	// RouteRequestLookup: GET /v1/internal/requests/by-path. Resolves the request that holds
+	// a stack's lock, with its fencing token and approved plan hash, for apply.yml. Only
+	// apply.yml on main: the answer is the credential for the stack lock and the hash an
+	// apply is verified against, and a pull-request token comes from a workflow file the
+	// PR author controls. pr-validate.yml reads its request id and token from iacp.stack.json.
+	RouteRequestLookup RouteClass = "request_lookup"
 )
 
 // RoutePolicy is what an OIDC caller must be to use a route class.
@@ -53,6 +59,11 @@ var RoutePolicies = map[RouteClass]RoutePolicy{
 	RouteBudgetContext: {
 		Workflows: []string{"pr-validate.yml", "apply.yml"},
 		Events:    []string{"pull_request", "push", "workflow_dispatch"},
+	},
+	RouteRequestLookup: {
+		Workflows: []string{"apply.yml"},
+		MainOnly:  true,
+		Events:    []string{"push", "workflow_dispatch"},
 	},
 }
 
