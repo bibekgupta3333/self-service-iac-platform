@@ -109,9 +109,9 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 | [~] 7.1 | Next.js scaffold, GitHub login, API client, layout — scaffold, `ApiClient`, proxy, layout and `AuthProvider` with the dev-mode provider done; GitHub login (`GithubAuthProvider`, proxy login flow) done with 4.4, pending a registered OAuth app | 1.5 | 4.4 |
 | [~] 7.2 | Catalog list + module detail (README, versions, inputs) — list, versions, outputs and generated inputs table done; README rendering needs the README in the catalog API | 1.5 | 4.3 |
 | [~] 7.3 | Dynamic request form from JSON Schema (typed renderer, [ADR-0011](docs/adr/0011-portal-form-renderer.md)), preview diff — form, payload-bound Idempotency-Key, field-mapped errors and request preview done; generated-files diff needs `POST /v1/requests/{id}/preview` | 2 | 4.7 |
-| [ ] 7.4 | Request detail: status timeline (SSE), plan summary, cost, PR/run links (backend `GET /v1/requests/{id}/events` is ready; the portal side is open) | 1.5 | 4.9 |
-| [~] 7.5 | Stacks list per team, outputs view — requests list and detail with status timeline (polling) done; `GET /v1/stacks` and `GET /v1/stacks/{id}` (status, outputs) are available; the portal views are open | 1 | 4.5 |
-| [ ] 7.6 | Destroy flow: `plan -destroy` → apply → cleanup PR → `destroyed` (the `destroy` request and its empty marked root are done under 4.5; the cleanup PR and the `destroyed` transition are open) | 1.5 | 5.3 |
+| [~] 7.4 | Request detail: status timeline (SSE), plan summary, cost, PR/run links — live SSE timeline (resume, backoff, polling fallback), history and PR link done; plan summary, cost and run links are open until the API returns them | 1.5 | 4.9 |
+| [x] 7.5 | Stacks list per team, outputs view — requests list and detail, stacks list (filters, keyset paging) and stack detail with status, health, outputs and latest request | 1 | 4.5 |
+| [~] 7.6 | Destroy flow: `plan -destroy` → apply → cleanup PR → `destroyed` (the `destroy` request and its empty marked root are done under 4.5; portal update and destroy flows with typed-name confirmation, error handling and role-aware actions are done; the cleanup PR and the `destroyed` transition are open) | 1.5 | 5.3 |
 | [ ] 7.7 | Observability: CloudWatch dashboard (lead time, failure rate), alarms | 1 | 4.1 |
 
 **MVP exit:** the end-to-end demo script in `docs/08-mvp-roadmap.md` §4 passes in development and staging.

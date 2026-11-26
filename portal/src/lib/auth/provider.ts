@@ -13,6 +13,8 @@
 //
 // Pages and ApiClient only see the AuthProvider interface.
 
+import type { Capabilities } from "./permissions";
+
 export type AuthMode = "dev" | "github";
 
 export interface Viewer {
@@ -31,6 +33,8 @@ export interface AuthProvider {
   requestHeaders(method: string): Promise<Record<string, string>>;
   /** The signed-in user, for display. */
   viewer(): Promise<Viewer>;
+  /** What the user may do, to hide or disable actions. The API still decides. */
+  capabilities(): Promise<Capabilities>;
 }
 
 export const DEFAULT_DEV_USER = "local-dev";
@@ -52,6 +56,14 @@ export class DevAuthProvider implements AuthProvider {
 
   async viewer(): Promise<Viewer> {
     return { login: this.login, displayName: this.login, mode: this.mode };
+  }
+
+  /**
+   * Dev auth acts as one local user whose team roles the portal cannot read (there is no
+   * session to ask /v1/me about), so it assumes the user may act and lets the API answer.
+   */
+  async capabilities(): Promise<Capabilities> {
+    return { kind: "unrestricted" };
   }
 }
 
@@ -139,6 +151,17 @@ export class GithubAuthProvider implements AuthProvider {
     const me = await this.me();
     if (me === null) return { login: "", displayName: "", mode: this.mode, anonymous: true };
     return { login: me.github_login, displayName: me.display_name || me.github_login, mode: this.mode };
+  }
+
+  /** capabilities are the caller's team roles from /v1/me; with no session they allow nothing. */
+  async capabilities(): Promise<Capabilities> {
+    const me = await this.me();
+    if (me === null) return { kind: "teams", admin: false, roles: {} };
+    return {
+      kind: "teams",
+      admin: me.is_platform_admin,
+      roles: Object.fromEntries(me.teams.map((t) => [t.slug, t.role])),
+    };
   }
 
   /** logout ends the session. Browser only: it needs the proxy and the cookie jar. */
