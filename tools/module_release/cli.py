@@ -5,22 +5,29 @@ Commands:
   detect   JSON list of modules changed since a base commit
   info     version and tag of a module as key=value lines (for $GITHUB_OUTPUT)
   notes    release notes: the CHANGELOG section, or a generated diff summary
+  index    register the declared version in the catalog (IACP_API_URL, IACP_INTERNAL_TOKEN)
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
+from .catalog import CatalogClient, CatalogError, build_index_payload
 from .gate import ReleaseGate
-from .notes import release_notes
+from .notes import changelog_section, release_notes
 from .sources import GitError, GitRepository, ModuleWorkspace, modules_in_paths
 from .versioning import GateResult, git_tag
 
 ZERO_SHA = "0" * 40
+COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+API_URL_ENV = "IACP_API_URL"
+TOKEN_ENV = "IACP_INTERNAL_TOKEN"
 
 
 class App:
@@ -92,6 +99,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     notes = sub.add_parser("notes", help="print release notes for the declared version")
     notes.add_argument("module")
+
+    index = sub.add_parser("index", help=f"POST the declared version to ${API_URL_ENV}/v1/internal/catalog/index")
+    index.add_argument("module")
+    index.add_argument("--commit-sha", required=True, help="40-character commit SHA the release tag points at")
+    index.add_argument("--released-by", default=None,
+                       help="recorded as released_by (default: $GITHUB_ACTOR, else module-release)")
+    index.add_argument("--skip-if-unconfigured", action="store_true",
+                       help=f"exit 0 with a notice when {API_URL_ENV} or {TOKEN_ENV} is not set")
+    index.add_argument("--dry-run", action="store_true", help="print the payload instead of sending it")
     return parser
 
 
@@ -129,12 +145,42 @@ def _notes(app: App, args: argparse.Namespace) -> int:
     return 0
 
 
+def _index(app: App, args: argparse.Namespace, env: Mapping[str, str]) -> int:
+    (module,) = app.resolve_modules([args.module], False)
+    if not COMMIT_SHA.match(args.commit_sha):
+        raise ValueError("--commit-sha must be a 40-character lowercase hex SHA")
+    version = app.gate.declared_version(module)
+    changelog = changelog_section(app.workspace.changelog(module), version)
+    released_by = args.released_by or env.get("GITHUB_ACTOR") or "module-release"
+    payload = build_index_payload(app.workspace.manifest(module), args.commit_sha, released_by, changelog)
+    if args.dry_run:
+        print(json.dumps(payload, indent=2))
+        return 0
+    url, token = env.get(API_URL_ENV, "").strip(), env.get(TOKEN_ENV, "").strip()
+    if not url or not token:
+        missing = " and ".join(n for n, v in ((API_URL_ENV, url), (TOKEN_ENV, token)) if not v)
+        if args.skip_if_unconfigured:
+            print(f"::notice title=Catalog index skipped::{missing} not configured, "
+                  f"so {payload['git_tag']} was not indexed (local-first, ADR-0009)")
+            return 0
+        raise ValueError(f"{missing} must be set to index {payload['git_tag']}")
+    try:
+        result = CatalogClient(url, token).index(payload)
+    except CatalogError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"{payload['git_tag']}: {'indexed' if result.created else 'already indexed'} (HTTP {result.status})")
+    return 0
+
+
 COMMANDS = {"gate": _gate, "detect": _detect, "info": _info, "notes": _notes}
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.command == "index":
+            return _index(App(args.repo), args, os.environ if env is None else env)
         return COMMANDS[args.command](App(args.repo), args)
     except (FileNotFoundError, ValueError, GitError) as exc:
         print(f"error: {exc}", file=sys.stderr)
