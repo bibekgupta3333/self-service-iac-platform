@@ -456,7 +456,7 @@ jobs:
           exit "$status"
 
   # The offline suites again, on the lowest provider versions the modules declare
-  # (docs/04 section 5.3). Every other job resolves the newest allowed 5.x, so a
+  # (docs/04 section 9). Every other job resolves the newest allowed 5.x, so a
   # provider argument newer than the declared floor would otherwise go unnoticed.
   # tools.provider_floor copies the module to a scratch directory and adds an override
   # file pinning each provider to its floor; `init -upgrade` then selects it. Only
