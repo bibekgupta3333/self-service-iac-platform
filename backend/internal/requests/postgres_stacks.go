@@ -19,12 +19,13 @@ func stackTarget(ctx context.Context, q db.DBTX, id uuid.UUID, lockClause string
 	var t StackTarget
 	var status string
 	err := q.QueryRow(ctx, `
-		SELECT s.id, s.team_id, t.slug, s.environment_id, e.name::text, s.name, s.path, s.region, s.status::text
+		SELECT s.id, s.team_id, t.slug, s.environment_id, e.name::text, s.name, s.path, s.region, s.status::text,
+		       s.is_ephemeral, s.expires_at
 		FROM stacks s
 		JOIN teams t ON t.id = s.team_id
 		JOIN environments e ON e.id = s.environment_id
 		WHERE s.id = $1 `+lockClause, id).
-		Scan(&t.ID, &t.TeamID, &t.TeamSlug, &t.EnvironmentID, &t.Environment, &t.Name, &t.Path, &t.Region, &status)
+		Scan(&t.ID, &t.TeamID, &t.TeamSlug, &t.EnvironmentID, &t.Environment, &t.Name, &t.Path, &t.Region, &status, &t.IsEphemeral, &t.ExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return StackTarget{}, &apperr.Error{Kind: apperr.KindNotFound, Code: "stack_not_found",
 			Message: fmt.Sprintf("stack %s not found", id)}

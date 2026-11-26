@@ -42,7 +42,8 @@ type CreateInput struct {
 	DependsOn     []string        `json:"depends_on,omitempty"`
 }
 
-// Ephemeral requests a stack that is destroyed after TTLHours.
+// Ephemeral requests a stack that is destroyed after TTLHours (non-production only). Zero
+// means the configured default.
 type Ephemeral struct {
 	TTLHours int `json:"ttl_hours"`
 }
@@ -105,8 +106,10 @@ func validateNewStackTarget(in CreateInput, add fieldAdder) {
 	if !stackNameRe.MatchString(in.Stack) {
 		add("/stack", "pattern", "must match ^[a-z][a-z0-9-]{1,40}$")
 	}
-	if in.Ephemeral != nil && in.Ephemeral.TTLHours <= 0 {
-		add("/ephemeral/ttl_hours", "minimum", "must be greater than 0")
+	// 0 asks for the configured default TTL; the bounds are checked against the policy and
+	// the environment (ttl.Policy.Resolve).
+	if in.Ephemeral != nil && in.Ephemeral.TTLHours < 0 {
+		add("/ephemeral/ttl_hours", "minimum", "must not be negative")
 	}
 	if len(in.DependsOn) > 0 {
 		add("/depends_on", "unsupported", "cross-stack dependencies are not supported yet")
