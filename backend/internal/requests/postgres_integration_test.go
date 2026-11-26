@@ -14,6 +14,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/catalog"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/db/dbtest"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/locks"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
 )
 
@@ -51,7 +52,8 @@ func TestPostgresRequestFlow(t *testing.T) {
 	}
 
 	repo := NewPostgresRepository(pool, writer)
-	svc := NewService(repo, cat, repo, platform.SystemClock{}, platform.RandomIDs{})
+	lockSvc := locks.NewService(locks.NewPostgresRepository(pool, writer), platform.SystemClock{}, 0)
+	svc := NewService(repo, cat, repo, lockSvc, platform.SystemClock{}, platform.RandomIDs{})
 	user := identity.Principal{UserID: userID, Login: "priya-s", Type: identity.ActorUser}
 	in := validInput()
 	in.Ephemeral = &Ephemeral{TTLHours: 72}
@@ -135,8 +137,19 @@ func TestPostgresRequestFlow(t *testing.T) {
 	}
 
 	res, err := audit.NewVerifier(pool).Verify(ctx, 1, 0)
-	if err != nil || !res.Valid || res.Checked != 4 { // 2 index + 2 request.created
+	if err != nil || !res.Valid || res.Checked != 6 { // 2 index + 2 request.created + 2 lock.acquired
 		t.Fatalf("audit = %+v, %v", res, err)
+	}
+
+	// Each create took its new stack's lock in the same transaction.
+	var lockHolder uuid.UUID
+	var lockToken int64
+	if err := pool.QueryRow(ctx, `SELECT request_id, fencing_token FROM locks WHERE stack_id = $1`, req.Stack.ID).
+		Scan(&lockHolder, &lockToken); err != nil || lockHolder != req.ID || req.FencingToken == nil || *req.FencingToken != lockToken {
+		t.Fatalf("lock row = %s/%d (%v), request token = %v", lockHolder, lockToken, err, req.FencingToken)
+	}
+	if got, err := svc.Get(ctx, req.ID); err != nil || got.FencingToken == nil || *got.FencingToken != lockToken || got.IsQueued() {
+		t.Fatalf("stored request token = %+v, %v", got, err)
 	}
 
 	t.Run("idempotency keys expire after 24h", func(t *testing.T) {

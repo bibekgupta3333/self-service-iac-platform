@@ -18,6 +18,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/db"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/httpapi"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/locks"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/observability"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/requests"
@@ -68,7 +69,8 @@ func run() error {
 	auditWriter := audit.NewWriter(clock, ids)
 	catalogSvc := catalog.NewService(catalog.NewPostgresRepository(pool, auditWriter), clock, cfg.ModuleRepoURL)
 	requestRepo := requests.NewPostgresRepository(pool, auditWriter)
-	requestSvc := requests.NewService(requestRepo, catalogSvc, requestRepo, clock, ids)
+	lockSvc := locks.NewService(locks.NewPostgresRepository(pool, auditWriter), clock, locks.DefaultLease)
+	requestSvc := requests.NewService(requestRepo, catalogSvc, requestRepo, lockSvc, clock, ids)
 
 	if cfg.InternalToken == "" {
 		slog.Warn("IACP_INTERNAL_TOKEN is not set: /v1/internal endpoints reject every request")

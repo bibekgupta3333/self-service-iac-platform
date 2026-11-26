@@ -14,6 +14,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/catalog"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/inputschema"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/locks"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
 )
 
@@ -89,6 +90,14 @@ type Store interface {
 	InsertRequest(ctx context.Context, r *Request) error
 	GetRequest(ctx context.Context, id uuid.UUID) (*Request, error)
 	AppendAudit(ctx context.Context, e audit.Event) error
+	// Locks returns the stack-lock store bound to the same transaction.
+	Locks() locks.Store
+}
+
+// StackLocker takes the per-stack platform lock inside the request-creation transaction
+// (implemented by locks.Service).
+type StackLocker interface {
+	AcquireIn(ctx context.Context, st locks.Store, cmd locks.AcquireCommand) (locks.Result, error)
 }
 
 // ListFilter narrows List.
@@ -133,6 +142,7 @@ type Service struct {
 	repo     Repository
 	versions VersionLookup
 	members  Memberships
+	locker   StackLocker
 	clock    platform.Clock
 	ids      platform.IDGenerator
 }
@@ -145,8 +155,9 @@ type Memberships interface {
 }
 
 // NewService returns a request Service.
-func NewService(repo Repository, versions VersionLookup, members Memberships, clock platform.Clock, ids platform.IDGenerator) *Service {
-	return &Service{repo: repo, versions: versions, members: members, clock: clock, ids: ids}
+func NewService(repo Repository, versions VersionLookup, members Memberships, locker StackLocker,
+	clock platform.Clock, ids platform.IDGenerator) *Service {
+	return &Service{repo: repo, versions: versions, members: members, locker: locker, clock: clock, ids: ids}
 }
 
 // Create validates and records a change request. With the same Idempotency-Key and
@@ -293,6 +304,18 @@ func (s *Service) create(ctx context.Context, st Store, by identity.Principal, c
 		Payload: payload,
 	}); err != nil {
 		return nil, fmt.Errorf("audit: %w", err)
+	}
+
+	// docs/03 §4.1: acquire the stack lock or queue, in the same transaction.
+	lock, err := s.locker.AcquireIn(ctx, st.Locks(), locks.AcquireCommand{StackID: stack.ID, RequestID: req.ID, By: by,
+		CorrelationID: cmd.CorrelationID})
+	if err != nil {
+		return nil, fmt.Errorf("acquire stack lock: %w", err)
+	}
+	req.QueuedBehind = lock.QueuedBehind
+	if lock.Outcome != locks.OutcomeQueued {
+		token := lock.Lock.FencingToken
+		req.FencingToken = &token
 	}
 	return req, nil
 }
