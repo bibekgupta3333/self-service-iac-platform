@@ -46,6 +46,13 @@ type Deps struct {
 	// MetricsAccess (loopback or the metrics token).
 	Metrics       MetricsSource
 	MetricsAccess MetricsAccess
+	// PublicHandlers are unauthenticated user-facing routes under /v1 (OAuth login).
+	PublicHandlers []RouteRegistrar
+	// Policies is the route RBAC table enforced on the authenticated user routes; Roles
+	// resolves team roles for ScopeAnyTeam. DenialAudit, when set, records rbac.denied.
+	Policies    PolicyTable
+	Roles       RoleLookup
+	DenialAudit EventRecorder
 }
 
 // MetricsSource records requests and serves the exposition (observability.Metrics).
@@ -109,8 +116,19 @@ func NewRouter(d Deps) http.Handler {
 				h.Routes(pipeline)
 			}
 		})
+		v1.Group(func(public chi.Router) {
+			for _, h := range d.PublicHandlers {
+				h.Routes(public)
+			}
+		})
 		v1.Group(func(user chi.Router) {
 			user.Use(requireAuth(d.Auth))
+			if d.DenialAudit != nil {
+				user.Use(auditDenials(d.DenialAudit))
+			}
+			if len(d.Policies) > 0 {
+				user.Use(authorize(d.Policies, d.Roles))
+			}
 			if d.Catalog != nil {
 				d.Catalog.Routes(user)
 			}
