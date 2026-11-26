@@ -80,7 +80,18 @@ type OIDCConfig struct {
 	Refs         []string      // IACP_OIDC_ALLOWED_REFS: comma-separated patterns; empty means the defaults
 	WorkflowRefs []string      // IACP_OIDC_ALLOWED_WORKFLOWS: comma-separated job_workflow_ref patterns
 	Leeway       time.Duration // IACP_OIDC_LEEWAY: clock skew allowed on exp/nbf/iat
+	ReplayStore  ReplayStore   // IACP_OIDC_REPLAY_STORE: where used jti values are kept
 }
+
+// ReplayStore selects where used OIDC token ids are remembered.
+type ReplayStore string
+
+const (
+	// ReplayStorePostgres shares used ids across replicas (table oidc_jti). Default.
+	ReplayStorePostgres ReplayStore = "postgres"
+	// ReplayStoreMemory keeps them in a bounded per-process cache: single instance only.
+	ReplayStoreMemory ReplayStore = "memory"
+)
 
 // Enabled reports whether OIDC verification is configured.
 func (o OIDCConfig) Enabled() bool { return o.Audience != "" }
@@ -171,6 +182,10 @@ func loadOIDC(get func(name, def string) string) (OIDCConfig, error) {
 		errs = append(errs, fmt.Errorf("%sOIDC_LEEWAY must be a duration between 0 and 5m", Prefix))
 	}
 	o.Leeway = leeway
+	o.ReplayStore = ReplayStore(get("OIDC_REPLAY_STORE", string(ReplayStorePostgres)))
+	if o.ReplayStore != ReplayStorePostgres && o.ReplayStore != ReplayStoreMemory {
+		errs = append(errs, fmt.Errorf("%sOIDC_REPLAY_STORE must be postgres or memory", Prefix))
+	}
 	if (o.Audience == "") != (o.Repository == "") {
 		errs = append(errs, fmt.Errorf("%sOIDC_AUDIENCE and %sOIDC_REPOSITORY must be set together", Prefix, Prefix))
 	}

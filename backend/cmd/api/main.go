@@ -76,7 +76,7 @@ func run() error {
 	lockSvc := locks.NewService(locks.NewPostgresRepository(pool, auditWriter), clock, locks.DefaultLease)
 	requestSvc := requests.NewService(requestRepo, catalogSvc, requestRepo, lockSvc, clock, ids)
 
-	internalAuth, err := newMachineAuthenticator(cfg, clock)
+	internalAuth, err := newMachineAuthenticator(cfg, clock, newReplayStore(cfg.OIDC, pool, clock))
 	if err != nil {
 		return err
 	}
@@ -159,7 +159,7 @@ func newAuthenticator(ctx context.Context, cfg config.Config, users *identity.Us
 // newMachineAuthenticator builds the authenticator for /v1/internal/* and /v1/runs. It
 // fails closed: GitHub OIDC when configured, the shared token when set, and with
 // neither every call is rejected.
-func newMachineAuthenticator(cfg config.Config, clock platform.Clock) (httpapi.Authenticator, error) {
+func newMachineAuthenticator(cfg config.Config, clock platform.Clock, replay auth.ReplayStore) (httpapi.Authenticator, error) {
 	var chain httpapi.AnyAuthenticator
 	if cfg.OIDC.Enabled() {
 		o := cfg.OIDC
@@ -179,7 +179,7 @@ func newMachineAuthenticator(cfg config.Config, clock platform.Clock) (httpapi.A
 		if err != nil {
 			return nil, err
 		}
-		chain = append(chain, httpapi.NewOIDCAuthenticator(verifier))
+		chain = append(chain, httpapi.NewOIDCAuthenticator(auth.NewReplayGuard(verifier, replay, o.Leeway)))
 		if o.RepositoryID == "" {
 			slog.Warn("IACP_OIDC_REPOSITORY_ID is not set: tokens are matched by owner/name only, which can be re-registered after a rename or delete")
 		}
@@ -194,6 +194,17 @@ func newMachineAuthenticator(cfg config.Config, clock platform.Clock) (httpapi.A
 		return httpapi.DenyAuthenticator{}, nil
 	}
 	return chain, nil
+}
+
+// newReplayStore picks where used OIDC jti values are remembered (docs/03 §6.9).
+func newReplayStore(o config.OIDCConfig, pool *pgxpool.Pool, clock platform.Clock) auth.ReplayStore {
+	if o.ReplayStore == config.ReplayStoreMemory {
+		if o.Enabled() {
+			slog.Warn("IACP_OIDC_REPLAY_STORE=memory: replayed tokens are only caught per instance; use postgres with more than one replica")
+		}
+		return auth.NewMemoryReplayCache(auth.DefaultReplayCapacity, clock)
+	}
+	return auth.NewPostgresReplayStore(pool, clock)
 }
 
 // serve runs srv until ctx is cancelled, then drains in-flight requests.

@@ -92,6 +92,17 @@ func TestLoad(t *testing.T) {
 		{name: "blank auth mode is required", env: map[string]string{"IACP_AUTH_MODE": "  "}, wantErr: "IACP_AUTH_MODE must be set"},
 		{name: "unknown auth mode", env: map[string]string{"IACP_AUTH_MODE": "none"}, wantErr: "unsupported value"},
 		{name: "short internal token", env: with(map[string]string{"IACP_INTERNAL_TOKEN": "short"}), wantErr: "INTERNAL_TOKEN"},
+		{name: "unknown replay store", env: with(map[string]string{"IACP_OIDC_REPLAY_STORE": "redis"}), wantErr: "OIDC_REPLAY_STORE"},
+		{name: "replay store defaults to postgres", env: dev, check: func(t *testing.T, c Config) {
+			if c.OIDC.ReplayStore != ReplayStorePostgres {
+				t.Fatalf("replay store = %q", c.OIDC.ReplayStore)
+			}
+		}},
+		{name: "memory replay store", env: with(map[string]string{"IACP_OIDC_REPLAY_STORE": "memory"}), check: func(t *testing.T, c Config) {
+			if c.OIDC.ReplayStore != ReplayStoreMemory {
+				t.Fatalf("replay store = %q", c.OIDC.ReplayStore)
+			}
+		}},
 		{name: "short metrics token", env: with(map[string]string{"IACP_METRICS_TOKEN": "short"}), wantErr: "METRICS_TOKEN must be at least"},
 		{name: "metrics token reuses the internal token", env: with(map[string]string{
 			"IACP_METRICS_TOKEN": strings.Repeat("t", 32), "IACP_INTERNAL_TOKEN": strings.Repeat("t", 32)}), wantErr: "must differ"},
