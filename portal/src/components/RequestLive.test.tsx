@@ -186,6 +186,17 @@ describe("RequestLive", () => {
     expect(screen.getByText(/only available over the live connection/)).toBeInTheDocument();
   });
 
+  it("links the normalised URL that httpsUrl returns", () => {
+    const client = { openRequestEvents: vi.fn(async () => sse([], { hold: true })), getRequest: vi.fn() };
+    render(
+      <RequestLive
+        request={{ ...base, github: { branch: "b", pr_number: 7, pr_url: "HTTPS://GitHub.com/o/r/pull/7" } }}
+        client={client}
+      />,
+    );
+    expect(screen.getByRole("link", { name: /#7/ })).toHaveAttribute("href", "https://github.com/o/r/pull/7");
+  });
+
   it("shows each change once when a resumed stream replays the frame it was cut on", async () => {
     const responses = [
       sse([status(1, "pr_open", "pr_opened", "draft"), status(2, "validating", "validation_started", "pr_open")]),

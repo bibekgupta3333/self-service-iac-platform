@@ -147,7 +147,9 @@ export function RequestLive({ request, client, streamOptions, pollMs = POLL_MS, 
   }, [live.status, router]);
 
   const label = requestStatusLabel(live.status);
-  const pr = request.github && httpsUrl(request.github.pr_url) ? request.github : null;
+  // Link the URL httpsUrl validated and normalised, never the raw API value.
+  const prHref = request.github ? httpsUrl(request.github.pr_url) : null;
+  const pr = request.github && prHref ? { ...request.github, pr_url: prHref } : null;
   const note = connectionText(connection, live.ended);
 
   return (
