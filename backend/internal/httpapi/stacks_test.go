@@ -93,7 +93,7 @@ func TestStackHandlers(t *testing.T) {
 	for url, want := range map[string]int{
 		"/v1/stacks?limit=0":             400,
 		"/v1/stacks?limit=abc":           400,
-		"/v1/stacks?cursor=!!notbase64":          400,
+		"/v1/stacks?cursor=!!notbase64":  400,
 		"/v1/stacks?team=nope":           400,
 		"/v1/stacks/not-a-uuid":          404,
 		"/v1/stacks/" + uuid.NewString(): 404,
