@@ -29,6 +29,12 @@ internal/
   auth/                  GitHub Actions OIDC: claim allow-lists (pure), JWKSCache, Verifier
   runs/                  POST /v1/runs reports: pure Validate/CheckProvenance/RunStatus, Service, Postgres repo
   generator/             pure Terraform renderer + BackendStrategy / ProviderStrategy, golden files
+  publish/               Publisher port; pure BranchName/ParseBranch, ValidatePath/StackFiles, PR Title/Body/Labels
+    githubapp/           GitHub App adapter: App JWT → cached installation token, git data API commit, PRs, labels, dispatch
+    localgit/            local-first adapter (ADR-0009): git plumbing on a scratch clone, fake PRs in the git dir
+  outbox/                Postgres job queue (outbox table): Enqueue in the producer's tx, Worker with lease/backoff
+  prflow/                request.publish handler: render → commit on iacp/<short id> → PR → record pr_opened
+  webhooks/              pure VerifySignature and Map (event → command), Ingester (dedupe + enqueue), Applier
   audit/                 pure hash chain (CanonicalJSON, ChainHash, VerifyChain), Writer, Verifier
   httpapi/               chi router, middleware, problem+json, Authenticator seam, handlers
 ```
@@ -64,6 +70,7 @@ together apply each migration once.
 | `0002_audit.sql` | append-only `audit_events`: link-check trigger, UPDATE/DELETE/TRUNCATE rejection, `iacp_app` INSERT/SELECT grant |
 | `0003_seed_local.sql` | `iacp-bot` system user and the `development` environment (LocalStack account `000000000000`) |
 | `0004_app_role_grants.sql` | runtime grants for `iacp_app`: DML on platform tables, INSERT/SELECT only on `audit_events`, nothing on `goose_db_version` |
+| `0006_webhooks_outbox.sql` | `webhook_deliveries` (delivery id primary key) and `outbox` (job queue: `available_at`, `locked_until`, `attempts`, `dedupe_key`); `iacp_app` gets SELECT/INSERT/DELETE and SELECT/INSERT/UPDATE respectively |
 | `0005_pipeline_runs.sql` | `pipeline_kind`, `pipeline_status`, `pipeline_runs` (one row per run, attempt and stack, `stack_id NOT NULL`; one `stages` entry per stage name); `iacp_app` gets SELECT/INSERT/UPDATE only |
 
 ### Database roles
@@ -80,7 +87,7 @@ In `IACP_AUTH_MODE=dev` the app password defaults to `iacp-app-local-only`, whic
 default runtime URL, so a local `go run` works against the compose Postgres with no extra setup.
 
 Tables for later milestones (plan summaries, costs, drift, budgets, policy exceptions, stack
-dependencies, webhook deliveries, outbox) arrive with their features.
+dependencies) arrive with their features.
 
 ## Configuration
 
@@ -105,6 +112,20 @@ dependencies, webhook deliveries, outbox) arrive with their features.
 | `IACP_AUTO_MIGRATE` | `true` | apply migrations on start |
 | `IACP_DEV_USER` | `local-dev` | login of the local user (upserted on start) |
 | `IACP_MODULE_REPO_URL` | this repository's GitHub URL | git URL used in pinned module sources |
+| `IACP_PUBLISHER` | `none` | `none` (requests stay in `draft`), `local` (commit to a local clone, fake PR) or `github` (GitHub App) |
+| `IACP_PUBLISH_BASE_BRANCH` | `main` | branch PRs target and request branches start from |
+| `IACP_LOCAL_GIT_REPO` | unset | `local` only: path of the clone to commit to (required) |
+| `IACP_GITHUB_APP_ID` / `IACP_GITHUB_INSTALLATION_ID` | unset | `github` only: App and installation ids (required) |
+| `IACP_GITHUB_PRIVATE_KEY_PATH` | unset | `github` only: path to the App's PEM key file (required; never put the key itself in env) |
+| `IACP_GITHUB_REPOSITORY` | unset | `owner/name` the App writes to (required for `github`); when set, webhooks for other repositories are ignored |
+| `IACP_GITHUB_API_URL` | `https://api.github.com` | GitHub API base (https; plain http only on loopback) |
+| `IACP_GITHUB_WEBHOOK_SECRET` | unset (webhooks rejected) | HMAC secret of the App webhook, at least 16 characters |
+| `IACP_PORTAL_URL` | `http://localhost:3000` | portal base URL for the request link in PR bodies |
+| `IACP_LOCALSTACK_ENDPOINT` | `http://localhost:4566` | endpoint rendered into generated provider blocks |
+| `IACP_WORKER_POLL_INTERVAL` | `1s` | idle poll interval of the in-process outbox worker (50ms–1m) |
+
+The publisher settings fail closed: `github` with any App setting missing, App settings with
+another publisher, `local` without `IACP_LOCAL_GIT_REPO`, or an unknown value stop the API at startup.
 
 ## Run
 
@@ -154,7 +175,8 @@ docker run --rm -p 127.0.0.1:8080:8080 -e IACP_AUTH_MODE=dev \
 | POST | `/v1/runs` | machine auth; run report (docs/03 §6.9) stored in `pipeline_runs`; `200 {"accepted":true,"run_id","run_status","request_status"}`, `409 stale_fencing_token`, `403 run_mismatch` / `workflow_not_allowed` |
 | POST | `/v1/requests` | `kind=create` only so far; developer role in the team (`403` otherwise); requires `Idempotency-Key` (remembered 24 h); `202`; replays set `Idempotent-Replayed: true` |
 | GET | `/v1/requests?team=&status=&kind=&mine=true&limit=&cursor=` | keyset pagination, `next_cursor` |
-| GET | `/v1/requests/{id}` | includes the normalised `spec` and `allowed_events` |
+| GET | `/v1/requests/{id}` | includes the normalised `spec`, `allowed_events`, `github {branch, pr_number, pr_url}` once published and `failure_reason` |
+| POST | `/v1/webhooks/github` | GitHub App webhook, authenticated by `X-Hub-Signature-256` only; `202 {"accepted","duplicate","enqueued"}`, `401 invalid_signature` / `webhook_not_configured`, `400` for a bad delivery id, event header or payload |
 | GET | `/v1/audit/verify?from_seq=&to_seq=` | recomputes the hash chain, at most 10,000 events per call (`has_more`) |
 
 Errors are RFC 9457 `application/problem+json` with `code`, `request_id` and `errors[].pointer`.
@@ -217,6 +239,73 @@ GitHub OAuth sessions (WBS 4.4) plug in at the same seam without handler changes
 
 Request ids look like `req-` followed by 10 Crockford base32 characters, so collisions on the
 unique `short_id` are negligible.
+
+## Publishing PRs and GitHub webhooks (WBS 4.8, 4.9)
+
+```
+POST /v1/requests ─tx─► request (draft) + stack lock + outbox "request.publish" + audit
+outbox worker ─────────► prflow: render (generator) → Publisher.CommitFiles(iacp/<short id>)
+                         → OpenPullRequest → AddLabels           (no DB transaction held)
+                ─tx─►    RecordPublished: pr_opened, branch/PR/tree sha, audit   (or RecordPublishFailure)
+POST /v1/webhooks/github → verify HMAC → Map (pure) ─tx─► webhook_deliveries + outbox "github.event"
+outbox worker ─────────► Applier → ApplyGitHubEvent / RecordWorkflowHint (idempotent, audited)
+```
+
+- **Publisher port** (`internal/publish`): `CommitFiles`, `OpenPullRequest`, `AddLabels`,
+  `DispatchWorkflow`. Every call is safe to retry: the branch is created or force-moved to the new
+  commit, and opening a PR whose head already has one returns it.
+- **`githubapp`**: RS256 App JWT (iat −60 s, exp +9 min) exchanged for an installation token
+  scoped to `IACP_GITHUB_REPOSITORY`, cached until 5 minutes before expiry and refreshed once on a
+  401. Files are committed atomically with the git data API (blobs, one tree on the base tree, a
+  commit, then the ref). 15 s per-request timeout, redirects only to the API host, bodies capped at
+  10 MiB, retries (4 attempts) on 5xx, 429 and secondary rate limits honouring `Retry-After`
+  (more than 60 s fails fast). The App needs Contents, Pull requests and Actions (read/write) and
+  Metadata (read). Registering it is WBS 2.5.
+- **`localgit`**: `git` via `os/exec` with argument arrays (never a shell), hooks disabled, inherited
+  `GIT_*` dropped. Blobs and the tree are built on a temporary index, so the clone's checkout is
+  untouched and the branch moves with one `update-ref`. Fake PRs, labels and dispatches are recorded
+  in `<git dir>/iacp-local/state.json` and the PR URL is `file://<repo>#pull/<n>`.
+- **Two-step consistency**: the publish job commits with the request. GitHub is called outside any
+  transaction, and the result is recorded in a second one that checks the request is still `draft`
+  and holds the lock with the token the files were rendered with. Each failed attempt is audited
+  (`request.publish_failed`); after the last (6, backoff 2 s doubling up to 5 min), or a permanent
+  error such as an unresolvable module version, the request moves to `failed`
+  (`failure_reason = publish_failed`) and releases its lock.
+- **Lock release**: a terminal transition (`rejected`, `failed`, …) releases the stack lock in the
+  same transaction (stacks row locked first, as every lock operation does), and the promoted
+  waiter gets its own publish job.
+- **Webhooks**: `X-Hub-Signature-256` is checked with `hmac.Equal`; no secret means every delivery
+  gets 401. The body is capped at 2 MiB. `X-GitHub-Delivery` is deduped by the
+  `webhook_deliveries` primary key in the same transaction that enqueues the command, so a
+  redelivery is acknowledged with `duplicate: true` and no second job. Mapping:
+  `pull_request` closed+merged → `pr_merged` (approved → applying), closed unmerged → `pr_closed`
+  (→ rejected), `synchronize` → `new_commit`, `workflow_run` completed → audited hint. Only
+  `iacp/<short id>` branches map to requests; everything else gets `202` with no job. Events not
+  allowed in the current status are audited as `request.github_event_ignored`.
+- **Queue**: the `outbox` table (migration 0006) and an in-process worker goroutine
+  (`FOR UPDATE SKIP LOCKED`, 2-minute lease, so several API replicas can drain it). An SQS adapter
+  is a follow-up behind the same `outbox.Handler` contract.
+
+### Try it locally (`IACP_PUBLISHER=local`)
+
+```bash
+git clone --no-checkout . /tmp/iacp-scratch           # or any repo with a main branch
+cd backend && IACP_AUTH_MODE=dev IACP_PUBLISHER=local IACP_LOCAL_GIT_REPO=/tmp/iacp-scratch \
+  IACP_GITHUB_WEBHOOK_SECRET=local-webhook-secret-1 go run ./cmd/api
+# add a team + membership (see Run), index a module version, then POST /v1/requests:
+# within about a second the request is pr_open with github.branch = iacp/<short id>
+git -C /tmp/iacp-scratch ls-tree -r --name-only iacp/<short id>   # the generated stack root
+
+# simulate GitHub closing the PR unmerged:
+BODY='{"action":"closed","number":1,"pull_request":{"merged":false,"head":{"ref":"iacp/<short id>"}}}'
+SIG="sha256=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac local-webhook-secret-1 -hex | awk '{print $NF}')"
+curl -s localhost:8080/v1/webhooks/github -H 'X-GitHub-Event: pull_request' \
+  -H "X-GitHub-Delivery: $(uuidgen)" -H "X-Hub-Signature-256: $SIG" -d "$BODY"
+# → 202; the request becomes rejected and the stack lock is released
+```
+
+Use a fresh scratch clone with a fresh database: fake PR numbers restart at 1 per clone and
+`requests.github_pr_number` is unique.
 
 ## Config generator
 
