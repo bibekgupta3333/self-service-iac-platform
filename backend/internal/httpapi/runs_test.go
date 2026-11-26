@@ -78,8 +78,12 @@ func TestRunsEndToEndWithOIDC(t *testing.T) {
 	const repo = "acme/iacp"
 	now := time.Now()
 	clock := platform.FixedClock{T: now}
+	keys, err := auth.NewJWKSCache(jwks.URL, clock, auth.JWKSOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	verifier, err := auth.NewVerifier(auth.Policy{Issuer: auth.GitHubIssuer, Audience: "https://api.iacp.acme.internal", Repository: repo,
-		Refs: auth.DefaultRefs, WorkflowRefs: auth.DefaultWorkflowRefs(repo)}, auth.NewJWKSCache(jwks.URL, clock, auth.JWKSOptions{}), clock, 30*time.Second)
+		Refs: auth.DefaultRefs, WorkflowRefs: auth.DefaultWorkflowRefs(repo)}, keys, clock, 30*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}

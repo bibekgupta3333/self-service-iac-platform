@@ -6,7 +6,6 @@ package auth
 import (
 	"errors"
 	"fmt"
-	"net/url"
 	"path"
 	"regexp"
 	"strconv"
@@ -90,8 +89,8 @@ func (p Policy) Owner() string {
 // Validate checks the policy is complete and its patterns compile. Pure.
 func (p Policy) Validate() error {
 	var errs []error
-	if u, err := url.Parse(p.Issuer); err != nil || u.Host == "" || (u.Scheme != "https" && !isLoopback(u)) {
-		errs = append(errs, fmt.Errorf("issuer %q must be an https URL", p.Issuer))
+	if err := CheckEndpointURL(p.Issuer); err != nil {
+		errs = append(errs, fmt.Errorf("issuer: %w", err))
 	}
 	if p.Audience == "" {
 		errs = append(errs, errors.New("audience is required"))
@@ -113,12 +112,6 @@ func (p Policy) Validate() error {
 		}
 	}
 	return errors.Join(errs...)
-}
-
-// isLoopback allows a plain-http issuer only on the loopback interface (tests, local dev).
-func isLoopback(u *url.URL) bool {
-	h := u.Hostname()
-	return u.Scheme == "http" && (h == "localhost" || h == "127.0.0.1" || h == "::1")
 }
 
 // CheckClaims applies the repository and workflow allow-lists to verified claims. Pure.

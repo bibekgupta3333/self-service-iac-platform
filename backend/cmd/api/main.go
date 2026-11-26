@@ -157,7 +157,11 @@ func newMachineAuthenticator(cfg config.Config, clock platform.Clock) (httpapi.A
 		if len(policy.WorkflowRefs) == 0 {
 			policy.WorkflowRefs = auth.DefaultWorkflowRefs(o.Repository)
 		}
-		verifier, err := auth.NewVerifier(policy, auth.NewJWKSCache(o.JWKSURL, clock, auth.JWKSOptions{}), clock, o.Leeway)
+		keys, err := auth.NewJWKSCache(o.JWKSURL, clock, auth.JWKSOptions{})
+		if err != nil {
+			return nil, err
+		}
+		verifier, err := auth.NewVerifier(policy, keys, clock, o.Leeway)
 		if err != nil {
 			return nil, err
 		}

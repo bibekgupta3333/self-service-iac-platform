@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -62,12 +63,20 @@ type jwksServer struct {
 	keys    []map[string]string
 	fetches atomic.Int32
 	fail    atomic.Bool
+	gate    chan struct{} // when set, each response waits until it is closed
 }
 
 func newJWKSServer(t *testing.T, keys ...map[string]string) *jwksServer {
-	s := &jwksServer{keys: keys}
+	return newGatedJWKSServer(t, nil, keys...)
+}
+
+func newGatedJWKSServer(t *testing.T, gate chan struct{}, keys ...map[string]string) *jwksServer {
+	s := &jwksServer{keys: keys, gate: gate}
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		s.fetches.Add(1)
+		if s.gate != nil {
+			<-s.gate
+		}
 		if s.fail.Load() {
 			http.Error(w, "down", http.StatusServiceUnavailable)
 			return
@@ -120,7 +129,7 @@ func sign(t *testing.T, k *rsa.PrivateKey, kid string, c Claims) string {
 func newTestVerifier(t *testing.T, srv *jwksServer, minRefetch time.Duration) *Verifier {
 	t.Helper()
 	clock := platform.FixedClock{T: now}
-	v, err := NewVerifier(testPolicy(GitHubIssuer), NewJWKSCache(srv.URL, clock, JWKSOptions{MinRefetch: minRefetch}), clock, 30*time.Second)
+	v, err := NewVerifier(testPolicy(GitHubIssuer), mustCache(t, srv.URL, clock, JWKSOptions{MinRefetch: minRefetch}), clock, 30*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +243,7 @@ func TestUnknownKidTriggersRefetch(t *testing.T) {
 	k1, k2 := keys(t)
 	srv := newJWKSServer(t, jwkOf("k1", &k1.PublicKey))
 	clock := &stepClock{t: now}
-	v, err := NewVerifier(testPolicy(GitHubIssuer), NewJWKSCache(srv.URL, clock, JWKSOptions{MinRefetch: 30 * time.Second}), clock, 30*time.Second)
+	v, err := NewVerifier(testPolicy(GitHubIssuer), mustCache(t, srv.URL, clock, JWKSOptions{MinRefetch: 30 * time.Second}), clock, 30*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +284,7 @@ func TestJWKSCacheTTLAndOutage(t *testing.T) {
 	k1, _ := keys(t)
 	srv := newJWKSServer(t, jwkOf("k1", &k1.PublicKey))
 	clock := &stepClock{t: now}
-	c := NewJWKSCache(srv.URL, clock, JWKSOptions{TTL: time.Hour, MinRefetch: time.Minute})
+	c := mustCache(t, srv.URL, clock, JWKSOptions{TTL: time.Hour, MinRefetch: time.Minute})
 	ctx := context.Background()
 	if _, err := c.Key(ctx, "k1"); err != nil {
 		t.Fatal(err)
@@ -295,9 +304,112 @@ func TestJWKSCacheTTLAndOutage(t *testing.T) {
 	}
 
 	// A cold cache with the issuer down fails closed.
-	cold := NewJWKSCache(srv.URL, clock, JWKSOptions{})
+	cold := mustCache(t, srv.URL, clock, JWKSOptions{})
 	if _, err := cold.Key(ctx, "k1"); err == nil {
 		t.Fatal("cold cache with the issuer down must fail")
+	}
+}
+
+func mustCache(t *testing.T, url string, clock platform.Clock, o JWKSOptions) *JWKSCache {
+	t.Helper()
+	c, err := NewJWKSCache(url, clock, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// A caller that disconnects mid-fetch must not fail the fetch for others or start the
+// refetch rate limit (the cold-start / key-rotation denial of service).
+func TestCancelledCallerDoesNotPoisonRefetch(t *testing.T) {
+	k1, _ := keys(t)
+	gate := make(chan struct{})
+	srv := newGatedJWKSServer(t, gate, jwkOf("k1", &k1.PublicKey))
+	c := mustCache(t, srv.URL, platform.FixedClock{T: now}, JWKSOptions{MinRefetch: time.Hour})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Key(ctx, "forged")
+		done <- err
+	}()
+	for srv.fetches.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, ErrUnknownKey) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled caller: %v", err)
+	}
+	close(gate) // the detached fetch completes for everyone else
+	got, err := c.Key(context.Background(), "k1")
+	if err != nil || got.N.Cmp(k1.N) != 0 {
+		t.Fatalf("next caller after a cancelled one: %v", err)
+	}
+	if srv.fetches.Load() != 1 {
+		t.Fatalf("fetches = %d, want 1 (the cancelled caller's fetch was reused)", srv.fetches.Load())
+	}
+}
+
+func TestConcurrentUnknownKidsShareOneFetch(t *testing.T) {
+	k1, _ := keys(t)
+	gate := make(chan struct{})
+	srv := newGatedJWKSServer(t, gate, jwkOf("k1", &k1.PublicKey))
+	// The rate limit is off, so only singleflight keeps this to one fetch.
+	c := mustCache(t, srv.URL, platform.FixedClock{T: now}, JWKSOptions{MinRefetch: -1})
+
+	const n = 20
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, errs[i] = c.Key(context.Background(), "k1")
+		}()
+	}
+	for srv.fetches.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond) // let every caller join the in-flight fetch
+	close(gate)
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("caller %d: %v", i, err)
+		}
+	}
+	if srv.fetches.Load() != 1 {
+		t.Fatalf("fetches = %d, want 1", srv.fetches.Load())
+	}
+}
+
+func TestJWKSEndpointHardening(t *testing.T) {
+	for _, u := range []string{"http://issuer.example/jwks", "ftp://x/jwks", "/relative", "https://"} {
+		if _, err := NewJWKSCache(u, platform.SystemClock{}, JWKSOptions{}); err == nil {
+			t.Errorf("NewJWKSCache(%q) must be rejected", u)
+		}
+	}
+	for _, u := range []string{"https://token.actions.githubusercontent.com/.well-known/jwks", "http://127.0.0.1:8081/jwks", "http://localhost/jwks"} {
+		if _, err := NewJWKSCache(u, platform.SystemClock{}, JWKSOptions{}); err != nil {
+			t.Errorf("NewJWKSCache(%q) = %v", u, err)
+		}
+	}
+
+	k1, _ := keys(t)
+	good := newJWKSServer(t, jwkOf("k1", &k1.PublicKey))
+	redirect := httptest.NewServer(http.RedirectHandler(good.URL, http.StatusFound))
+	defer redirect.Close()
+	c := mustCache(t, redirect.URL, platform.FixedClock{T: now}, JWKSOptions{Client: &http.Client{}})
+	if _, err := c.Key(context.Background(), "k1"); err == nil || good.fetches.Load() != 0 {
+		t.Fatalf("redirect must not be followed: err=%v fetches=%d", err, good.fetches.Load())
+	}
+
+	huge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"keys":[` + strings.Repeat(" ", maxJWKSBytes) + `]}`))
+	}))
+	defer huge.Close()
+	if _, err := mustCache(t, huge.URL, platform.FixedClock{T: now}, JWKSOptions{}).Key(context.Background(), "k1"); err == nil {
+		t.Fatal("an oversized JWKS must be rejected")
 	}
 }
 
