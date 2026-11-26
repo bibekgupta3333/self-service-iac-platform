@@ -8,7 +8,7 @@ Python developer tooling. Each tool is a small, self-contained package with test
 
 | Tool | Purpose | Make target |
 |------|---------|-------------|
-| `manifest_validator` | Validates `modules/*/module.yaml` against the schema and checks parity with `variables.tf`/`outputs.tf`. | `make validate-manifests` |
+| `manifest_validator` | Validates `modules/*/module.yaml` against the schema and checks parity with `variables.tf`/`outputs.tf`, and `compatibility` with `required_version`/`required_providers`. | `make validate-manifests` |
 | `module_release` | SemVer interface-diff gate, release notes and catalog indexing for `modules/<name>` (used by `.github/workflows/module-release.yml`). | `make module-gate` |
 
 ## module_release
