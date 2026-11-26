@@ -27,7 +27,7 @@ func TestLogoutWithADeadSessionClearsTheCookie(t *testing.T) {
 
 	for name, cookies := range map[string][]*http.Cookie{
 		"no cookie":      nil,
-		"unknown id":     {{Name: session.CookieName, Value: "nope"}},
+		"unknown id":     {{Name: session.HostPrefix + session.CookieName, Value: "nope"}},
 		"already logged": {c},
 	} {
 		got := f.req("POST", "/v1/auth/logout", "", cookies)

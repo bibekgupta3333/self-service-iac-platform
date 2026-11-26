@@ -21,7 +21,8 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/session"
 )
 
-// StateCookieName binds a login attempt to the browser that started it (login CSRF).
+// StateCookieName (base name) binds a login attempt to the browser that started it (login
+// CSRF). Like the session cookie it gets the __Host- prefix when Secure.
 const StateCookieName = "iacp_oauth_state"
 
 // LoginService is the OAuth login port (oauth.Service).
@@ -87,8 +88,12 @@ func (h *AuthHandler) Routes(r chi.Router) {
 	r.Get("/me", h.me)
 }
 
+func (h *AuthHandler) sessionCookie() string {
+	return session.CookieNameFor(session.CookieName, h.Secure)
+}
+
 func (h *AuthHandler) stateCookie(value string, maxAge time.Duration) *http.Cookie {
-	return &http.Cookie{Name: StateCookieName, Value: value, Path: "/", HttpOnly: true, Secure: h.Secure,
+	return &http.Cookie{Name: session.CookieNameFor(StateCookieName, h.Secure), Value: value, Path: "/", HttpOnly: true, Secure: h.Secure,
 		SameSite: http.SameSiteLaxMode, MaxAge: int(maxAge.Seconds())}
 }
 
@@ -115,7 +120,7 @@ func (h *AuthHandler) login(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) callback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	var cookieState string
-	if c, err := r.Cookie(StateCookieName); err == nil {
+	if c, err := r.Cookie(session.CookieNameFor(StateCookieName, h.Secure)); err == nil {
 		cookieState = c.Value
 	}
 	http.SetCookie(w, h.stateCookie("", -time.Second)) // single use, whatever happens
@@ -137,7 +142,7 @@ func (h *AuthHandler) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Fixation hygiene: drop any session the browser already held, then set the new one.
-	if old, err := r.Cookie(session.CookieName); err == nil {
+	if old, err := r.Cookie(h.sessionCookie()); err == nil {
 		_ = h.Sessions.Revoke(r.Context(), old.Value)
 	}
 	http.SetCookie(w, session.Cookie(res.SessionID, h.Secure, h.Sessions.Policy().AbsoluteTTL))
@@ -161,7 +166,7 @@ func withQuery(target, key, value string) string {
 // revoked and audited; with a missing, expired or revoked one it only clears the cookie.
 func (h *AuthHandler) logout(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	c, err := r.Cookie(session.CookieName)
+	c, err := r.Cookie(h.sessionCookie())
 	if err != nil || c.Value == "" {
 		http.SetCookie(w, session.ClearCookie(h.Secure))
 		w.WriteHeader(http.StatusNoContent)
@@ -242,7 +247,7 @@ func (h *AuthHandler) me(w http.ResponseWriter, r *http.Request) {
 	for _, t := range prof.Teams {
 		dto.Teams = append(dto.Teams, teamRoleDTO{Slug: t.Slug, Role: string(t.Role)})
 	}
-	if c, err := r.Cookie(session.CookieName); err == nil && session.ValidID(c.Value) {
+	if c, err := r.Cookie(h.sessionCookie()); err == nil && session.ValidID(c.Value) {
 		dto.CSRFToken = session.CSRFToken(c.Value)
 	}
 	w.Header().Set("Cache-Control", "no-store")

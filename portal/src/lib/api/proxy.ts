@@ -51,7 +51,13 @@ export const FORWARD_RESPONSE_HEADERS = [
 ] as const;
 
 /** The only cookies the proxy lets the API set in the browser: the session and the login state. */
-export const SETTABLE_COOKIES: ReadonlySet<string> = new Set(["iacp_session", "iacp_oauth_state"]);
+export const SETTABLE_COOKIES: ReadonlySet<string> = new Set([
+  "iacp_session",
+  "iacp_oauth_state",
+  // Over https the backend uses the __Host- prefix (Secure, Path=/, no Domain).
+  "__Host-iacp_session",
+  "__Host-iacp_oauth_state",
+]);
 
 /**
  * filterSetCookies keeps the Set-Cookie values whose cookie name is allow-listed and that

@@ -115,6 +115,15 @@ describe("filterSetCookies", () => {
     ]);
   });
 
+  it("passes the __Host- prefixed names the backend uses over https", () => {
+    const host = [
+      "__Host-iacp_session=abc; Path=/; HttpOnly; Secure; SameSite=Lax",
+      "__Host-iacp_oauth_state=x; Path=/; HttpOnly; Secure; SameSite=Lax",
+    ];
+    expect(filterSetCookies(host)).toEqual(host);
+    expect(filterSetCookies(["__Host-other=1; Path=/; Secure"])).toEqual([]);
+  });
+
   it("drops cookies that try to widen their scope with Domain", () => {
     expect(filterSetCookies(["iacp_session=abc; Domain=example.test; Path=/", "iacp_session=a; domain = x.test"])).toEqual([]);
   });

@@ -74,7 +74,7 @@ func newUserAuth(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, clo
 		}
 		login := oauth.NewService(gh, states, syncer, sessions, recorder,
 			oauth.RedirectPolicy{Origins: g.RedirectAllowlist, Default: g.DefaultRedirect}, clock)
-		out.Authenticator = httpapi.NewSessionAuthenticator(sessions)
+		out.Authenticator = httpapi.NewSessionAuthenticator(sessions, g.SecureCookies())
 		out.Handler = &httpapi.AuthHandler{Login: login, Sessions: sessions, Profiles: users, Audit: recorder,
 			Secure: g.SecureCookies(), Mode: string(config.AuthModeGitHub),
 			LoginLimiter: ratelimit.New(loginsPerMinute, time.Minute, 10_000, clock)}

@@ -214,7 +214,7 @@ func TestSessionExpiry(t *testing.T) {
 func TestForgedAndMalformedCookies(t *testing.T) {
 	f := newFlow(t, true, rbac.RoleDeveloper)
 	for _, v := range []string{"", "x", strings.Repeat("A", 43), strings.Repeat("A", 500)} {
-		if rec := f.req("GET", "/v1/me", "", []*http.Cookie{{Name: session.CookieName, Value: v}}); rec.Code != http.StatusUnauthorized {
+		if rec := f.req("GET", "/v1/me", "", []*http.Cookie{{Name: session.HostPrefix + session.CookieName, Value: v}}); rec.Code != http.StatusUnauthorized {
 			t.Errorf("cookie %q = %d", v, rec.Code)
 		}
 	}

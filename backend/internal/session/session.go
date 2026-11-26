@@ -25,8 +25,21 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
 )
 
-// CookieName is the session cookie.
+// CookieName is the session cookie's name over plain-http loopback.
 const CookieName = "iacp_session"
+
+// HostPrefix is the cookie-name prefix browsers enforce for cookies that are Secure, have
+// Path=/ and carry no Domain, which is how every cookie here is built when Secure is on. A
+// subdomain or a plain-http page then cannot overwrite or shadow them.
+const HostPrefix = "__Host-"
+
+// CookieNameFor returns the name used for a cookie base name: prefixed when secure. Pure.
+func CookieNameFor(base string, secure bool) string {
+	if secure {
+		return HostPrefix + base
+	}
+	return base
+}
 
 // CSRFHeader carries the CSRF token on unsafe methods.
 const CSRFHeader = "X-CSRF-Token"
@@ -238,7 +251,7 @@ func SafeMethod(m string) bool {
 // Cookie builds the session cookie: HttpOnly, SameSite=Lax, host-only, and Secure unless
 // the deployment is plain-http loopback. Pure.
 func Cookie(id string, secure bool, maxAge time.Duration) *http.Cookie {
-	return &http.Cookie{Name: CookieName, Value: id, Path: "/", HttpOnly: true, Secure: secure,
+	return &http.Cookie{Name: CookieNameFor(CookieName, secure), Value: id, Path: "/", HttpOnly: true, Secure: secure,
 		SameSite: http.SameSiteLaxMode, MaxAge: int(maxAge.Seconds())}
 }
 

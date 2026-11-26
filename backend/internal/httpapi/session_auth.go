@@ -19,11 +19,15 @@ type SessionResolver interface {
 // SessionAuthenticator authenticates browser users by their iacp_session cookie. Every
 // unsafe method (anything but GET, HEAD, OPTIONS) must also carry the session's CSRF token
 // in X-CSRF-Token; the check lives here so no route can forget it.
-type SessionAuthenticator struct{ sessions SessionResolver }
+type SessionAuthenticator struct {
+	sessions SessionResolver
+	cookie   string
+}
 
 // NewSessionAuthenticator returns a SessionAuthenticator.
-func NewSessionAuthenticator(s SessionResolver) *SessionAuthenticator {
-	return &SessionAuthenticator{sessions: s}
+// secure must match the handler's cookie setting, since it selects the cookie name.
+func NewSessionAuthenticator(s SessionResolver, secure bool) *SessionAuthenticator {
+	return &SessionAuthenticator{sessions: s, cookie: session.CookieNameFor(session.CookieName, secure)}
 }
 
 // errCSRF is the 403 for a missing or wrong CSRF token.
@@ -32,7 +36,7 @@ var errCSRF = &apperr.Error{Kind: apperr.KindForbidden, Code: "csrf_token_invali
 
 // Authenticate implements Authenticator.
 func (a *SessionAuthenticator) Authenticate(r *http.Request) (identity.Principal, error) {
-	c, err := r.Cookie(session.CookieName)
+	c, err := r.Cookie(a.cookie)
 	if err != nil || c.Value == "" {
 		return identity.Principal{}, ErrUnauthenticated
 	}

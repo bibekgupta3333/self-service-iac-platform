@@ -324,7 +324,7 @@ func TestSafeMethod(t *testing.T) {
 
 func TestCookieFlags(t *testing.T) {
 	c := Cookie("abc", true, 8*time.Hour)
-	if c.Name != "iacp_session" || !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteLaxMode ||
+	if c.Name != "__Host-iacp_session" || !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteLaxMode ||
 		c.Path != "/" || c.Domain != "" || c.MaxAge != 8*3600 {
 		t.Fatalf("cookie = %+v", c)
 	}
@@ -336,6 +336,17 @@ func TestCookieFlags(t *testing.T) {
 	}
 	if strings.Contains(Cookie("abc", false, time.Hour).String(), "Secure") {
 		t.Fatal("loopback cookies must not be Secure")
+	}
+	// The __Host- prefix is only valid with Secure, Path=/ and no Domain, so it is used
+	// exactly when the cookie is Secure.
+	if n := Cookie("abc", false, time.Hour).Name; n != "iacp_session" {
+		t.Fatalf("loopback name = %q", n)
+	}
+	if n := ClearCookie(true).Name; n != "__Host-iacp_session" {
+		t.Fatalf("clear name = %q", n)
+	}
+	if CookieNameFor("x", true) != "__Host-x" || CookieNameFor("x", false) != "x" {
+		t.Fatal("CookieNameFor")
 	}
 	clr := ClearCookie(true)
 	if clr.MaxAge != -1 || clr.Value != "" || !clr.HttpOnly || !clr.Secure || clr.SameSite != http.SameSiteLaxMode {

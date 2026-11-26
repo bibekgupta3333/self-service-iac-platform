@@ -137,7 +137,7 @@ func newFlow(t *testing.T, secure bool, role rbac.Role) *flow {
 	f.ah = ah
 	f.deps = Deps{
 		Logger:         slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		Auth:           NewSessionAuthenticator(f.sess),
+		Auth:           NewSessionAuthenticator(f.sess, secure),
 		Ready:          okPinger{},
 		Catalog:        NewCatalogHandler(&fakeCatalog{versions: []catalog.ModuleVersion{sqsVersion()}}),
 		Public:         []RouteRegistrar{ah, NewRequestHandler(f.reqs, allowAllAccess{}), NewAuditHandler(&fakeVerifier{})},
@@ -152,7 +152,7 @@ func newFlow(t *testing.T, secure bool, role rbac.Role) *flow {
 
 func cookieOf(rec *httptest.ResponseRecorder, name string) *http.Cookie {
 	for _, c := range rec.Result().Cookies() {
-		if c.Name == name {
+		if c.Name == name || c.Name == session.HostPrefix+name {
 			return c
 		}
 	}
