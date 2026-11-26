@@ -177,6 +177,38 @@ describe("ApiClient errors", () => {
   });
 });
 
+describe("ApiClient stacks", () => {
+  const sid = "7b1c0a52-6c11-4f0e-b9b6-5f2f3c8d1a90";
+
+  it("lists stacks with the API's filter names and cursor", async () => {
+    const f = fakeFetch(json(200, { data: [], next_cursor: "c2" }));
+    const page = await client(f.fetch).listStacks({ team: "payments", env: "production", status: "drifted", limit: 25, cursor: "c1" });
+    expect(f.calls[0]?.url).toBe("http://api.test/v1/stacks?team=payments&env=production&status=drifted&limit=25&cursor=c1");
+    expect(page.next_cursor).toBe("c2");
+  });
+
+  it("lists with no filter and reads one stack by id", async () => {
+    const f = fakeFetch(json(200, { data: [], next_cursor: null }), json(200, { id: sid, name: "orders" }));
+    await client(f.fetch).listStacks();
+    expect(f.calls[0]?.url).toBe("http://api.test/v1/stacks");
+    expect((await client(f.fetch).getStack(sid)).name).toBe("orders");
+    expect(f.calls[1]?.url).toBe(`http://api.test/v1/stacks/${sid}`);
+  });
+
+  it("posts update and destroy bodies with an Idempotency-Key", async () => {
+    const accepted = (kind: string) => json(202, { id: "r1", kind }, { "Idempotent-Replayed": "true" });
+    const f = fakeFetch(accepted("destroy"), accepted("update"));
+    const c = client(f.fetch);
+    const destroy = { kind: "destroy", stack_id: sid, confirm_stack_name: "orders", justification: "retired" } as const;
+    const res = await c.createRequest(destroy, "key-1");
+    expect(res.replayed).toBe(true);
+    expect(JSON.parse(String(f.calls[0]?.init.body))).toEqual(destroy);
+    expect(headersOf(f.calls[0]).get("idempotency-key")).toBe("key-1");
+    await c.createRequest({ kind: "update", stack_id: sid, allow_removals: true, resources: [] }, "key-2");
+    expect(JSON.parse(String(f.calls[1]?.init.body))).toMatchObject({ kind: "update", allow_removals: true });
+  });
+});
+
 describe("ApiClient.openRequestEvents", () => {
   const id = "0d7e3a52-6c11-4f0e-b9b6-5f2f3c8d1a90";
 
