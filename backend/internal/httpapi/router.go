@@ -45,6 +45,16 @@ type Deps struct {
 	// Webhooks authenticate each delivery themselves (HMAC signature), so they are mounted
 	// under /v1 without the user or machine authenticator.
 	Webhooks []RouteRegistrar
+	// Metrics, when set, instruments every request and serves GET /metrics behind
+	// MetricsAccess (loopback or the metrics token).
+	Metrics       MetricsSource
+	MetricsAccess MetricsAccess
+}
+
+// MetricsSource records requests and serves the exposition (observability.Metrics).
+type MetricsSource interface {
+	RequestObserver
+	Handler() http.Handler
 }
 
 var probeMethods = []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
@@ -59,7 +69,14 @@ func allowedMethods(r chi.Routes, path string) []string {
 func NewRouter(d Deps) http.Handler {
 	r := chi.NewRouter()
 	// accessLog wraps recoverer so requests that panic are still logged with their 500.
-	r.Use(requestContext(d.Logger), accessLog, recoverer)
+	r.Use(requestContext(d.Logger))
+	if d.Metrics != nil {
+		r.Use(instrument(d.Metrics)) // outside recoverer, so panics count as 500s
+	}
+	r.Use(accessLog, recoverer)
+	if d.Metrics != nil {
+		r.Get("/metrics", metricsHandler(d.Metrics.Handler(), d.MetricsAccess))
+	}
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

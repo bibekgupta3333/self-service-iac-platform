@@ -383,6 +383,9 @@ jobs:
       - name: pytest (tools)
         run: python -m pytest -q tools
 
+      - name: CODEOWNERS matches .github/teams.yaml
+        run: python -m tools.codeowners --check
+
   portal:
     name: portal (lint, typecheck, test, build)
     needs: detect

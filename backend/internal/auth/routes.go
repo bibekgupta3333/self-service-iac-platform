@@ -20,6 +20,9 @@ const (
 	// RouteRuns: POST /v1/runs. Any pipeline workflow; runs.CheckProvenance then applies
 	// the per-pipeline rules (workflow file, main ref, event).
 	RouteRuns RouteClass = "runs"
+	// RouteBudgetContext: GET /v1/internal/budget-context. Read-only policy input for
+	// conftest, fetched by pr-validate.yml (pull_request) and apply.yml (main).
+	RouteBudgetContext RouteClass = "budget_context"
 )
 
 // RoutePolicy is what an OIDC caller must be to use a route class.
@@ -30,7 +33,8 @@ type RoutePolicy struct {
 }
 
 // RoutePolicies is the per-route allow-list. A pull-request token (pr-validate.yml on a
-// refs/pull/* ref, whose workflow file the PR author controls) only ever reaches /v1/runs.
+// refs/pull/* ref, whose workflow file the PR author controls) only reaches /v1/runs and
+// the read-only budget context; it can never take locks or index the catalog.
 var RoutePolicies = map[RouteClass]RoutePolicy{
 	RouteLocks: {
 		Workflows: []string{"apply.yml", "ttl-reaper.yml"},
@@ -45,6 +49,10 @@ var RoutePolicies = map[RouteClass]RoutePolicy{
 	RouteRuns: {
 		Workflows: []string{"pr-validate.yml", "apply.yml", "drift.yml", "ttl-reaper.yml"},
 		Events:    []string{"pull_request", "push", "workflow_dispatch", "schedule"},
+	},
+	RouteBudgetContext: {
+		Workflows: []string{"pr-validate.yml", "apply.yml"},
+		Events:    []string{"pull_request", "push", "workflow_dispatch"},
 	},
 }
 

@@ -12,8 +12,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/audit"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/auth"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/budgets"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/catalog"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/config"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/db"
@@ -109,7 +112,9 @@ func run() error {
 		webhooks.NewIngester(webhooks.NewPostgresRepository(pool), clock, cfg.Publisher.GitHub.Repository()),
 		cfg.WebhookSecret, worker.Wake)
 
-	internalAuth, err := newMachineAuthenticator(cfg, clock)
+	replayStore := newReplayStore(cfg.OIDC, pool, clock)
+	startReplaySweeper(ctx, replayStore, cfg.OIDC.Enabled(), logger)
+	internalAuth, err := newMachineAuthenticator(cfg, clock, replayStore)
 	if err != nil {
 		return err
 	}
@@ -124,9 +129,14 @@ func run() error {
 			httpapi.NewRequestHandler(requestSvc),
 			httpapi.NewAuditHandler(audit.NewVerifier(pool)),
 		},
-		InternalHandlers: []httpapi.RouteRegistrar{httpapi.NewLockHandler(lockSvc)},
+		InternalHandlers: []httpapi.RouteRegistrar{
+			httpapi.NewLockHandler(lockSvc),
+			httpapi.NewBudgetContextHandler(budgets.NewService(budgets.NewPostgresRepository(pool), clock)),
+		},
 		Webhooks:         []httpapi.RouteRegistrar{webhookHandler},
 		PipelineHandlers: []httpapi.RouteRegistrar{httpapi.NewRunHandler(runs.NewService(runs.NewPostgresRepository(pool), clock))},
+		Metrics:          newMetrics(pool),
+		MetricsAccess:    httpapi.NewMetricsAccess(cfg.MetricsToken),
 	})
 
 	return serve(ctx, newServer(cfg.HTTPAddr, handler), cfg.ShutdownTimeout)
@@ -147,6 +157,16 @@ func newPublisher(ctx context.Context, cfg config.Config, clock platform.Clock) 
 			Owner: g.Owner, Repo: g.Repo, BaseBranch: cfg.Publisher.BaseBranch, APIURL: g.APIURL}, clock)
 	}
 	return nil, nil
+}
+
+// newMetrics builds the Prometheus registry served on /metrics, including pool gauges.
+func newMetrics(pool *pgxpool.Pool) *observability.Metrics {
+	m := observability.NewMetrics()
+	m.RegisterPool(func() observability.PoolStats {
+		s := pool.Stat()
+		return observability.PoolStats{Acquired: s.AcquiredConns(), Idle: s.IdleConns(), Total: s.TotalConns(), Max: s.MaxConns()}
+	})
+	return m
 }
 
 // newServer bounds every phase of a connection so slow or idle clients cannot pin
@@ -198,7 +218,7 @@ func newAuthenticator(ctx context.Context, cfg config.Config, users *identity.Us
 // newMachineAuthenticator builds the authenticator for /v1/internal/* and /v1/runs. It
 // fails closed: GitHub OIDC when configured, the shared token when set, and with
 // neither every call is rejected.
-func newMachineAuthenticator(cfg config.Config, clock platform.Clock) (httpapi.Authenticator, error) {
+func newMachineAuthenticator(cfg config.Config, clock platform.Clock, replay auth.ReplayStore) (httpapi.Authenticator, error) {
 	var chain httpapi.AnyAuthenticator
 	if cfg.OIDC.Enabled() {
 		o := cfg.OIDC
@@ -218,7 +238,7 @@ func newMachineAuthenticator(cfg config.Config, clock platform.Clock) (httpapi.A
 		if err != nil {
 			return nil, err
 		}
-		chain = append(chain, httpapi.NewOIDCAuthenticator(verifier))
+		chain = append(chain, httpapi.NewOIDCAuthenticator(auth.NewReplayGuard(verifier, replay, o.Leeway)))
 		if o.RepositoryID == "" {
 			slog.Warn("IACP_OIDC_REPOSITORY_ID is not set: tokens are matched by owner/name only, which can be re-registered after a rename or delete")
 		}
@@ -233,6 +253,25 @@ func newMachineAuthenticator(cfg config.Config, clock platform.Clock) (httpapi.A
 		return httpapi.DenyAuthenticator{}, nil
 	}
 	return chain, nil
+}
+
+// newReplayStore picks where used OIDC jti values are remembered (docs/03 §6.9).
+func newReplayStore(o config.OIDCConfig, pool *pgxpool.Pool, clock platform.Clock) auth.ReplayStore {
+	if o.ReplayStore == config.ReplayStoreMemory {
+		if o.Enabled() {
+			slog.Warn("IACP_OIDC_REPLAY_STORE=memory: replayed tokens are only caught per instance; use postgres with more than one replica")
+		}
+		return auth.NewMemoryReplayCache(auth.DefaultReplayCapacity, clock)
+	}
+	return auth.NewPostgresReplayStore(pool, clock)
+}
+
+// startReplaySweeper purges expired oidc_jti rows in the background when the shared
+// store is in use; claims only remove an expired row for their own jti.
+func startReplaySweeper(ctx context.Context, store auth.ReplayStore, enabled bool, logger *slog.Logger) {
+	if pg, ok := store.(*auth.PostgresReplayStore); ok && enabled {
+		go auth.RunReplaySweeper(ctx, pg, 5*time.Minute, logger)
+	}
 }
 
 // serve runs srv until ctx is cancelled, then drains in-flight requests.

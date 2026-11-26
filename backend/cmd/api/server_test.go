@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/auth"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/config"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/httpapi"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
@@ -39,7 +40,7 @@ func TestMachineAuthenticatorFailsClosed(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			a, err := newMachineAuthenticator(tt.cfg, platform.SystemClock{})
+			a, err := newMachineAuthenticator(tt.cfg, platform.SystemClock{}, auth.NewMemoryReplayCache(0, platform.SystemClock{}))
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("want error")
@@ -71,5 +72,15 @@ func TestNewServerSetsTimeouts(t *testing.T) {
 	}
 	if s.ReadTimeout < s.ReadHeaderTimeout || s.WriteTimeout < s.ReadTimeout {
 		t.Fatalf("timeouts should nest (header <= read <= write): %v %v %v", s.ReadHeaderTimeout, s.ReadTimeout, s.WriteTimeout)
+	}
+}
+
+func TestNewReplayStore(t *testing.T) {
+	clock := platform.SystemClock{}
+	if _, ok := newReplayStore(config.OIDCConfig{ReplayStore: config.ReplayStoreMemory}, nil, clock).(*auth.MemoryReplayCache); !ok {
+		t.Fatal("memory must select the per-process cache")
+	}
+	if _, ok := newReplayStore(config.OIDCConfig{ReplayStore: config.ReplayStorePostgres}, nil, clock).(*auth.PostgresReplayStore); !ok {
+		t.Fatal("postgres must select the shared store")
 	}
 }
