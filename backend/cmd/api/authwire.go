@@ -39,8 +39,10 @@ type userAuth struct {
 }
 
 // newUserAuth builds the user authenticator for cfg.AuthMode. In dev mode the fixed local
-// user is a platform admin for route policies only: request creation still reads its team
-// role from the database, exactly as before.
+// user is a platform admin through the flag on its principal, not in the database: route
+// policies, visibility (identity.Visibility) and the request service's role checks
+// (identity.Principal.EffectiveRole) all read that flag, so the dev user can update and
+// destroy every stack it can see without being a database admin.
 func newUserAuth(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, clock platform.Clock,
 	auditWriter *audit.Writer, logger *slog.Logger) (userAuth, error) {
 	users := identity.NewUserStore(pool)
