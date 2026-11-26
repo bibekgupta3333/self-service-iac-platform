@@ -68,6 +68,29 @@ func (f HandlerFunc) Handle(ctx context.Context, j Job) error { return f(ctx, j)
 // ErrPermanent marks a failure that retrying cannot fix (wrap it with fmt.Errorf("…: %w")).
 var ErrPermanent = errors.New("permanent failure")
 
+// longerRetry is an error that may be retried for more attempts than the worker default.
+type longerRetry struct {
+	err      error
+	attempts int
+}
+
+func (e *longerRetry) Error() string { return e.err.Error() }
+func (e *longerRetry) Unwrap() error { return e.err }
+
+// RetryLonger marks err as expected to clear up given time (for example a webhook that
+// raced the write it refers to): the job is retried with the usual backoff for up to
+// attempts tries instead of Options.MaxAttempts.
+func RetryLonger(err error, attempts int) error { return &longerRetry{err: err, attempts: attempts} }
+
+// MaxAttemptsFor is the attempt budget for a job that failed with err. Pure.
+func MaxAttemptsFor(err error, def int) int {
+	var lr *longerRetry
+	if errors.As(err, &lr) && lr.attempts > def {
+		return lr.attempts
+	}
+	return def
+}
+
 // ErrClaimLost means the job was reclaimed by another worker (this claim's lease ran out),
 // so this worker's outcome is discarded.
 var ErrClaimLost = errors.New("job claim lost")
@@ -213,7 +236,7 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	switch {
 	case herr == nil:
 		err = w.store.Complete(ctx, j.ID, j.Attempts, now)
-	case errors.Is(herr, ErrPermanent) || j.Last():
+	case errors.Is(herr, ErrPermanent) || j.Attempts >= MaxAttemptsFor(herr, j.MaxAttempts):
 		log.Error("job failed permanently", "error", herr)
 		err = w.store.Dead(ctx, j.ID, j.Attempts, now, truncate(herr.Error(), 2000))
 	default:

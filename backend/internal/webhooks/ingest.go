@@ -137,6 +137,11 @@ type RequestEvents interface {
 	RecordWorkflowHint(ctx context.Context, h requests.WorkflowHint) (bool, error)
 }
 
+// NotYetPublishedAttempts is the attempt budget of an event that raced its PR record:
+// with the outbox backoff (2 s doubling, capped at 5 min) the last try is about 13.5
+// minutes after the first.
+const NotYetPublishedAttempts = 10
+
 // PRHeads reads a PR's current head (publish.Publisher implements it).
 type PRHeads interface {
 	PullRequestHead(ctx context.Context, number int) (string, error)
@@ -168,6 +173,11 @@ func (a *Applier) Handle(ctx context.Context, j outbox.Job) error {
 			Event: c.RequestEvent, MergeCommitSHA: c.MergeCommitSHA, DeliveryID: c.DeliveryID, Action: c.Action,
 			HeadSHA: c.HeadSHA, BeforeSHA: c.BeforeSHA}
 		out, err := a.reqs.ApplyGitHubEvent(ctx, e)
+		if errors.Is(err, requests.ErrNotYetPublished) {
+			// The PR is being recorded (a slow publish with GitHub retries can take minutes):
+			// keep retrying with backoff for about 13.5 minutes instead of the default budget.
+			return outbox.RetryLonger(err, NotYetPublishedAttempts)
+		}
 		if err != nil {
 			return err
 		}

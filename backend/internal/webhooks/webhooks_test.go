@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -149,10 +150,14 @@ type fakeEvents struct {
 	events []requests.GitHubEvent
 	hints  []requests.WorkflowHint
 	known  string // when set, pushes not starting here are stale
+	err    error
 }
 
 func (f *fakeEvents) ApplyGitHubEvent(_ context.Context, e requests.GitHubEvent) (requests.EventOutcome, error) {
 	f.events = append(f.events, e)
+	if f.err != nil {
+		return requests.EventOutcome{}, f.err
+	}
 	if f.known != "" && e.Event == requests.EventNewCommit && e.BeforeSHA != f.known {
 		return requests.EventOutcome{Reason: "stale_head", KnownHead: f.known}, nil
 	}
@@ -222,5 +227,14 @@ func TestApplier(t *testing.T) {
 		if err := a.Handle(ctx, outbox.Job{Payload: json.RawMessage(bad)}); !errors.Is(err, outbox.ErrPermanent) {
 			t.Fatalf("payload %s: err = %v", bad, err)
 		}
+	}
+}
+
+func TestApplierRetriesEarlyEventsLonger(t *testing.T) {
+	f := &fakeEvents{err: fmt.Errorf("req-7k3p9x: %w", requests.ErrNotYetPublished)}
+	closed, _ := json.Marshal(Command{Kind: KindTransition, RequestShortID: "req-7k3p9x", PRNumber: 812, RequestEvent: requests.EventPRClosed})
+	err := NewApplier(f, nil).Handle(context.Background(), outbox.Job{Payload: closed})
+	if !errors.Is(err, requests.ErrNotYetPublished) || outbox.MaxAttemptsFor(err, 6) != NotYetPublishedAttempts {
+		t.Fatalf("err = %v", err)
 	}
 }

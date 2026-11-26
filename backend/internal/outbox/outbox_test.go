@@ -160,6 +160,39 @@ func flaky(failures int) Handler {
 	})
 }
 
+func TestRetryLongerExtendsTheBudget(t *testing.T) {
+	t0 := time.Date(2026, 11, 26, 9, 0, 0, 0, time.UTC)
+	store := &memStore{}
+	store.add("early")
+	clock := &platform.FixedClock{T: t0}
+	w := NewWorker(store, map[string]Handler{"early": HandlerFunc(func(context.Context, Job) error {
+		return RetryLonger(errors.New("not yet"), 10)
+	})}, clock, Options{MaxAttempts: 3, Logger: quiet()})
+	var waited time.Duration
+	for i := 0; i < 10; i++ {
+		if worked, err := w.RunOnce(context.Background()); err != nil || !worked {
+			t.Fatalf("run %d: %v %v", i, worked, err)
+		}
+		j := store.find(1)
+		if i < 9 {
+			if j.dead {
+				t.Fatalf("job died after %d attempts", j.Attempts)
+			}
+			waited += j.availableAt.Sub(clock.T)
+			clock.T = j.availableAt
+		}
+	}
+	if j := store.find(1); !j.dead || j.Attempts != 10 {
+		t.Fatalf("job = %+v", j)
+	}
+	if waited < 13*time.Minute || waited > 15*time.Minute {
+		t.Fatalf("total backoff %s, want about 13.5 minutes", waited)
+	}
+	if MaxAttemptsFor(errors.New("x"), 6) != 6 || MaxAttemptsFor(RetryLonger(errors.New("x"), 2), 6) != 6 {
+		t.Fatal("RetryLonger must never shorten the budget")
+	}
+}
+
 func TestRetryWaitsForBackoff(t *testing.T) {
 	t0 := time.Date(2026, 11, 26, 9, 0, 0, 0, time.UTC)
 	store := &memStore{}
