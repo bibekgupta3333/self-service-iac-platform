@@ -79,7 +79,47 @@ func (r *PostgresRepository) Candidates(ctx context.Context, horizon time.Time, 
 	if err != nil {
 		return nil, fmt.Errorf("scan ttl candidates: %w", err)
 	}
+	if err := r.loadAttempts(ctx, out); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// loadAttempts fills Stack.Attempts of every stack with one query.
+func (r *PostgresRepository) loadAttempts(ctx context.Context, stacks []Stack) error {
+	if len(stacks) == 0 {
+		return nil
+	}
+	ids := make([]uuid.UUID, len(stacks))
+	idx := make(map[uuid.UUID]int, len(stacks))
+	for i, s := range stacks {
+		ids[i], idx[s.ID] = s.ID, i
+	}
+	rows, err := r.pool.Query(ctx, AttemptsSQL("r.stack_id = ANY($1::uuid[])"), ids)
+	if err != nil {
+		return fmt.Errorf("query ttl attempts: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id uuid.UUID
+		var a Attempt
+		if err := rows.Scan(&id, &a.CreatedAt, &a.EndedAt, &a.Outcome); err != nil {
+			return fmt.Errorf("scan ttl attempt: %w", err)
+		}
+		stacks[idx[id]].Attempts = append(stacks[idx[id]].Attempts, a)
+	}
+	return rows.Err()
+}
+
+// AttemptsSQL selects the unsuccessful TTL destroys matching where, oldest first: destroy
+// requests opened by the platform bot with the TTL justification that ended failed, rejected
+// or cancelled. Columns: stack id, created, ended, outcome.
+func AttemptsSQL(where string) string {
+	return `SELECT r.stack_id, r.created_at, r.completed_at, r.status::text
+		FROM requests r JOIN users u ON u.id = r.created_by
+		WHERE ` + where + ` AND r.kind = 'destroy' AND r.justification = 'ttl expired' AND u.is_system
+		  AND r.status IN ('failed', 'rejected', 'cancelled') AND r.completed_at IS NOT NULL
+		ORDER BY r.created_at, r.id`
 }
 
 // SystemUserID implements Repository.
@@ -122,8 +162,8 @@ func (s *pgStore) LockStack(ctx context.Context, id uuid.UUID) (Stack, error) {
 }
 
 func (s *pgStore) SetExpiry(ctx context.Context, id uuid.UUID, e Extension) error {
-	tag, err := s.tx.Exec(ctx, `UPDATE stacks SET expires_at = $2, ttl_extended_hours = $3, ttl_warned_at = NULL,
-		updated_at = now() WHERE id = $1`, id, e.ExpiresAt, e.ExtendedHours)
+	tag, err := s.tx.Exec(ctx, `UPDATE stacks SET expires_at = $2, ttl_extended_hours = $3, ttl_warned_at = CASE WHEN $4 THEN NULL ELSE ttl_warned_at END,
+		updated_at = now() WHERE id = $1`, id, e.ExpiresAt, e.ExtendedHours, e.ClearWarning)
 	if err != nil {
 		return err
 	}

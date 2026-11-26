@@ -31,6 +31,10 @@ const (
 	statusDestroyed  = "destroyed"
 )
 
+// MaxTTLCeilingHours (one year) bounds IACP_TTL_MAX_HOURS, far below where hour arithmetic
+// overflows time.Duration or the int4 ttl_hours column.
+const MaxTTLCeilingHours = 8760
+
 // Policy bounds the TTL of an ephemeral stack. All values are hours.
 type Policy struct {
 	MinHours     int
@@ -38,12 +42,18 @@ type Policy struct {
 	DefaultHours int
 	// MaxExtensionHours caps the total time extensions may add to one stack.
 	MaxExtensionHours int
+	// BackoffHours is how long after a failed, rejected or cancelled TTL destroy no new one is
+	// opened for the stack; 0 disables the backoff.
+	BackoffHours int
+	// MaxAttempts is how many unsuccessful TTL destroys a stack may have in its current
+	// lifetime cycle before the reaper stops and reports it as blocked; 0 means no limit.
+	MaxAttempts int
 }
 
 // DefaultPolicy is used when nothing is configured: 1 h to 30 days, 72 h by default, and
 // at most 7 days of extensions per stack.
 func DefaultPolicy() Policy {
-	return Policy{MinHours: 1, MaxHours: 720, DefaultHours: 72, MaxExtensionHours: 168}
+	return Policy{MinHours: 1, MaxHours: 720, DefaultHours: 72, MaxExtensionHours: 168, BackoffHours: 24, MaxAttempts: 3}
 }
 
 // Validate reports an inconsistent policy (a configuration error). Pure.
@@ -55,8 +65,12 @@ func (p Policy) Validate() error {
 		return fmt.Errorf("maximum TTL %d is below the minimum %d", p.MaxHours, p.MinHours)
 	case p.DefaultHours < p.MinHours || p.DefaultHours > p.MaxHours:
 		return fmt.Errorf("default TTL %d must be between %d and %d", p.DefaultHours, p.MinHours, p.MaxHours)
+	case p.MaxHours > MaxTTLCeilingHours:
+		return fmt.Errorf("maximum TTL %d exceeds the ceiling of %d hours", p.MaxHours, MaxTTLCeilingHours)
 	case p.MaxExtensionHours < 0:
 		return fmt.Errorf("maximum total extension must not be negative, got %d", p.MaxExtensionHours)
+	case p.BackoffHours < 0 || p.MaxAttempts < 0:
+		return fmt.Errorf("retry backoff (%d h) and maximum attempts (%d) must not be negative", p.BackoffHours, p.MaxAttempts)
 	}
 	return nil
 }
@@ -140,6 +154,62 @@ type Stack struct {
 	TTLExtendedHours int
 	// MaxTTLHours is the environment's lifetime ceiling, nil when it has none.
 	MaxTTLHours *int
+	// Attempts are the platform's earlier TTL destroys of this stack that ended unsuccessfully
+	// (failed, rejected or cancelled), oldest first. Only the teardown backoff reads them.
+	Attempts []Attempt
+}
+
+// Attempt is one TTL destroy request that ended without destroying the stack.
+type Attempt struct {
+	CreatedAt time.Time
+	EndedAt   time.Time
+	Outcome   string // failed, rejected or cancelled
+}
+
+// BackoffState is the verdict of Policy.Backoff.
+type BackoffState string
+
+// Backoff states.
+const (
+	// BackoffClear: a destroy may be opened now.
+	BackoffClear BackoffState = "clear"
+	// BackoffWait: the last attempt ended too recently.
+	BackoffWait BackoffState = "wait"
+	// BackoffBlocked: too many attempts; a human has to look at the stack.
+	BackoffBlocked BackoffState = "blocked"
+)
+
+// Backoff decides whether another TTL destroy may be opened for s at now. Only attempts
+// created at or after the current expiry count: extending the stack starts a new cycle. A
+// stack with MaxAttempts unsuccessful attempts is blocked; otherwise it waits BackoffHours
+// after the newest attempt ended. Pure.
+func (p Policy) Backoff(s Stack, now time.Time) (BackoffState, time.Time) {
+	if s.ExpiresAt == nil {
+		return BackoffClear, time.Time{}
+	}
+	var cycle []Attempt
+	for _, a := range s.Attempts {
+		if !a.CreatedAt.Before(*s.ExpiresAt) {
+			cycle = append(cycle, a)
+		}
+	}
+	if len(cycle) == 0 {
+		return BackoffClear, time.Time{}
+	}
+	if p.MaxAttempts > 0 && len(cycle) >= p.MaxAttempts {
+		return BackoffBlocked, time.Time{}
+	}
+	last := cycle[0].EndedAt
+	for _, a := range cycle {
+		if a.EndedAt.After(last) {
+			last = a.EndedAt
+		}
+	}
+	until := last.Add(time.Duration(p.BackoffHours) * time.Hour)
+	if p.BackoffHours > 0 && now.Before(until) {
+		return BackoffWait, until
+	}
+	return BackoffClear, time.Time{}
 }
 
 // Eligible reports whether the stack may be handled by the TTL machinery at all: it must be
@@ -190,6 +260,10 @@ func HoursLeft(expiresAt, now time.Time) int {
 type Extension struct {
 	ExpiresAt     time.Time
 	ExtendedHours int // total extension after this one
+	// ClearWarning is true when the new expiry lies beyond the warning window, so the stack
+	// is warned again before it. An extension that stays inside the window keeps the
+	// recorded warning: the owners were already told within the last 24 hours.
+	ClearWarning bool
 }
 
 // Extend computes the new expiry when hours are added at now. The time is added to the
@@ -220,7 +294,8 @@ func (p Policy) Extend(s Stack, hours int, now time.Time) (Extension, error) {
 		return Extension{}, apperr.Conflict("ttl_environment_max",
 			fmt.Sprintf("the stack's lifetime would pass the %d h maximum of %s", *s.MaxTTLHours, s.Environment))
 	}
-	return Extension{ExpiresAt: next, ExtendedHours: s.TTLExtendedHours + hours}, nil
+	return Extension{ExpiresAt: next, ExtendedHours: s.TTLExtendedHours + hours,
+		ClearWarning: next.Sub(now) > WarnBefore}, nil
 }
 
 // Due is a stack and what it is due for.
@@ -229,16 +304,20 @@ type Due struct {
 	Phase Phase
 }
 
-// Classify keeps the stacks that are due for a warning or a teardown at now, teardowns
-// first and each group by expiry then id, so the order is deterministic. Pure.
-func Classify(stacks []Stack, now time.Time) []Due {
+// Classify keeps the stacks that are due for a warning or a teardown at now (teardowns
+// of stacks in backoff left out), teardowns first and each group by expiry then id, so the order is deterministic. Pure.
+func (p Policy) Classify(stacks []Stack, now time.Time) []Due {
 	var warn, down []Due
 	for _, s := range stacks {
 		switch PhaseAt(s, now) {
 		case PhaseWarn:
 			warn = append(warn, Due{Stack: s, Phase: PhaseWarn})
 		case PhaseTeardown:
-			down = append(down, Due{Stack: s, Phase: PhaseTeardown})
+			// A stack in backoff is left alone; a blocked one stays listed so that the
+			// teardown call records it (ttl.blocked) and the reaper reports it.
+			if state, _ := p.Backoff(s, now); state != BackoffWait {
+				down = append(down, Due{Stack: s, Phase: PhaseTeardown})
+			}
 		}
 	}
 	sortDue(warn)

@@ -72,6 +72,9 @@ type DestroyResult struct {
 	RequestID uuid.UUID
 	ShortID   string
 	Queued    bool // the request waits behind another holder of the stack lock
+	// Blocked is true when the stack used up its TTL destroy attempts: nothing was opened
+	// and ttl.blocked was recorded (once per expiry).
+	Blocked bool
 }
 
 // Destroyer opens the destroy request of an expired stack (requests.Service).
@@ -211,7 +214,7 @@ func (s *Service) Due(ctx context.Context) ([]DueItem, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list ttl candidates: %w", err)
 	}
-	due := Classify(rows, now)
+	due := s.policy.Classify(rows, now)
 	out := make([]DueItem, len(due))
 	for i, d := range due {
 		out[i] = DueItem{Stack: d.Stack, Phase: d.Phase}
@@ -289,6 +292,11 @@ func (s *Service) Teardown(ctx context.Context, id uuid.UUID, correlationID stri
 	res, err := s.destroyer.OpenTTLDestroy(ctx, DestroyCommand{StackID: id, By: by, CorrelationID: correlationID})
 	if err != nil {
 		return DestroyResult{}, err
+	}
+	if res.Blocked {
+		return DestroyResult{}, apperr.Conflict("ttl_blocked", fmt.Sprintf(
+			"stack %s used up its %d TTL destroy attempts; it needs a person (extend it, or fix the failure and destroy it by hand)",
+			id, s.policy.MaxAttempts))
 	}
 	return res, nil
 }

@@ -110,6 +110,12 @@ type Store interface {
 	// UpdateRequest writes r's mutable fields if the stored status is still from;
 	// otherwise it returns a concurrent_update conflict.
 	UpdateRequest(ctx context.Context, r *Request, from Status) error
+	// TTLDestroyAttempts lists the stack's TTL destroys (opened by the platform bot with the
+	// "ttl expired" justification) that ended failed, rejected or cancelled, oldest first.
+	TTLDestroyAttempts(ctx context.Context, stackID uuid.UUID) ([]ttl.Attempt, error)
+	// TTLBlockedSince reports whether a ttl.blocked audit event exists for the stack at or
+	// after since.
+	TTLBlockedSince(ctx context.Context, stackID uuid.UUID, since time.Time) (bool, error)
 	// Enqueue adds an outbox job in the same transaction.
 	Enqueue(ctx context.Context, m outbox.Message) (bool, error)
 }

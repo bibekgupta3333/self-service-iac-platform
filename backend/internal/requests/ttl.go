@@ -58,6 +58,40 @@ func (s *Service) OpenTTLDestroy(ctx context.Context, cmd ttl.DestroyCommand) (t
 		if err := CheckStackAllowsKind(KindDestroy, t.Status, open); err != nil {
 			return err
 		}
+		// Backoff: a TTL destroy that failed, was rejected or cancelled is not reopened every
+		// hour. After MaxAttempts the stack is blocked: recorded once as ttl.blocked and left
+		// to a human (extend, or fix and destroy by hand).
+		attempts, err := st.TTLDestroyAttempts(ctx, t.ID)
+		if err != nil {
+			return err
+		}
+		view.Attempts = attempts
+		switch state, until := s.ttl.Backoff(view, now); state {
+		case ttl.BackoffWait:
+			return apperr.Conflict("ttl_backoff", fmt.Sprintf("the last TTL destroy of %s did not succeed; the next attempt is not before %s",
+				t.Path, until.UTC().Format("2006-01-02T15:04:05Z")))
+		case ttl.BackoffBlocked:
+			recorded, err := st.TTLBlockedSince(ctx, t.ID, *t.ExpiresAt)
+			if err != nil {
+				return err
+			}
+			if !recorded {
+				payload, err := json.Marshal(map[string]any{"stack_path": t.Path, "expires_at": t.ExpiresAt.UTC(),
+					"attempts": len(attempts)})
+				if err != nil {
+					return fmt.Errorf("encode audit payload: %w", err)
+				}
+				if err := st.AppendAudit(ctx, audit.Event{OccurredAt: now, ActorType: audit.ActorSystem, ActorID: TTLActor,
+					Action: "ttl.blocked", SubjectType: "stack", SubjectID: t.ID.String(), TeamID: &t.TeamID,
+					CorrelationID: cmd.CorrelationID, Payload: payload}); err != nil {
+					return fmt.Errorf("audit ttl.blocked: %w", err)
+				}
+			}
+			// The transaction commits so that the audit event survives; the caller turns
+			// Blocked into the ttl_blocked conflict.
+			res = ttl.DestroyResult{Blocked: true}
+			return nil
+		}
 		in := CreateInput{Kind: KindDestroy, StackID: &t.ID, ConfirmStackName: t.Name, Justification: TTLJustification}
 		req, err := s.record(ctx, st, cmd.By, CreateCommand{Input: in, CorrelationID: cmd.CorrelationID},
 			StackRef{ID: t.ID, Path: t.Path, Status: string(t.Status)}, t.TeamID, NormalizeForStack(in, t))

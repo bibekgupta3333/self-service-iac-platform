@@ -73,7 +73,7 @@ func TestTTLLifecycleAgainstPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	policy := ttl.Policy{MinHours: 1, MaxHours: 720, DefaultHours: 72, MaxExtensionHours: 100}
+	policy := ttl.Policy{MinHours: 1, MaxHours: 720, DefaultHours: 72, MaxExtensionHours: 100, BackoffHours: 24, MaxAttempts: 3}
 	now := time.Now().UTC().Truncate(time.Second)
 	reqRepo := requests.NewPostgresRepository(pool, writer)
 	lockSvc := locks.NewService(locks.NewPostgresRepository(pool, writer), platform.SystemClock{}, locks.DefaultLease)
@@ -236,6 +236,47 @@ func TestTTLLifecycleAgainstPostgres(t *testing.T) {
 		}
 	}
 
+	// A TTL destroy that failed, was cancelled or rejected is not reopened every hour: the
+	// stack backs off, and after three attempts it is blocked and audited once.
+	endDestroy := func(status string, endedAgo time.Duration) {
+		t.Helper()
+		exec(`UPDATE requests SET status = $2::request_status, completed_at = now() - $3::interval
+			WHERE stack_id = $1 AND kind = 'destroy' AND completed_at IS NULL`, expired, status, endedAgo.String())
+		exec(`DELETE FROM locks WHERE stack_id = $1`, expired)
+	}
+	endDestroy("failed", time.Hour)
+	if due, _ = svc.Due(ctx); len(due) != 0 {
+		t.Fatalf("a stack in backoff is not listed: %+v", due)
+	}
+	if _, err := svc.Teardown(ctx, expired, "c"); !apperr.IsKind(err, apperr.KindConflict) || !strings.Contains(err.Error(), "next attempt") {
+		t.Fatalf("Teardown within the backoff = %v", err)
+	}
+	exec(`UPDATE requests SET completed_at = now() - interval '30 hours' WHERE stack_id = $1 AND kind = 'destroy'`, expired) // the backoff has passed
+	if due, _ = svc.Due(ctx); len(due) != 1 || due[0].Stack.ID != expired {
+		t.Fatalf("after the backoff the stack is due again: %+v", due)
+	}
+	for _, status := range []string{"cancelled", "rejected"} {
+		if res, err := svc.Teardown(ctx, expired, "c"); err != nil || !res.Created {
+			t.Fatalf("attempt before %s = %+v, %v", status, res, err)
+		}
+		endDestroy(status, 30*time.Hour)
+	}
+	// Three unsuccessful destroys (failed, cancelled, rejected) use up the attempts.
+	_, err = svc.Teardown(ctx, expired, "c")
+	if e, ok := apperr.As(err); !ok || e.Code != "ttl_blocked" {
+		t.Fatalf("a stack out of attempts: %v", err)
+	}
+	if _, err = svc.Teardown(ctx, expired, "c"); err == nil {
+		t.Fatal("still blocked")
+	}
+	if n := countAudit(t, pool, "ttl.blocked", expired.String()); n != 1 {
+		t.Fatalf("ttl.blocked events = %d, want 1", n)
+	}
+	var ttlDestroys int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM requests WHERE stack_id = $1 AND kind = 'destroy'`, expired).Scan(&ttlDestroys); err != nil || ttlDestroys != 3 {
+		t.Fatalf("destroy requests = %d, want 3 (%v)", ttlDestroys, err)
+	}
+
 	// Production is never torn down, even if a stack row there claims to be ephemeral.
 	exec(`INSERT INTO stacks (team_id, environment_id, name, path, state_key, region, is_ephemeral, ttl_hours, expires_at, created_by, created_at)
 		SELECT t.id, e.id, 'rogue', 'environments/production/payments/rogue', 'production/payments/rogue/terraform.tfstate',
@@ -245,7 +286,7 @@ func TestTTLLifecycleAgainstPostgres(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT id FROM stacks WHERE name = 'rogue'`).Scan(&rogue); err != nil {
 		t.Fatal(err)
 	}
-	if due, _ = svc.Due(ctx); len(due) != 0 {
+	if due, _ = svc.Due(ctx); len(due) != 1 || due[0].Stack.ID != expired { // only the blocked stack, which stays listed
 		t.Fatalf("production appears in the due list: %+v", due)
 	}
 	_, err = svc.Teardown(ctx, rogue, "c")

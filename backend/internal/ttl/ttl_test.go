@@ -218,7 +218,7 @@ func TestClassifyOrdersTeardownFirstAndIsDeterministic(t *testing.T) {
 		mk("d1", 6, "development", t0.Add(-5*time.Hour)),
 		mk("d1b", 7, "development", t0.Add(-5*time.Hour)),
 	}
-	got := Classify(in, t0)
+	got := DefaultPolicy().Classify(in, t0)
 	var ids []string
 	for _, d := range got {
 		ids = append(ids, string(d.Phase)+":"+names[d.Stack.ID])

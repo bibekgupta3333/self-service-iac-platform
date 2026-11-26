@@ -145,6 +145,69 @@ func TestOpenTTLDestroy(t *testing.T) {
 	})
 }
 
+// A TTL destroy that ends failed, rejected or cancelled is not reopened every hour: the stack
+// waits out the backoff, and after MaxAttempts it is blocked and ttl.blocked is audited once.
+func TestOpenTTLDestroyBacksOffAndBlocks(t *testing.T) {
+	ctx := context.Background()
+	clock := &stepClock{t: t0}
+	repo := newMemRepo()
+	policy := ttl.Policy{MinHours: 1, MaxHours: 720, DefaultHours: 72, MaxExtensionHours: 168, BackoffHours: 24, MaxAttempts: 3}
+	svc := NewService(repo, fakeVersions{}, fakeMembers{dev.UserID: RoleDeveloper}, &fakeLocker{}, clock, &seqIDs{}).WithTTLPolicy(policy)
+	id := ephemeralStack(t, repo, svc, validInput())
+	cmd := ttl.DestroyCommand{StackID: id, By: ttlBot, CorrelationID: "c"}
+	end := func(status Status) { // the open TTL destroy ends now
+		for _, r := range repo.state.requests {
+			if r.Kind == KindDestroy && !r.Status.IsTerminal() {
+				at := clock.t
+				r.Status, r.CompletedAt = status, &at
+			}
+		}
+		repo.setStackStatus(id, StackActive)
+	}
+	countAudit := func(action string) (n int) {
+		for _, e := range repo.state.events {
+			if e.Action == action {
+				n++
+			}
+		}
+		return n
+	}
+
+	clock.t = t0.Add(80 * time.Hour)
+	if res, err := svc.OpenTTLDestroy(ctx, cmd); err != nil || !res.Created {
+		t.Fatalf("first attempt = %+v, %v", res, err)
+	}
+	end(StatusFailed)
+
+	clock.t = clock.t.Add(2 * time.Hour) // inside the 24 h backoff
+	if _, err := svc.OpenTTLDestroy(ctx, cmd); !hasCode(err, "ttl_backoff") {
+		t.Fatalf("within the backoff: %v", err)
+	}
+	clock.t = clock.t.Add(25 * time.Hour)
+	if res, err := svc.OpenTTLDestroy(ctx, cmd); err != nil || !res.Created {
+		t.Fatalf("second attempt after the backoff = %+v, %v", res, err)
+	}
+	end(StatusCancelled)
+	clock.t = clock.t.Add(25 * time.Hour)
+	if res, err := svc.OpenTTLDestroy(ctx, cmd); err != nil || !res.Created {
+		t.Fatalf("third attempt = %+v, %v", res, err)
+	}
+	end(StatusRejected)
+
+	clock.t = clock.t.Add(25 * time.Hour) // past the backoff, but three attempts are used
+	requestsBefore := len(repo.state.requests)
+	for i := 0; i < 2; i++ {
+		res, err := svc.OpenTTLDestroy(ctx, cmd)
+		if err != nil || !res.Blocked || res.Created {
+			t.Fatalf("blocked call %d = %+v, %v", i, res, err)
+		}
+	}
+	if len(repo.state.requests) != requestsBefore || countAudit("ttl.blocked") != 1 {
+		t.Fatalf("a blocked stack must open nothing and be audited once: requests %d -> %d, ttl.blocked=%d",
+			requestsBefore, len(repo.state.requests), countAudit("ttl.blocked"))
+	}
+}
+
 func cloneStrMap(m map[uuid.UUID]string) map[uuid.UUID]string {
 	out := make(map[uuid.UUID]string, len(m))
 	for k, v := range m {

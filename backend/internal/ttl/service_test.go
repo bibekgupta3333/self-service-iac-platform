@@ -295,6 +295,11 @@ func TestTeardownActsAsTheSystemActor(t *testing.T) {
 	if _, err := newService(repo, d).Teardown(context.Background(), id, "c"); !apperr.IsKind(err, apperr.KindConflict) {
 		t.Fatalf("destroyer errors pass through: %v", err)
 	}
+	d.err, d.res = nil, DestroyResult{Blocked: true}
+	_, err = newService(repo, d).Teardown(context.Background(), id, "c")
+	if e, ok := apperr.As(err); !ok || e.Code != "ttl_blocked" || e.Kind != apperr.KindConflict {
+		t.Fatalf("a blocked stack = %v, want conflict ttl_blocked", err)
+	}
 }
 
 type fakeCommenter struct {

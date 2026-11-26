@@ -248,6 +248,26 @@ func (m *memStore) GetRequestByShortID(_ context.Context, shortID string) (*Requ
 	return nil, apperr.NotFound("request %s not found", shortID)
 }
 
+func (m *memStore) TTLDestroyAttempts(_ context.Context, stackID uuid.UUID) ([]ttl.Attempt, error) {
+	var out []ttl.Attempt
+	for _, r := range m.s.requests {
+		if r.Stack.ID == stackID && r.Kind == KindDestroy && r.Justification == TTLJustification && r.Status.IsTerminal() &&
+			r.Status != StatusApplied && r.CompletedAt != nil {
+			out = append(out, ttl.Attempt{CreatedAt: r.CreatedAt, EndedAt: *r.CompletedAt, Outcome: string(r.Status)})
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) TTLBlockedSince(_ context.Context, stackID uuid.UUID, since time.Time) (bool, error) {
+	for _, e := range m.s.events {
+		if e.Action == "ttl.blocked" && e.SubjectID == stackID.String() && !e.OccurredAt.Before(since) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (m *memStore) LockStackTarget(_ context.Context, id uuid.UUID) (StackTarget, error) {
 	return memStackTarget(m.s, id)
 }
