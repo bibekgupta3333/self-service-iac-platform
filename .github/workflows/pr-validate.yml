@@ -9,16 +9,15 @@
 #                trip; uploads the plan summary
 #   comment   -> sticky PR comment per stack (the only job that can write to the PR)
 #   result    -> single required status check, independent of matrix size
+#
+# The workflow runs on every PR (no paths filter) so pr-validate-result always
+# reports; detect returns zero stacks quickly when nothing under environments/
+# changed.
 name: pr-validate
 
 on:
   pull_request:
     branches: [main]
-    paths:
-      - "environments/**"
-      # A change to the pipeline itself re-validates every stack (detect --full-run-prefix).
-      - ".github/workflows/pr-validate.yml"
-      - "tools/stack_pipeline/**"
 
 permissions:
   contents: read
@@ -74,9 +73,13 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
+          # A change to the pipeline, its policies or its tool versions re-validates every stack.
           python -m tools.stack_pipeline detect --base "$BASE_SHA" --head "$HEAD_SHA" \
             --full-run-prefix .github/workflows/pr-validate.yml \
-            --full-run-prefix tools/stack_pipeline/ | tee "$RUNNER_TEMP/detect.json"
+            --full-run-prefix tools/stack_pipeline/ \
+            --full-run-prefix policies/ \
+            --full-run-prefix .tflint.hcl \
+            --full-run-prefix .terraform-version | tee "$RUNNER_TEMP/detect.json"
           {
             echo "### Changed stacks"
             jq -r 'if .count == 0 then "No stack roots changed." else (.stacks[] | "- `\(.path)`") end' "$RUNNER_TEMP/detect.json"
