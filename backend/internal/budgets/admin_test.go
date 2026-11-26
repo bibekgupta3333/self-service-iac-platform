@@ -67,7 +67,7 @@ func TestNewWriteDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w.LimitCents != 200000 || !w.HardBlock || w.Environment != "" || w.Override != nil || w.CapCents != 500000 ||
+	if w.LimitCents != 200000 || !w.HardBlock || w.Environment != "" || w.Override != nil || w.CapCents != nil ||
 		len(w.Thresholds) != 3 || w.Thresholds[1] != 80 {
 		t.Fatalf("write = %+v", w)
 	}
@@ -87,7 +87,7 @@ func TestNewWriteFull(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w.Environment != "staging" || w.LimitCents != 123456 || w.HardBlock || w.CapCents != 80025 ||
+	if w.Environment != "staging" || w.LimitCents != 123456 || w.HardBlock || w.CapCents == nil || *w.CapCents != 80025 ||
 		len(w.Thresholds) != 3 || w.Thresholds[0] != 50 || w.Thresholds[2] != 120 ||
 		w.Override == nil || w.Override.Reason != "launch week capacity ok" || !w.Override.ExpiresAt.Equal(exp) || w.Override.MaxDeltaCents != 75000 {
 		t.Fatalf("write = %+v", w)
@@ -215,6 +215,9 @@ func TestAuditEvents(t *testing.T) {
 	exp := now.Add(24 * time.Hour)
 
 	create := Write{Team: "payments", Month: MonthOf(now), LimitCents: 200000, HardBlock: true, Thresholds: []int{50, 80, 100}}
+	capped := create
+	capCents := int64(500000)
+	capped.CapCents = &capCents
 	evs := AuditEvents(create, Change{After: Setting{ID: id}}, by, "req-1", now)
 	if len(evs) != 1 || evs[0].Action != ActionSet || evs[0].SubjectType != "budget" || evs[0].SubjectID != id.String() ||
 		evs[0].ActorID != by.UserID.String() || evs[0].CorrelationID != "req-1" {
@@ -222,8 +225,13 @@ func TestAuditEvents(t *testing.T) {
 	}
 	var p map[string]any
 	if err := json.Unmarshal(evs[0].Payload, &p); err != nil || p["limit_usd"] != "2000.00" || p["created"] != true ||
-		p["environment"] != "all" || p["month"] != "2026-11" {
+		p["environment"] != "all" || p["month"] != "2026-11" || p["single_change_cap_usd"] != nil {
 		t.Fatalf("payload = %s (%v)", evs[0].Payload, err)
+	}
+
+	evs = AuditEvents(capped, Change{After: Setting{ID: id}}, by, "", now)
+	if err := json.Unmarshal(evs[0].Payload, &p); err != nil || p["single_change_cap_usd"] != "5000.00" {
+		t.Fatalf("capped payload = %s", evs[0].Payload)
 	}
 
 	grant := create

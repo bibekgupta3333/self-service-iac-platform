@@ -43,8 +43,9 @@ func TestMonthOf(t *testing.T) {
 
 func TestBuildContextShape(t *testing.T) {
 	ref := StackRef{Environment: "production", Team: "payments", Stack: "order-events"}
+	capUSD := 5000.0
 	budget := &Budget{Month: MonthOf(now), LimitUSD: 2000, SpentUSD: 0, HardBlock: true, Scope: ScopeEnvironment,
-		SingleChangeCapUSD: 5000, CommittedUSD: 1200.5}
+		SingleChangeCapUSD: &capUSD, CommittedUSD: 1200.5}
 	yanked := []YankedVersion{{Module: "sqs", Version: "1.1.0"}, {Module: "s3", Version: "1.2.0"}, {Module: "s3", Version: "1.2.0"}}
 	doc := BuildContext(ref, Environment{Name: "production", AllowedRegions: []string{"us-east-1"}}, budget, yanked, now)
 	raw, err := json.Marshal(doc)
@@ -69,7 +70,7 @@ func TestBuildContextActualAndOverride(t *testing.T) {
 			ExpiresAt: time.Date(2026, 12, 1, 3, 0, 0, 0, time.FixedZone("x", 3600))}}
 	doc := BuildContext(StackRef{Environment: "staging", Team: "payments", Stack: "orders"}, Environment{Name: "staging"}, budget, nil, now)
 	raw, _ := json.Marshal(doc)
-	for _, want := range []string{`"actual_usd":1450.1`,
+	for _, want := range []string{`"actual_usd":1450.1`, `"single_change_cap_usd":null`,
 		`"budget_override":{"granted_by":"ada","reason":"launch week capacity","expires_at":"2026-12-01T02:00:00Z","max_delta_usd":750}`} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("context lacks %s: %s", want, raw)

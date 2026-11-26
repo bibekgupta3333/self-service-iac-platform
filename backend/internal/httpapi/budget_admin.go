@@ -69,7 +69,7 @@ type budgetDTO struct {
 	HardBlock       bool     `json:"hard_block"`
 	AlertThresholds []int    `json:"alert_thresholds"`
 	// SingleChangeCapUSD denies one stack costing more per month than this, whatever the headroom.
-	SingleChangeCapUSD float64      `json:"single_change_cap_usd"`
+	SingleChangeCapUSD *float64     `json:"single_change_cap_usd"` // null = no cap
 	Override           *overrideDTO `json:"override"`
 	UpdatedBy          *string      `json:"updated_by"`
 	UpdatedAt          time.Time    `json:"updated_at"`

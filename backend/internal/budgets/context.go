@@ -83,8 +83,9 @@ type Budget struct {
 	HardBlock bool
 	Scope     Scope
 	Override  *Override // an admin override, nil when none was granted
-	// SingleChangeCapUSD is the monthly cost above which one stack is denied whatever the headroom.
-	SingleChangeCapUSD float64
+	// SingleChangeCapUSD is the monthly cost above which one stack is denied whatever the headroom;
+	// nil means no cap.
+	SingleChangeCapUSD *float64
 	// CommittedUSD is the committed monthly cost of the team's other active stacks in the budget's
 	// scope (see Repository.CommittedUSD); set by Service.Context, not by MonthlyBudget.
 	CommittedUSD float64
@@ -142,8 +143,9 @@ type BudgetDTO struct {
 	ActualUSD *float64 `json:"actual_usd"`
 	HardBlock bool     `json:"hard_block"`
 	Scope     Scope    `json:"scope"`
-	// SingleChangeCapUSD denies one stack costing more per month than this, whatever the headroom.
-	SingleChangeCapUSD float64 `json:"single_change_cap_usd"`
+	// SingleChangeCapUSD denies one stack costing more per month than this, whatever the headroom;
+	// null means no cap.
+	SingleChangeCapUSD *float64 `json:"single_change_cap_usd"`
 }
 
 // OverrideDTO is the budget override as the policies see it.

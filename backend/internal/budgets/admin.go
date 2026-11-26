@@ -38,9 +38,6 @@ const (
 	MaxOverrideTTL = 31 * 24 * time.Hour
 	// MaxThresholds bounds the alert threshold list.
 	MaxThresholds = 10
-	// DefaultSingleChangeCapUSD is the monthly cost above which one stack is denied whatever
-	// the headroom, unless the budget sets another cap.
-	DefaultSingleChangeCapUSD = 5000
 )
 
 // DefaultThresholds are the alert thresholds (percent of the limit) used when none are given.
@@ -57,7 +54,8 @@ type SetInput struct {
 	HardBlock       *bool `json:"hard_block"`
 	AlertThresholds []int `json:"alert_thresholds"`
 	// SingleChangeCapUSD denies one stack whose monthly cost exceeds it, whatever the headroom
-	// (budget.rego); default 5000, 0 to 1,000,000.
+	// (budget.rego); 0 to 1,000,000. Omitted or null means no cap: the policy compares it with the
+	// stack's whole estimated cost, not the change, so a default would block updates of big stacks.
 	SingleChangeCapUSD *float64 `json:"single_change_cap_usd"`
 	// Override grants the admin override (see Override); omitting it clears any granted one.
 	// It is refused on a production-scoped budget, where it would never apply.
@@ -81,7 +79,7 @@ type Write struct {
 	LimitCents  int64
 	HardBlock   bool
 	Thresholds  []int
-	CapCents    int64 // single-change cap
+	CapCents    *int64 // single-change cap; nil = none
 	Override    *OverrideWrite
 }
 
@@ -103,8 +101,8 @@ type Setting struct {
 	ActualUSD       *float64
 	HardBlock       bool
 	AlertThresholds []int
-	// SingleChangeCapUSD is the per-stack monthly ceiling budget.rego applies.
-	SingleChangeCapUSD float64
+	// SingleChangeCapUSD is the per-stack monthly ceiling budget.rego applies; nil = none.
+	SingleChangeCapUSD *float64
 	Override           *Override
 	UpdatedBy          string // login, "" when never set through the API
 	UpdatedAt          time.Time
@@ -185,8 +183,7 @@ func NewWrite(team, month string, in SetInput, now time.Time) (Write, error) {
 	if err := checkMonth(m, now); err != nil {
 		return Write{}, err
 	}
-	w := Write{Team: team, Month: m, HardBlock: true, Thresholds: slices.Clone(DefaultThresholds),
-		CapCents: DefaultSingleChangeCapUSD * 100}
+	w := Write{Team: team, Month: m, HardBlock: true, Thresholds: slices.Clone(DefaultThresholds)}
 	var bad []apperr.FieldError
 
 	switch {
@@ -224,7 +221,7 @@ func NewWrite(team, month string, in SetInput, now time.Time) (Write, error) {
 	}
 	if in.SingleChangeCapUSD != nil {
 		if c, ok := Cents(*in.SingleChangeCapUSD, MaxLimitUSD); ok {
-			w.CapCents = c
+			w.CapCents = &c
 		} else {
 			bad = append(bad, fieldErr("/single_change_cap_usd", "out_of_range", fmt.Sprintf(
 				"single_change_cap_usd must be between 0 and %d with at most two decimals", MaxLimitUSD)))
@@ -400,7 +397,10 @@ func AuditEvents(w Write, ch Change, by identity.Principal, correlationID string
 	}
 	set := map[string]any{"team": w.Team, "month": w.Month.Format("2006-01"), "environment": scopeName(w.Environment),
 		"limit_usd": FormatCents(w.LimitCents), "hard_block": w.HardBlock, "alert_thresholds": w.Thresholds,
-		"single_change_cap_usd": FormatCents(w.CapCents), "created": ch.Before == nil}
+		"single_change_cap_usd": nil, "created": ch.Before == nil}
+	if w.CapCents != nil {
+		set["single_change_cap_usd"] = FormatCents(*w.CapCents)
+	}
 	if ch.Before != nil {
 		set["previous_limit_usd"] = FormatCents(int64(math.Round(ch.Before.LimitUSD * 100)))
 		set["previous_hard_block"] = ch.Before.HardBlock

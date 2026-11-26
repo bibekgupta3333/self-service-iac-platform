@@ -99,8 +99,8 @@ func TestPostgresAdminRepository(t *testing.T) {
 		t.Fatalf("create = %+v", ch)
 	}
 	exp := clock.Now().Add(48 * time.Hour)
-	if ch.After.SingleChangeCapUSD != 5000 {
-		t.Fatalf("default single-change cap = %v", ch.After.SingleChangeCapUSD)
+	if ch.After.SingleChangeCapUSD != nil {
+		t.Fatalf("a budget has no single-change cap unless one is set: %v", *ch.After.SingleChangeCapUSD)
 	}
 	override := func(max float64) *budgets.OverrideInput {
 		return &budgets.OverrideInput{Reason: "launch week capacity ok", ExpiresAt: exp, MaxDeltaUSD: fp(max)}
@@ -132,8 +132,15 @@ func TestPostgresAdminRepository(t *testing.T) {
 	}
 	ca := 1234.5
 	ch = write("2026-11", budgets.SetInput{LimitUSD: fp(3000), SingleChangeCapUSD: &ca})
-	if ch.After.SingleChangeCapUSD != 1234.5 {
+	if ch.After.SingleChangeCapUSD == nil || *ch.After.SingleChangeCapUSD != 1234.5 {
 		t.Fatalf("single-change cap = %v", ch.After.SingleChangeCapUSD)
+	}
+	if ch = write("2026-11", budgets.SetInput{LimitUSD: fp(3000)}); ch.After.SingleChangeCapUSD != nil {
+		t.Fatalf("omitting the cap clears it: %v", ch.After.SingleChangeCapUSD)
+	}
+	b0, err := budgets.NewPostgresRepository(app).MonthlyBudget(ctx, "payments", "staging", nov)
+	if err != nil || b0 == nil || b0.SingleChangeCapUSD != nil {
+		t.Fatalf("context budget cap = %+v, %v", b0, err)
 	}
 	env := write("2026-11", in(500, "development", nil)) // a second, environment-specific row
 	if env.Before != nil || env.After.Environment != "development" {
@@ -209,7 +216,7 @@ func TestPostgresAdminRepository(t *testing.T) {
 		actions = append(actions, action)
 	}
 	want := []string{"budget.set", "budget.set", "budget.override.granted", "budget.set", "budget.set", "budget.override.granted",
-		"budget.set", "budget.override.revoked", "budget.set", "budget.set", "budget.set", "budget.actual.recorded"}
+		"budget.set", "budget.override.revoked", "budget.set", "budget.set", "budget.set", "budget.set", "budget.actual.recorded"}
 	if len(actions) != len(want) {
 		t.Fatalf("audit actions = %v, want %v", actions, want)
 	}

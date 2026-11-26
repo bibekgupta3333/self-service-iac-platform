@@ -34,7 +34,7 @@ func (f *fakeBudgetAdmin) Set(_ context.Context, _ identity.Principal, team, mon
 	spent := 100.0
 	return budgets.Setting{ID: uuid.MustParse("00000000-0000-0000-0000-0000000000bb"), Team: team, Month: m, Environment: "production",
 		LimitUSD: *in.LimitUSD, SpentUSD: spent, ActualUSD: &spent, HardBlock: true, AlertThresholds: []int{50, 80, 100},
-		SingleChangeCapUSD: *in.SingleChangeCapUSD,
+		SingleChangeCapUSD: in.SingleChangeCapUSD,
 		Override:           &budgets.Override{GrantedBy: "ada", Reason: "launch week capacity", MaxDeltaUSD: 750, ExpiresAt: time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)},
 		UpdatedBy:          "ada", UpdatedAt: time.Date(2026, 11, 24, 0, 0, 0, 0, time.UTC)}, nil
 }

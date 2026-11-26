@@ -374,7 +374,7 @@ are admin only. `DefaultPolicies` requires the admin role in some team (`budget.
 everywhere); a route with no policy entry is a `403`. `budgets.NewWrite` validates everything in
 one pure pass and reports every problem as a field error: `limit_usd` 0 to 1,000,000 with at most
 two decimals, `currency` empty or `USD`, `environment` one of the three or omitted (team-wide),
-`alert_thresholds` 1 to 200 (default 50, 80, 100), `single_change_cap_usd` (default 5000), and an
+`alert_thresholds` 1 to 200 (default 50, 80, 100), an optional `single_change_cap_usd` (none unless set), and an
 `override` (`reason` 20 to 500 characters, `expires_at` within 31 days, a required `max_delta_usd`
 bound) that waives a hard limit or the cap outside production only and is refused on a
 production-scoped budget. The budget context also sums `stacks.committed_monthly_usd` over the

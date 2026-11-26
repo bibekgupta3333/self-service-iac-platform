@@ -7,6 +7,10 @@
 -- constraint be added without NOT VALID. The override now also carries a reason, an expiry and
 -- a bound (override_max_delta_usd), set or cleared together.
 --
+-- single_change_cap_usd is NULL (no cap) by default: the policy compares it with the stack's whole
+-- estimated monthly cost, not with the change (Infracost gives no diff yet), so a default would
+-- block every update of an existing stack above it. An admin opts in per budget.
+--
 -- actual_usd is recorded by POST /v1/internal/budget-actuals and stacks.committed_monthly_usd
 -- by POST /v1/internal/budget-committed (docs/06 section 10). Cost Explorer is not reachable
 -- under LocalStack (ADR-0009) and apply.yml does not price a plan yet, so nothing fills either
@@ -23,7 +27,7 @@ ALTER TABLE budgets
     ADD COLUMN override_reason         text,
     ADD COLUMN override_expires_at     timestamptz,
     ADD COLUMN override_max_delta_usd  numeric(12,2),
-    ADD COLUMN single_change_cap_usd   numeric(12,2) NOT NULL DEFAULT 5000,
+    ADD COLUMN single_change_cap_usd   numeric(12,2),
     ADD COLUMN actual_usd              numeric(12,2),
     ADD COLUMN actual_recorded_at      timestamptz,
     ADD CONSTRAINT budgets_override_complete CHECK (
@@ -34,7 +38,8 @@ ALTER TABLE budgets
         AND (override_max_delta_usd IS NULL OR override_max_delta_usd > 0)),
     ADD CONSTRAINT budgets_actual_nonnegative CHECK (actual_usd IS NULL OR actual_usd >= 0),
     ADD CONSTRAINT budgets_limit_bounded CHECK (limit_usd <= 1000000),
-    ADD CONSTRAINT budgets_cap_bounded CHECK (single_change_cap_usd >= 0 AND single_change_cap_usd <= 1000000),
+    ADD CONSTRAINT budgets_cap_bounded CHECK (single_change_cap_usd IS NULL
+        OR (single_change_cap_usd >= 0 AND single_change_cap_usd <= 1000000)),
     ADD CONSTRAINT budgets_thresholds_range CHECK (1 <= ALL (alert_thresholds) AND 200 >= ALL (alert_thresholds));
 
 ALTER TABLE stacks
