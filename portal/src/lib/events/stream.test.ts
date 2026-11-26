@@ -101,11 +101,13 @@ describe("backoffDelay", () => {
 
 describe("connectionFailed", () => {
   it.each([
-    [{ received: true, idle: false, durationMs: 0 }, false],
-    [{ received: true, idle: true, durationMs: 50_000 }, false],
-    [{ received: false, idle: false, durationMs: 9_999 }, true],
-    [{ received: false, idle: false, durationMs: 10_000 }, false],
-    [{ received: false, idle: true, durationMs: 45_000 }, true],
+    [{ received: true, delivered: true, idle: false, durationMs: 0 }, false],
+    [{ received: true, delivered: false, idle: false, durationMs: 2_000 }, true], // a heartbeat, then a quick close
+    [{ received: true, delivered: false, idle: false, durationMs: 300_000 }, false], // heartbeats until the lifetime cap
+    [{ received: true, delivered: false, idle: true, durationMs: 50_000 }, false],
+    [{ received: false, delivered: false, idle: false, durationMs: 9_999 }, true],
+    [{ received: false, delivered: false, idle: false, durationMs: 10_000 }, false],
+    [{ received: false, delivered: false, idle: true, durationMs: 45_000 }, true],
   ])("%j -> %s", (outcome, want) => expect(connectionFailed(outcome, 10_000)).toBe(want));
 });
 
@@ -251,12 +253,21 @@ describe("StatusStream", () => {
     expect(h.last()?.[0]).toBe("unavailable");
   });
 
-  it("counts a heartbeat as delivery: a quickly closing stream that heartbeats is not a failure", async () => {
-    let n = 0;
-    const open = vi.fn(async () => (++n <= 8 ? sseResponse([": heartbeat\n\n"]) : sseResponse([end("applied")])));
+  it("falls back when a proxy sends one heartbeat and then closes every connection quickly", async () => {
+    const open = vi.fn(async () => sseResponse([": heartbeat\n\n"]));
     const h = harness(open, { maxFailures: 3 });
     await h.stream.start();
-    expect(open).toHaveBeenCalledTimes(9);
+    expect(open).toHaveBeenCalledTimes(3);
+    expect(h.sleeps).toEqual([750, 1500]); // backoff, not the healthy 3-second gap
+    expect(h.last()?.[0]).toBe("unavailable");
+  });
+
+  it("does not count a quick close after an event as a failure", async () => {
+    let n = 0;
+    const open = vi.fn(async () => (++n <= 6 ? sseResponse([status(n, "pr_open")]) : sseResponse([end("applied")])));
+    const h = harness(open, { maxFailures: 3 });
+    await h.stream.start();
+    expect(open).toHaveBeenCalledTimes(7);
     expect(h.last()?.[0]).toBe("ended");
   });
 

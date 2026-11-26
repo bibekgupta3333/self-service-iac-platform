@@ -5,8 +5,8 @@
 // at all so the caller can fall back to polling.
 //
 // The backend ends every stream after its lifetime cap (5 minutes) and the client resumes, so
-// a healthy idle stream closes regularly. Only a connection that closed quickly, or went
-// silent, without delivering anything (not even a heartbeat) counts as a failure.
+// a healthy idle stream closes regularly. A connection counts as a failure when it closed
+// within 10 seconds without an event (heartbeats do not count), or went silent with nothing.
 //
 // All I/O is injected (`open`, `sleep`, `random`, `now`, `schedule`), so tests drive it
 // without a network or real timers.
@@ -48,7 +48,7 @@ export interface StatusStreamOptions {
   maxDelayMs?: number;
   /** Consecutive failed attempts before giving up on SSE. */
   maxFailures?: number;
-  /** A connection open at least this long is not a failure even if it delivered nothing. */
+  /** A connection open at least this long is not a failure even if it delivered no event. */
   minHealthyMs?: number;
   /** Cut and reconnect when nothing (frame or heartbeat) arrives for this long; 0 disables. */
   idleTimeoutMs?: number;
@@ -78,8 +78,10 @@ export function backoffDelay(failures: number, baseMs: number, maxMs: number, ra
 
 /** What one connection did, from the moment it was opened until it closed. */
 export interface ConnectionOutcome {
-  /** A frame or a comment (heartbeat) arrived. */
+  /** Any bytes arrived (a heartbeat is enough). */
   received: boolean;
+  /** At least one status event was decoded and passed on. */
+  delivered: boolean;
   /** The idle watchdog cut it. */
   idle: boolean;
   durationMs: number;
@@ -87,13 +89,15 @@ export interface ConnectionOutcome {
 
 /**
  * connectionFailed decides whether a connection that closed without `end` counts towards
- * giving up. Anything received (a heartbeat is enough) proves the stream works; so does a
- * connection that stayed open for minHealthyMs. A silent connection cut by the watchdog is a
- * failure however long it lasted (a buffering proxy, a dead socket). Pure.
+ * giving up. A connection that delivered an event, or stayed open for minHealthyMs (heartbeats
+ * only, until the server's lifetime cap), proves the stream works. One that closed sooner
+ * without an event is a failure even if a heartbeat arrived, so a proxy that sends a heartbeat
+ * and then cuts every connection ends in the polling fallback. A silent connection cut by the
+ * watchdog is a failure however long it lasted (a buffering proxy, a dead socket). Pure.
  */
 export function connectionFailed(o: ConnectionOutcome, minHealthyMs: number): boolean {
-  if (o.received) return false;
-  return o.idle || o.durationMs < minHealthyMs;
+  if (o.idle && !o.received) return true;
+  return !o.delivered && o.durationMs < minHealthyMs;
 }
 
 /** reconnectDelay is how long to wait so the next attempt starts minIntervalMs after the last one did. Pure. */
@@ -239,13 +243,18 @@ export class StatusStream {
       }
 
       this.o.onState("open");
-      const { ended, received } = await this.read(response.body, attempt);
+      const { ended, received, delivered } = await this.read(response.body, attempt);
       attempt.dispose();
       if (this.closed) return;
       if (ended) return this.finish("ended");
       // The stream closed without `end`: the server's lifetime cap, a dropped connection, or
-      // the watchdog. Resume; give up only after repeated connections that showed no sign of life.
-      const outcome: ConnectionOutcome = { received, idle: attempt.idle, durationMs: this.o.now() - attempt.startedAt };
+      // the watchdog. Resume; give up only after repeated connections that failed (connectionFailed).
+      const outcome: ConnectionOutcome = {
+        received,
+        delivered,
+        idle: attempt.idle,
+        durationMs: this.o.now() - attempt.startedAt,
+      };
       if (connectionFailed(outcome, this.o.minHealthyMs)) {
         failures += 1;
         if (failures >= this.o.maxFailures) return this.finish("unavailable", { message: "The live connection keeps closing." });
@@ -260,11 +269,15 @@ export class StatusStream {
   }
 
   /** read consumes the body until it ends, errors, or the attempt is aborted (close or watchdog). */
-  private async read(body: ReadableStream<Uint8Array>, attempt: Attempt): Promise<{ ended: boolean; received: boolean }> {
+  private async read(
+    body: ReadableStream<Uint8Array>,
+    attempt: Attempt,
+  ): Promise<{ ended: boolean; received: boolean; delivered: boolean }> {
     const reader = body.getReader();
     const decoder = new TextDecoder();
     const parser = new SseParser();
     let received = false;
+    let delivered = false;
     // An abort must release a read that is waiting for data, whether or not the transport
     // reacts to the abort signal itself.
     const release = () => void reader.cancel().catch(() => undefined);
@@ -283,8 +296,9 @@ export class StatusStream {
           if (frame.id !== undefined) this.lastEventId = frame.id;
           const event = decodeFrame(frame);
           if (!event) continue;
+          delivered = true;
           this.o.onEvent(event);
-          if (event.type === "end") return { ended: true, received };
+          if (event.type === "end") return { ended: true, received, delivered };
         }
       }
     } catch {
@@ -293,7 +307,7 @@ export class StatusStream {
       attempt.signal.removeEventListener("abort", release);
       reader.cancel().catch(() => undefined);
     }
-    return { ended: false, received };
+    return { ended: false, received, delivered };
   }
 
   private pause(failures: number): Promise<void> {
