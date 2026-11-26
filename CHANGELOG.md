@@ -219,12 +219,13 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 - Review follow-ups for the tools and CI:
   - SARIF paths with `%`, a backslash or a drive letter go to the stack's `main.tf`; the smoke endpoint check rejects backslashes and userinfo.
   - `cost-input` builds the Infracost plan from an allow-list of the fields Infracost reads (unknown keys, `resource_drift`, variable defaults and literal expressions are dropped) instead of a deny-list.
-  - `ci.yml` strips `automationDetails` and `versionControlProvenance` from the TFLint and Checkov SARIF (`sarif --strip-only`) before upload.
+  - `ci.yml` strips `automationDetails` and `versionControlProvenance` from the TFLint and Checkov SARIF with `jq` into a separate directory that is the only one uploaded (fails closed, no PR code or pip install in that step).
   - `cost-summary` uploads `summary-cost-<id>-<run attempt>` instead of overwriting `pr-validate-<id>`; `comment` and `report` prefer it and fall back to the original.
   - The Infracost switch is the repository variable `INFRACOST_ENABLED=true`; `detect` no longer reads the secret.
   - New `module-tests-floor` job and `make module-test-floor`: the offline module suites run on each module's minimum provider versions (`tools.provider_floor`).
-  - `tools.required_checks` (`make required-checks-check`) fails when a required status check is not a job name; `main-branch.json` now requires the module test, provider floor, Terratest and semver gate jobs.
-  - `modules/lambda` 2.0.0 (breaking): `extra_policy_jsons` rejects `iam:PassRole` and `iam:` actions on `Resource "*"`, as `ecs-service` does. See the module CHANGELOG for upgrade notes.
+  - `tools.required_checks` (`make required-checks-check`) fails when a required status check is not a job name; `main-branch.json` now requires the module test, provider floor, Terratest and semver gate jobs and the new `ci-result` aggregate (a failed `detect` cannot pass by skipping the jobs that need it); the tool also fails on an empty list and on a required name shared by two jobs.
+  - `modules/lambda` 2.0.0 and `modules/ecs-service` 2.0.0 (breaking): `extra_policy_jsons` rejects `iam:PassRole` in any wildcard spelling (`iam:Pass?ole`, `i?m:PassRole`) and `iam:` actions on `Resource "*"` or a wildcard account such as `arn:aws:iam::*:*`; ecs-service 1.0.0 accepted the `?` spellings. See the module CHANGELOGs for upgrade notes.
+  - The provider floor job also asserts that `terraform init` selected exactly each floor (`tools.provider_floor verify`), and `make module-test-floor` finds the same suites as CI.
 
 ### Removed
 - The compiled `backend/api` binary (8.7 MB) is no longer tracked; Go build outputs under `backend/` and `tests/` are ignored.
