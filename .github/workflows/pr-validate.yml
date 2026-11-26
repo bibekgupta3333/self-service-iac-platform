@@ -554,7 +554,7 @@ jobs:
     needs: [detect, validate, cost-summary]
     # Fork PRs get a read-only token; their summaries stay in the job summary.
     if: >-
-      always() && needs.detect.outputs.count != '0'
+      always() && needs.detect.result == 'success' && needs.detect.outputs.count != '0'
       && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -605,7 +605,7 @@ jobs:
     name: code scanning (${{ matrix.stack.path }})
     needs: [detect, validate]
     if: >-
-      always() && needs.detect.outputs.count != '0'
+      always() && needs.detect.result == 'success' && needs.detect.outputs.count != '0'
       && github.event.pull_request.head.repo.full_name == github.repository
       && github.actor != 'dependabot[bot]'
     runs-on: ubuntu-24.04
@@ -659,7 +659,7 @@ jobs:
     needs: [detect, validate, cost-summary]
     # Fork PRs get neither id-token nor secrets; their result stays in the job summary.
     if: >-
-      always() && needs.detect.outputs.count != '0'
+      always() && needs.detect.result == 'success' && needs.detect.outputs.count != '0'
       && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 5
