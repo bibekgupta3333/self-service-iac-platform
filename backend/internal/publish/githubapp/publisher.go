@@ -237,6 +237,16 @@ func (c *Client) AddLabels(ctx context.Context, number int, labels []string) err
 	return nil
 }
 
+// CommentOnPullRequest implements publish.Commenter. A comment is not idempotent, so it is
+// sent once; the caller (an outbox job) decides about retrying.
+func (c *Client) CommentOnPullRequest(ctx context.Context, number int, body string) error {
+	if err := c.doOnce(ctx, http.MethodPost, c.repoPath(fmt.Sprintf("/issues/%d/comments", number)),
+		map[string]string{"body": body}, nil); err != nil {
+		return fmt.Errorf("comment on pull request #%d: %w", number, err)
+	}
+	return nil
+}
+
 // PullRequestHead implements publish.Publisher.
 func (c *Client) PullRequestHead(ctx context.Context, number int) (string, error) {
 	var pr struct {
