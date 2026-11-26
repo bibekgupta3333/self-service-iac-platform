@@ -55,7 +55,7 @@ class TestPayload:
         with pytest.raises(ValueError):
             build_index_payload(m, SHA, "bot")
 
-    @pytest.mark.parametrize("module", ["s3", "sqs", "lambda"])
+    @pytest.mark.parametrize("module", ["s3", "sqs", "lambda", "vpc", "monitoring", "dynamodb"])
     def test_repository_manifests_only_use_backend_fields(self, module):
         data = yaml.safe_load((REPO_ROOT / "modules" / module / "module.yaml").read_text())
         payload = build_index_payload(data, SHA, "bot", "notes")
@@ -235,7 +235,7 @@ class TestIndexCommand:
 
 @pytest.mark.skipif(os.environ.get("IACP_INTEGRATION") != "1" or not os.environ.get("IACP_API_URL"),
                     reason="needs IACP_INTEGRATION=1 and a running API (make up && make api)")
-@pytest.mark.parametrize("module", ["s3", "sqs", "lambda"])
+@pytest.mark.parametrize("module", ["s3", "sqs", "lambda", "vpc", "monitoring", "dynamodb"])
 def test_index_against_running_api(module: str):
     """The backend accepts each repository manifest; a second call is an idempotent replay.
 
