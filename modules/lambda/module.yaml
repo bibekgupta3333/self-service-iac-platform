@@ -218,4 +218,8 @@ upgrade:
   from: ">= 1.0.0, < 2.0.0"
   requires_migration: false
   notes: |
-    Initial release.
+    2.0.0 tightens the validation of extra_policy_jsons: Allow statements may not
+    allow iam:PassRole (including wildcard spellings such as iam:Pass?ole), and an
+    action that can be an iam: action needs resources in a named account (not "*",
+    not arn:aws:iam::*:*). No resource changes; a stack whose documents fail the
+    new check fails at plan time. See the module CHANGELOG.

@@ -7,23 +7,28 @@ as git tags `modules/lambda/vX.Y.Z`.
 
 ### Changed (breaking)
 - `extra_policy_jsons` now rejects Allow statements that grant `iam:PassRole`
-  (any resource, any letter case) or any `iam:` action on `Resource "*"`.
-  This is the rule `modules/ecs-service` 1.0.0 already enforces. A function
+  (any resource, any letter case, and wildcard spellings such as `iam:Pass?ole`,
+  `i?m:PassRole` or `iam:Pass*`, because IAM reads `?` as one character) and
+  any action that can be an `iam:` action unless its resources name an account
+  (`"*"`, `arn:aws:iam::*:*` and a wildcard in the partition, service, region
+  or account field are rejected). Actions may only contain letters, digits,
+  `:`, `-`, `_`, `*` and `?`. A function
   role that can pass roles to services can escalate beyond its own
   permissions, and the permissions boundary was the only backstop.
   The release gate classifies a stricter validation as MAJOR because it may
   reject values that were valid before.
 
 ### Upgrade notes
-- Nothing changes in the resources or the state: this release only adds a
-  validation, so `terraform plan` shows no diff for stacks that pass it.
+- No resource changes: this release only adds a validation (the only plan
+  difference for a stack that passes it is the `iacp_metadata` output, which
+  now reports version 2.0.0).
 - A stack that fails the new validation at plan time has an
   `extra_policy_jsons` document with one of:
   - `iam:PassRole` in an Allow statement. Remove it. If a function must hand
     a role to a service, create that resource from a module that owns the
     role instead of from the function's policy.
-  - an `iam:` action (for example `iam:GetRole`) with `Resource "*"`. Name the
-    IAM ARNs the function touches, such as
+  - an `iam:` action (for example `iam:GetRole`) with `Resource "*"` or a
+    wildcard account. Name the IAM ARNs the function touches, such as
     `arn:aws:iam::<account>:role/iacp/<team>-*`.
 - Deny statements are not affected.
 - Change `?ref=modules/lambda/v1.0.0` to `?ref=modules/lambda/v2.0.0` once
