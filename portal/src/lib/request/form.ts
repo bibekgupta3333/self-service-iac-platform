@@ -44,6 +44,11 @@ export function validateStackFields(f: StackFields): FormErrors {
   return errors;
 }
 
+/** validateJustification checks the one stack-level field an update still has. Pure. */
+export function validateJustification(justification: string): FormErrors {
+  return justification.length > MAX_JUSTIFICATION ? { justification: [`must be at most ${MAX_JUSTIFICATION} characters`] } : {};
+}
+
 /** buildCreatePayload assembles the POST /v1/requests body for one resource. Pure. */
 export function buildCreatePayload(
   f: StackFields,

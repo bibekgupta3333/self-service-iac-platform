@@ -66,3 +66,39 @@ func TestPurgeProcessedRemovesOnlyOldFinishedJobs(t *testing.T) {
 		t.Fatal("iacp_app must not be able to DELETE FROM outbox")
 	}
 }
+
+// The one-hour minimum is enforced in SQL: a caller cannot pass a future cutoff to drop
+// processed rows that are recent.
+func TestPurgeProcessedClampsTheCutoffInSQL(t *testing.T) {
+	pool := dbtest.NewDatabase(t)
+	ctx := context.Background()
+	store := NewPostgresStore(pool)
+	base := time.Now().UTC().Truncate(time.Microsecond)
+	var ids []int64
+	for range 2 {
+		if _, err := Enqueue(ctx, pool, Message{Topic: TopicGitHubEvent, Payload: json.RawMessage(`{}`), AvailableAt: base}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 2 {
+		j, err := store.Claim(ctx, base.Add(time.Minute), time.Minute)
+		if err != nil || j == nil {
+			t.Fatalf("claim: %v %v", j, err)
+		}
+		ids = append(ids, j.ID)
+	}
+	if err := store.Complete(ctx, ids[0], 1, base.Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Complete(ctx, ids[1], 1, base.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	n, err := store.PurgeProcessed(ctx, base.Add(24*time.Hour), 100) // a cutoff in the future
+	if err != nil || n != 1 {
+		t.Fatalf("removed %d, %v: only the row older than an hour may go", n, err)
+	}
+	var left int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM outbox WHERE id = $1`, ids[1]).Scan(&left); err != nil || left != 1 {
+		t.Fatalf("the recent processed row must survive a future cutoff: %d %v", left, err)
+	}
+}

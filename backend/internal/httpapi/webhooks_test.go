@@ -41,7 +41,7 @@ func TestWebhookEndpoint(t *testing.T) {
 	ing := &fakeIngester{seen: map[uuid.UUID]bool{}}
 	woken := 0
 	// failingAuth on every other route proves the webhook route needs no user or machine auth.
-	h := NewRouter(Deps{Policies: testPolicies(), Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: failingAuth{},
+	h := NewRouter(Deps{Policies: testPolicies(), Roles: noRoles{}, Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: failingAuth{},
 		Webhooks: []RouteRegistrar{NewWebhookHandler(ing, hookSecret, func() { woken++ })}})
 	body := []byte(`{"action":"closed","number":3,"pull_request":{"merged":false,"head":{"ref":"iacp/req-7k3p9x"}}}`)
 	delivery := uuid.NewString()
@@ -105,7 +105,7 @@ func TestWebhookEndpoint(t *testing.T) {
 
 func TestWebhookFailsClosedWithoutSecret(t *testing.T) {
 	ing := &fakeIngester{seen: map[uuid.UUID]bool{}}
-	h := NewRouter(Deps{Policies: testPolicies(), Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: failingAuth{},
+	h := NewRouter(Deps{Policies: testPolicies(), Roles: noRoles{}, Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: failingAuth{},
 		Webhooks: []RouteRegistrar{NewWebhookHandler(ing, "", nil)}})
 	body := []byte(`{}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/webhooks/github", bytes.NewReader(body))
@@ -126,7 +126,7 @@ func (errIngester) Ingest(context.Context, webhooks.Delivery) (webhooks.Result, 
 }
 
 func TestWebhookStoreErrorIs500(t *testing.T) {
-	h := NewRouter(Deps{Policies: testPolicies(), Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: failingAuth{},
+	h := NewRouter(Deps{Policies: testPolicies(), Roles: noRoles{}, Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: failingAuth{},
 		Webhooks: []RouteRegistrar{NewWebhookHandler(errIngester{}, hookSecret, nil)}})
 	body := []byte(`{}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/webhooks/github", bytes.NewReader(body))

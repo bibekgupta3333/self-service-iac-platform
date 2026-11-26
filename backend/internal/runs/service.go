@@ -54,6 +54,8 @@ type Store interface {
 	InsertRun(ctx context.Context, r Run) (id uuid.UUID, inserted bool, err error)
 	// LockRun loads the existing run FOR UPDATE.
 	LockRun(ctx context.Context, stackID uuid.UUID, gh GitHubRun) (StoredRun, error)
+	// FindRun loads the existing run without locking it; nil when there is none.
+	FindRun(ctx context.Context, stackID uuid.UUID, gh GitHubRun) (*StoredRun, error)
 	// UpdateRun writes the merged state of an existing run.
 	UpdateRun(ctx context.Context, u RunUpdate) error
 	// Applier is the request and stack side of the report, in the same transaction.
@@ -62,10 +64,11 @@ type Store interface {
 
 // StoredRun is an existing pipeline_runs row.
 type StoredRun struct {
-	ID     uuid.UUID
-	Kind   Kind
-	Status Status
-	Stages []json.RawMessage
+	ID        uuid.UUID
+	RequestID *uuid.UUID
+	Kind      Kind
+	Status    Status
+	Stages    []json.RawMessage
 }
 
 // RunUpdate is the new state of an existing run. FinishedAt is set only when the run
@@ -123,6 +126,7 @@ func (s *Service) Record(ctx context.Context, by identity.Principal, r Report) (
 		run := Run{StackID: stackID, Kind: r.Pipeline, GitHub: r.GitHub, WorkflowRef: by.Login, LogURL: r.LogURL,
 			At: s.clock.Now()}
 		var req RequestRef
+		var released *StoredRun // set when the report rides on a released token
 		if r.RequestShortID != "" {
 			if req, err = st.RequestByShortID(ctx, r.RequestShortID); err != nil {
 				return err
@@ -138,14 +142,21 @@ func (s *Service) Record(ctx context.Context, by identity.Principal, r Report) (
 			if err != nil {
 				return err
 			}
-			switch {
-			case run.RequestID == nil:
-				err = locks.CheckStackToken(lock, *r.FencingToken)
-			case AcceptsReleasedToken(r, req):
-				// A terminal request whose lease the backend already released: the report is
-				// recorded and changes nothing (see AcceptsReleasedToken).
-			default:
+			if run.RequestID != nil {
 				err = locks.CheckToken(lock, *run.RequestID, *r.FencingToken)
+			} else {
+				err = locks.CheckStackToken(lock, *r.FencingToken)
+			}
+			switch {
+			case err == nil:
+			case AcceptsReleasedToken(r, req):
+				// A terminal request whose lease the backend already released. Only a run
+				// the API already recorded for this request may keep reporting; a new run id
+				// or attempt is stale.
+				if released, err = st.FindRun(ctx, stackID, r.GitHub); err == nil &&
+					(released == nil || released.RequestID == nil || *released.RequestID != req.ID || released.Kind != r.Pipeline) {
+					err = apperr.Conflict("stale_fencing_token", "the request is complete and this run never reported for it")
+				}
 			}
 			if err != nil {
 				return err
@@ -156,8 +167,11 @@ func (s *Service) Record(ctx context.Context, by identity.Principal, r Report) (
 		}
 		run.Status = SettleRunStatus(r.Pipeline, RunStatus(r.Stage, r.Status), r.Stage, []StageRecord{{Name: r.Stage, Status: r.Status}})
 		var stages []json.RawMessage
-		out.RunID, out.RunStatus, stages, err = s.store(ctx, st, run, r.Stage)
-		if err != nil {
+		if released != nil && r.Stage != StageReleaseName {
+			// A late report for a finished request: the audit trail records it (the lifecycle
+			// answers request.run_report_ignored), the run's stage history stays as it was.
+			out.RunID, out.RunStatus, stages = released.ID, released.Status, released.Stages
+		} else if out.RunID, out.RunStatus, stages, err = s.store(ctx, st, run, r.Stage); err != nil {
 			return err
 		}
 		if r.Pipeline.DrivesRequest() && run.RequestID != nil {

@@ -76,7 +76,7 @@ var releaseBot = identity.Principal{Login: "internal-token", Type: identity.Acto
 const testInternalToken = "test-internal-token-0123456789abcdef"
 
 func newTestRouter(cat CatalogService, ready Pinger, extra ...RouteRegistrar) http.Handler {
-	return NewRouter(Deps{Policies: testPolicies(),
+	return NewRouter(Deps{Policies: testPolicies(), Roles: noRoles{},
 		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		Auth:     DevAuthenticator{Principal: devPrincipal},
 		Internal: NewTokenAuthenticator(testInternalToken, releaseBot),
@@ -222,7 +222,7 @@ func (failingAuth) Authenticate(*http.Request) (identity.Principal, error) {
 }
 
 func TestUnauthenticated(t *testing.T) {
-	h := NewRouter(Deps{Policies: testPolicies(), Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: failingAuth{},
+	h := NewRouter(Deps{Policies: testPolicies(), Roles: noRoles{}, Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: failingAuth{},
 		Ready: okPinger{}, Catalog: NewCatalogHandler(&fakeCatalog{})})
 	rec := do(t, h, "GET", "/v1/catalog/modules", "")
 	if rec.Code != 401 || !strings.Contains(rec.Body.String(), `"code":"unauthenticated"`) {

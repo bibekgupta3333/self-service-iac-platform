@@ -29,13 +29,19 @@
         "strict_required_status_checks_policy": true,
         "do_not_enforce_on_create": false,
         "required_status_checks": [
+          { "context": "ci-result" },
           { "context": "actionlint (workflows)" },
           { "context": "terraform (fmt, validate, tflint, checkov)" },
           { "context": "policy (opa, conftest, checkov checks)" },
+          { "context": "module tests (terraform test on LocalStack)" },
+          { "context": "module tests (terraform test, mocked providers)" },
+          { "context": "module tests (provider floor, mocked providers)" },
           { "context": "go (backend)" },
+          { "context": "terratest (LocalStack)" },
           { "context": "python (tools)" },
           { "context": "portal (lint, typecheck, test, build)" },
-          { "context": "pr-validate-result" }
+          { "context": "pr-validate-result" },
+          { "context": "semver gate result" }
         ]
       }
     }

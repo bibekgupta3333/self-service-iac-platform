@@ -80,11 +80,15 @@ func allowedMethods(r chi.Routes, path string) []string {
 }
 
 // Validate reports a configuration the router refuses to start with. Without a policy
-// table every user route would be open to any authenticated caller, so a missing table is
-// an error rather than a silent "no checks".
+// table every user route would be open to any authenticated caller, and without a role
+// lookup the any-team policies cannot be decided, so both are errors rather than silent
+// "no checks".
 func (d Deps) Validate() error {
 	if len(d.Policies) == 0 {
 		return errors.New("httpapi: no route policy table supplied (Deps.Policies); refusing to serve user routes without RBAC")
+	}
+	if d.Roles == nil {
+		return errors.New("httpapi: no role lookup supplied (Deps.Roles); any-team route policies cannot be enforced")
 	}
 	return nil
 }

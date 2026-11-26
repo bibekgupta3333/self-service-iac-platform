@@ -88,10 +88,77 @@ export interface CreateRequestInput {
   resources: ResourceInput[];
 }
 
+/** Body of POST /v1/requests with kind "update": the stack is named by id, resources replace its spec. */
+export interface UpdateRequestInput {
+  kind: "update";
+  stack_id: string;
+  justification?: string;
+  /** Acknowledges that resources of the stack's current spec missing from `resources` are destroyed. */
+  allow_removals?: boolean;
+  resources: ResourceInput[];
+}
+
+/** Body of POST /v1/requests with kind "destroy": no resources; the name and a reason are required. */
+export interface DestroyRequestInput {
+  kind: "destroy";
+  stack_id: string;
+  confirm_stack_name: string;
+  justification: string;
+}
+
+/** Everything POST /v1/requests accepts from the portal. */
+export type RequestInput = CreateRequestInput | UpdateRequestInput | DestroyRequestInput;
+
+export type StackStatus = "provisioning" | "active" | "drifted" | "updating" | "destroying" | "destroyed" | "failed";
+
+/** The most recent request against a stack (backend httpapi latestRequestDTO). */
+export interface LatestRequest {
+  id: string;
+  short_id: string;
+  kind: RequestKind;
+  status: RequestStatus;
+  created_at: string;
+}
+
+/** A stack as returned by GET /v1/stacks and GET /v1/stacks/{id} (backend httpapi stackDTO). */
+export interface StackSummary {
+  id: string;
+  team: string;
+  environment: string;
+  name: string;
+  path: string;
+  region: string;
+  status: StackStatus;
+  is_ephemeral: boolean;
+  expires_at: string | null;
+  /** Non-sensitive outputs of the last apply, name to value, exactly as stored (redactions stay). */
+  outputs: Record<string, unknown>;
+  last_applied_sha?: string;
+  latest_request: LatestRequest | null;
+  created_at: string;
+  updated_at: string;
+  links: { self: string; latest_request: string | null };
+}
+
+export interface StackFilter {
+  team?: string;
+  env?: string;
+  status?: StackStatus;
+  limit?: number;
+  cursor?: string;
+}
+
 export interface StackRef {
   id: string;
   path: string;
   status: string;
+}
+
+export interface PullRequestLink {
+  branch: string;
+  pr_number: number;
+  pr_url: string;
+  head_sha?: string;
 }
 
 /** A request as returned by POST, GET and list (backend httpapi requestDTO). */
@@ -117,6 +184,10 @@ export interface RequestSummary {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+  /** The branch and pull request that carry the request's files; null until the PR is opened. */
+  github?: PullRequestLink | null;
+  /** Why the request failed, when it did (a short machine-readable reason). */
+  failure_reason?: string;
   links: { self: string; events: string };
   allowed_events: string[];
 }

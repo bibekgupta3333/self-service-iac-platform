@@ -15,7 +15,7 @@ export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION AWS_ENDPOINT_U
 unexport AWS_PROFILE AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
 
 .PHONY: help up down ps fmt fmt-check validate tflint checkov policy-test lint \
-        module-test example-plans integration-test validate-manifests module-gate codeowners codeowners-check go-test go-integration generator-update api portal-install portal-dev portal-test py-test test diagrams \
+        module-test module-test-floor example-plans integration-test validate-manifests module-gate codeowners codeowners-check required-checks-check go-test go-integration generator-update api portal-install portal-dev portal-test py-test test diagrams \
         stack-detect stack-plan stack-apply stack-destroy stack-clean
 
 help: ## Show available targets
@@ -59,7 +59,7 @@ policy-test: ## Unit-test OPA policies and verify conftest fixtures
 	policies/fixtures/verify.sh
 	policies/fixtures/verify-example-gate.sh
 
-lint: fmt-check validate validate-manifests module-gate codeowners-check tflint checkov policy-test ## All static checks
+lint: fmt-check validate validate-manifests module-gate codeowners-check required-checks-check tflint checkov policy-test ## All static checks
 
 ## ---- stacks (environments/, mirrors pr-validate.yml) ----
 STACK ?= environments/development/platform/smoke
@@ -108,6 +108,22 @@ module-test: ## terraform test every module (LocalStack suites need `make up`; m
 	  terraform -chdir=$$m init -backend=false -input=false >/dev/null && terraform -chdir=$$m test || exit 1; \
 	done
 
+module-test-floor: ## Offline terraform test suites on the minimum provider versions (mirrors the module-tests-floor CI job)
+	@export TF_PLUGIN_CACHE_DIR=$${TF_PLUGIN_CACHE_DIR:-$$HOME/.terraform.d/plugin-cache} TF_PLUGIN_CACHE_MAY_BREAK_DEPENDENCY_LOCK_FILE=true; \
+	mkdir -p "$$TF_PLUGIN_CACHE_DIR"; stage=$$(mktemp -d); trap 'rm -rf "$$stage"' EXIT; \
+	for m in $(MODULES); do \
+	  name=$$(basename $$m); \
+	  files=($$m/tests/*.tftest.hcl); \
+	  [ -e "$${files[0]}" ] || continue; \
+	  offline=1; for f in "$${files[@]}"; do grep -q '^mock_provider "aws"' "$$f" || offline=0; done; \
+	  [ $$offline = 1 ] || continue; \
+	  echo "==> test $$name on its provider floors"; \
+	  $(PYTHON) -m tools.provider_floor stage $$m "$$stage/$$name" \
+	    && terraform -chdir="$$stage/$$name" init -backend=false -input=false -upgrade >/dev/null \
+	    && $(PYTHON) -m tools.provider_floor verify "$$stage/$$name" \
+	    && terraform -chdir="$$stage/$$name" test || exit 1; \
+	done
+
 go-test: ## Go unit tests (backend)
 	@if [ -f backend/go.mod ]; then \
 	  cd backend && go vet ./... && go test ./...; \
@@ -146,6 +162,9 @@ validate-manifests: ## Validate every modules/*/module.yaml against the schema a
 
 codeowners: ## Regenerate .github/CODEOWNERS from .github/teams.yaml
 	$(PYTHON) -m tools.codeowners
+
+required-checks-check: ## Fail when .github/rulesets/main-branch.json requires a check no workflow job is named
+	$(PYTHON) -m tools.required_checks --check
 
 codeowners-check: ## Fail when .github/CODEOWNERS drifted from .github/teams.yaml
 	$(PYTHON) -m tools.codeowners --check

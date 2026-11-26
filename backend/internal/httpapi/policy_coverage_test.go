@@ -41,6 +41,7 @@ func TestEveryUserRouteHasAPolicy(t *testing.T) {
 		PipelineHandlers: []RouteRegistrar{NewRunHandler(nil)},
 		Webhooks:         []RouteRegistrar{NewWebhookHandler(nil, "", nil)},
 		Policies:         DefaultPolicies(),
+		Roles:            noRoles{},
 	})
 	mux, ok := h.(chi.Routes)
 	if !ok {

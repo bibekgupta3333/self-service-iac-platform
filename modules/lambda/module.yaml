@@ -2,14 +2,14 @@ apiVersion: iacp.dev/v1
 kind: Module
 metadata:
   name: lambda
-  version: 1.0.0
+  version: 2.0.0
   displayName: Lambda Function
   description: Lambda function with a least-privilege role, KMS-encrypted logs and environment, X-Ray tracing and an optional SQS trigger.
   category: compute
   maturity: beta
   owners:
     - "@bibekgupta3333/platform"
-  documentation: https://github.com/bibekgupta3333/self-service-iac-platform/tree/modules/lambda/v1.0.0/modules/lambda
+  documentation: https://github.com/bibekgupta3333/self-service-iac-platform/tree/modules/lambda/v2.0.0/modules/lambda
 
 compatibility:
   terraform: ">= 1.10, < 2.0"
@@ -218,4 +218,8 @@ upgrade:
   from: ">= 1.0.0, < 2.0.0"
   requires_migration: false
   notes: |
-    Initial release.
+    2.0.0 tightens the validation of extra_policy_jsons: Allow statements may not
+    allow iam:PassRole (including wildcard spellings such as iam:Pass?ole), and an
+    action that can be an iam: action needs resources in a named account (not "*",
+    not arn:aws:iam::*:*). No resource changes; a stack whose documents fail the
+    new check fails at plan time. See the module CHANGELOG.

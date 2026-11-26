@@ -161,7 +161,6 @@ jobs:
           fi
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        if: needs.detect.outputs.modules == 'true'
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -192,6 +191,29 @@ jobs:
             fi
           done
 
+      # The SARIF was written by tools that run PR-controlled configuration. A run's
+      # automationDetails.id would win over the upload's `category`, so a same-repo PR
+      # could forge another category (and replace its alerts). The properties are
+      # dropped with the runner's own jq (no PR code, no pip install), into a separate
+      # directory. Only that directory is uploaded, so a file that cannot be stripped
+      # is never uploaded raw. Paths here are already repository-relative.
+      - name: Strip run properties the upload owns
+        if: always()
+        run: |
+          shopt -s nullglob
+          mkdir -p "$RUNNER_TEMP/sarif-upload"
+          for f in "$RUNNER_TEMP"/sarif/*.sarif; do
+            out="$RUNNER_TEMP/sarif-upload/$(basename "$f")"
+            if jq -e '(.runs | type) == "array" and all(.runs[]; type == "object")' "$f" >/dev/null 2>&1 \
+                && jq '.runs |= map(del(.automationDetails, .versionControlProvenance))' "$f" > "$out.tmp" \
+                && mv "$out.tmp" "$out"; then
+              echo "prepared $(basename "$f")"
+            else
+              rm -f "$out" "$out.tmp"
+              echo "::warning title=SARIF::$(basename "$f") could not be prepared and is not uploaded"
+            fi
+          done
+
       # Fork PRs cannot upload (read-only token), so their SARIF is not kept. A
       # non-gating extra: a failed upload never fails this job, and overwrite lets a
       # re-run replace the artifact instead of failing with 409.
@@ -203,7 +225,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ci-sarif
-          path: ${{ runner.temp }}/sarif/*.sarif
+          path: ${{ runner.temp }}/sarif-upload/*.sarif
           if-no-files-found: ignore
           retention-days: 7
           overwrite: true
@@ -435,6 +457,72 @@ jobs:
           echo "offline suites run: $ran"
           exit "$status"
 
+  # The offline suites again, on the lowest provider versions the modules declare
+  # (docs/04 section 9). Every other job resolves the newest allowed 5.x, so a
+  # provider argument newer than the declared floor would otherwise go unnoticed.
+  # tools.provider_floor copies the module to a scratch directory and adds an override
+  # file pinning each provider to its floor; `init -upgrade` then selects it. Only
+  # offline suites run (they need no LocalStack); the module sources are not touched.
+  module-tests-floor:
+    name: module tests (provider floor, mocked providers)
+    needs: detect
+    if: needs.detect.outputs.module_tests == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform-plugin-cache
+      TF_PLUGIN_CACHE_MAY_BREAK_DEPENDENCY_LOCK_FILE: "true"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: ${{ needs.detect.outputs.terraform_version }}
+          terraform_wrapper: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install tool dependencies
+        run: |
+          python -m pip install --quiet -r tools/requirements.txt
+          mkdir -p "$TF_PLUGIN_CACHE_DIR"
+
+      - name: terraform test on the provider floors (offline suites)
+        shell: bash
+        run: |
+          shopt -s nullglob
+          # True when every test file mocks the AWS provider (an offline suite).
+          offline_suite() { local f; for f in "$@"; do grep -q '^mock_provider "aws"' "$f" || return 1; done; }
+          status=0
+          ran=0
+          for dir in modules/*/; do
+            name="$(basename "$dir")"
+            tests=("$dir"tests/*.tftest.hcl)
+            [ "${#tests[@]}" -gt 0 ] || continue
+            offline_suite "${tests[@]}" || continue
+            ran=$((ran + 1))
+            stage="$RUNNER_TEMP/floor/$name"
+            echo "::group::terraform test $name on its provider floors"
+            if python -m tools.provider_floor stage "$dir" "$stage" \
+                && terraform -chdir="$stage" init -backend=false -input=false -upgrade >/dev/null \
+                && python -m tools.provider_floor verify "$stage" \
+                && terraform -chdir="$stage" test; then
+              :
+            else
+              echo "::error title=Provider floor::modules/$name fails on its minimum provider versions"
+              status=1
+            fi
+            rm -rf "$stage"
+            echo "::endgroup::"
+          done
+          echo "offline suites run on their floors: $ran"
+          [ "$ran" -gt 0 ] || { echo "::error::no offline suite found to run on the provider floors"; exit 1; }
+          exit "$status"
+
   go:
     name: go (backend)
     needs: detect
@@ -596,3 +684,36 @@ jobs:
 
       - name: build
         run: npm run build
+
+  # One aggregate status for branch protection. A job that needs `detect` is skipped
+  # when `detect` fails, and a skipped required check counts as passing, so on its
+  # own that would let a failed `detect` merge. Here `detect` must have succeeded,
+  # and every other gating job must have succeeded or been skipped by its gate.
+  # code-scanning is an upload and never gates.
+  ci-result:
+    name: ci-result
+    needs:
+      - detect
+      - actionlint
+      - terraform
+      - policy
+      - module-tests
+      - module-tests-offline
+      - module-tests-floor
+      - go
+      - terratest
+      - python
+      - portal
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require detect to succeed and every other job to succeed or skip
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key)=\(.value.result)"'
+          echo "$NEEDS" | jq -e '.detect.result == "success"' >/dev/null \
+            || { echo "::error::detect did not succeed, so the jobs that need it did not run"; exit 1; }
+          echo "$NEEDS" | jq -e 'all(.[]; .result == "success" or .result == "skipped")' >/dev/null \
+            || { echo "::error::a gating job failed or was cancelled"; exit 1; }

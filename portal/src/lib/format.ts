@@ -15,6 +15,22 @@ export function formatDateTime(iso: string | null | undefined): string {
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`;
 }
 
+/**
+ * httpsUrl returns url when it is a GitHub page (`https://github.com/...`, the only host PR and
+ * run links point to), otherwise null. No other scheme, host, port or credentials are linked,
+ * so a bad API value cannot send people elsewhere. Pure.
+ */
+export function httpsUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    const github = u.protocol === "https:" && u.host === "github.com" && u.username === "" && u.password === "";
+    return github && u.pathname.length > 1 ? u.href : null;
+  } catch {
+    return null;
+  }
+}
+
 /** categoriesOf lists the distinct module categories, sorted. Pure. */
 export function categoriesOf(modules: readonly { category: string }[]): string[] {
   return [...new Set(modules.map((m) => m.category).filter(Boolean))].sort();

@@ -386,16 +386,17 @@ its publish job).
 
 A request that is not `approved`, `applying` or terminal answers `409 request_not_applying` and
 nothing is recorded. For a terminal request the API has already released the lease, so a report
-carrying the request's own token (a replayed `summary`, a failed `release`) is accepted, stored
-and ignored (`request.run_report_ignored`); any other token is `409 stale_fencing_token`. All
+carrying the request's own token (a replayed `summary`, a failed `release`) is accepted only for a
+run already recorded for that request, audited and ignored (`request.run_report_ignored`), without
+rewriting the finished run's stages (the advisory `release` stage excepted); any other token, or a
+new run id or attempt, is `409 stale_fencing_token`. All
 existing checks stay: fencing token against the current lease, `head_sha` equal to the token's
 `sha`, per-pipeline workflow file and event allow-lists, and run id and attempt equality.
 
 Known limits: automatic retry of a transient failure (`apply_retry`, at most 2) needs a re-dispatch
 the platform does not have yet, so a transient failure fails the request like any other; the
 `ttl_destroy` and `drift` pipelines are stored but do not move requests or stacks yet (WBS 7.x,
-8.x); a run whose workflow dies before sending `summary` leaves the request `applying` until the
-lease expires.
+8.x); a run whose workflow dies before sending `summary` leaves the request `applying` and holding the lock; nothing acts on lease expiry yet, so an operator must intervene (follow-up, WBS 8.7).
 
 ## Client address and trusted proxies
 
@@ -419,7 +420,7 @@ A sweeper (`internal/retention`, started in `main` like the OIDC replay sweeper)
 deletes webhook delivery ids and processed outbox jobs older than `IACP_QUEUE_RETENTION`, in
 batches of 1,000. `iacp_app` still cannot `DELETE` from `outbox`: the purge goes through the
 `purge_processed_outbox` function (migration `0010`, `SECURITY DEFINER`, only rows with
-`processed_at` set), so a compromised API cannot erase pending or dead jobs.
+`processed_at` set, cutoff clamped in SQL to at least one hour old), so a compromised API cannot erase pending or dead jobs.
 
 Request ids look like `req-` followed by 10 Crockford base32 characters, so collisions on the
 unique `short_id` are negligible.

@@ -4,6 +4,7 @@ import {
   catalogStatusTone,
   categoriesOf,
   formatDateTime,
+  httpsUrl,
   isTerminal,
   requestStatusLabel,
   requestStatusTone,
@@ -81,5 +82,25 @@ describe("timeline", () => {
     expect(steps).toHaveLength(7);
     expect(steps.slice(0, -1).every((t) => t.state === "unknown")).toBe(true);
     expect(steps.at(-1)).toEqual({ status: "failed", label: "Failed", state: "stopped" });
+  });
+});
+
+describe("httpsUrl", () => {
+  it("accepts only https://github.com/ pages", () => {
+    expect(httpsUrl("https://github.com/o/r/pull/1")).toBe("https://github.com/o/r/pull/1");
+    expect(httpsUrl("https://github.com/o/r/actions/runs/42")).toBe("https://github.com/o/r/actions/runs/42");
+    expect(httpsUrl("https://example.com/o/r/pull/1")).toBeNull();
+    expect(httpsUrl("https://github.com.evil.example/o/r/pull/1")).toBeNull();
+    expect(httpsUrl("https://evil.example/github.com/o/r")).toBeNull();
+    expect(httpsUrl("https://api.github.com/repos/o/r")).toBeNull();
+    expect(httpsUrl("https://github.com:8443/o/r/pull/1")).toBeNull();
+    expect(httpsUrl("https://user:pw@github.com/o/r/pull/1")).toBeNull();
+    expect(httpsUrl("https://github.com/")).toBeNull();
+    expect(httpsUrl("http://github.com/o/r/pull/1")).toBeNull();
+    expect(httpsUrl("http://example.com/x")).toBeNull();
+    expect(httpsUrl("javascript:alert(1)")).toBeNull();
+    expect(httpsUrl("/relative")).toBeNull();
+    expect(httpsUrl("")).toBeNull();
+    expect(httpsUrl(undefined)).toBeNull();
   });
 });

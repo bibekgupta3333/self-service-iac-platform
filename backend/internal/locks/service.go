@@ -270,25 +270,21 @@ func (s *Service) Heartbeat(ctx context.Context, cmd TokenCommand) (Lock, error)
 func (s *Service) Release(ctx context.Context, cmd TokenCommand) (ReleaseResult, error) {
 	var res ReleaseResult
 	err := s.repo.InTx(ctx, func(st Store) error {
-		var err error
-		res, err = s.ReleaseIn(ctx, st, cmd)
-		if !apperr.IsKind(err, apperr.KindConflict) {
+		// Decide first, before any write: ReleaseIn can fail after deleting the lease (a
+		// promotion hook), and a fallback there would commit partial work. The stacks row
+		// is taken first, as ReleaseIn does, so the lease and the request read consistently.
+		if _, err := st.LockStack(ctx, cmd.StackID); err != nil {
 			return err
 		}
-		// ReleaseIn failed before writing anything and holds the stacks row, so the lease and
-		// the request can be read consistently.
-		current, cerr := st.Current(ctx, cmd.StackID)
-		if cerr != nil {
-			return fmt.Errorf("read lock: %w", cerr)
+		current, err := st.Current(ctx, cmd.StackID)
+		if err != nil {
+			return fmt.Errorf("read lock: %w", err)
 		}
-		req, rerr := st.Request(ctx, cmd.RequestID)
-		if rerr != nil {
-			return err // the original conflict is the better answer
-		}
-		if AlreadyReleased(req, current, cmd.StackID, cmd.FencingToken) {
+		if req, rerr := st.Request(ctx, cmd.RequestID); rerr == nil && AlreadyReleased(req, current, cmd.StackID, cmd.FencingToken) {
 			res = ReleaseResult{AlreadyReleased: true}
 			return nil
 		}
+		res, err = s.ReleaseIn(ctx, st, cmd)
 		return err
 	})
 	return res, err

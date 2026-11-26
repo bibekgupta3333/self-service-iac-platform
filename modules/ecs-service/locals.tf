@@ -1,6 +1,6 @@
 locals {
   module_name    = "ecs-service"
-  module_version = "1.0.0"
+  module_version = "2.0.0"
 
   full_name     = "${var.team}-${var.environment}-${var.name}"
   is_production = var.environment == "production"
