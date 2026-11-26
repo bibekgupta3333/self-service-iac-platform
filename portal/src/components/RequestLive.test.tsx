@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ApiError, parseProblem } from "@/lib/api/errors";
 import type { RequestSummary } from "@/lib/api/types";
 
-import { connectionText, RequestLive } from "./RequestLive";
+import { connectionText, historyText, RequestLive } from "./RequestLive";
 
 const refresh = vi.fn();
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh }) }));
@@ -124,6 +124,75 @@ describe("RequestLive", () => {
     expect(getRequest.mock.calls.length).toBe(calls); // polling stopped at the terminal status
   });
 
+  it("stops polling on a 401 and says why", async () => {
+    const getRequest = vi.fn(async () => {
+      throw new ApiError(parseProblem(401, { title: "x", status: 401, code: "unauthenticated" }));
+    });
+    const openRequestEvents = vi.fn(async () => new Response("<html></html>", { status: 200, headers: { "content-type": "text/html" } }));
+    render(<RequestLive request={base} client={{ openRequestEvents, getRequest }} streamOptions={fast} pollMs={5} />);
+    await waitFor(() => expect(screen.getByTestId("connection-note")).toHaveTextContent(/Sign in again/));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(getRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not poll while the tab is hidden", async () => {
+    let hidden = true;
+    let onChange: () => void = () => undefined;
+    const visibility = {
+      hidden: () => hidden,
+      onChange: (cb: () => void) => {
+        onChange = cb;
+        return () => undefined;
+      },
+    };
+    const getRequest = vi.fn(async (): Promise<RequestSummary> => ({ ...base, status: "validating" }));
+    const openRequestEvents = vi.fn(async () => new Response("<html></html>", { status: 200, headers: { "content-type": "text/html" } }));
+    render(
+      <RequestLive request={base} client={{ openRequestEvents, getRequest }} streamOptions={fast} pollMs={5} visibility={visibility} />,
+    );
+    await waitFor(() => expect(screen.getByTestId("connection-note")).toHaveTextContent(/checking every/));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(getRequest).not.toHaveBeenCalled();
+    hidden = false;
+    onChange();
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Request status: Validating."));
+  });
+
+  it("opens no stream for a request that was already terminal", async () => {
+    const openRequestEvents = vi.fn(async () => sse([], { hold: true }));
+    const getRequest = vi.fn();
+    render(
+      <RequestLive
+        request={{ ...base, status: "applied", completed_at: "2026-03-01T11:00:00Z" }}
+        client={{ openRequestEvents, getRequest }}
+      />,
+    );
+    expect(screen.getByTestId("connection-note")).toHaveTextContent("Finished 2026-03-01 11:00 UTC.");
+    expect(screen.getByText(/already finished when the page loaded/)).toBeInTheDocument();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(openRequestEvents).not.toHaveBeenCalled();
+    expect(getRequest).not.toHaveBeenCalled();
+  });
+
+  it("shows each change once when a resumed stream replays the frame it was cut on", async () => {
+    const responses = [
+      sse([status(1, "pr_open", "pr_opened", "draft"), status(2, "validating", "validation_started", "pr_open")]),
+      sse([status(2, "validating", "validation_started", "pr_open"), status(3, "plan_ready", "checks_passed", "validating")], {
+        hold: true,
+      }),
+    ];
+    const seen: Array<string | undefined> = [];
+    const openRequestEvents = vi.fn(async (_id: string, opts: { lastEventId?: string }) => {
+      seen.push(opts.lastEventId);
+      return responses.shift() as Response;
+    });
+    render(<RequestLive request={base} client={{ openRequestEvents, getRequest: vi.fn() }} streamOptions={fast} />);
+    await waitFor(() => expect(screen.getByText("Checks passed")).toBeInTheDocument());
+    expect(seen).toEqual(["0", "2"]);
+    expect(screen.getAllByText("Validation started")).toHaveLength(1);
+    expect(within(screen.getByRole("region", { name: "History" })).getAllByRole("listitem")).toHaveLength(3);
+  });
+
   it("closes the stream when unmounted", async () => {
     let signal: AbortSignal | undefined;
     const openRequestEvents = vi.fn(async (_id: string, opts: { signal?: AbortSignal }) => {
@@ -152,5 +221,14 @@ describe("connectionText", () => {
     expect(connectionText({ state: "open" }, true)).toBe("");
     expect(connectionText({ state: "polling" }, false)).toMatch(/checking every 5 seconds/);
     expect(connectionText({ state: "stopped" }, false)).toBe("Live updates stopped.");
+  });
+});
+
+describe("historyText", () => {
+  it("explains why no history is shown", () => {
+    expect(historyText({ state: "open" }, true)).toMatch(/already finished when the page loaded/);
+    expect(historyText({ state: "polling" }, false)).toMatch(/only available over the live connection/);
+    expect(historyText({ state: "stopped" }, false)).toMatch(/only available over the live connection/);
+    expect(historyText({ state: "open" }, false)).toBe("No status changes recorded yet.");
   });
 });

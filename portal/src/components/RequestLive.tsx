@@ -14,6 +14,7 @@ import {
   reduceLive,
   type StreamEvent,
 } from "@/lib/events/status";
+import { documentVisibility, RequestPoller, type Visibility } from "@/lib/events/poller";
 import { StatusStream, type StatusStreamOptions, type StreamNotice, type StreamState } from "@/lib/events/stream";
 import { formatDateTime, httpsUrl, isTerminal, requestStatusLabel } from "@/lib/format";
 
@@ -27,8 +28,24 @@ export interface RequestLiveProps {
   /** Injected for tests; defaults to the browser ApiClient. */
   client?: Pick<ApiClient, "openRequestEvents" | "getRequest">;
   /** Injected for tests: timing and randomness of the stream's reconnects. */
-  streamOptions?: Partial<Pick<StatusStreamOptions, "baseDelayMs" | "maxDelayMs" | "maxFailures" | "sleep" | "random">>;
+  streamOptions?: Partial<
+    Pick<
+      StatusStreamOptions,
+      | "baseDelayMs"
+      | "maxDelayMs"
+      | "maxFailures"
+      | "minHealthyMs"
+      | "idleTimeoutMs"
+      | "minReconnectIntervalMs"
+      | "sleep"
+      | "random"
+      | "now"
+      | "schedule"
+    >
+  >;
   pollMs?: number;
+  /** Injected for tests; defaults to the document's visibility. */
+  visibility?: Visibility;
 }
 
 type Connection = { state: StreamState | "polling"; notice?: StreamNotice };
@@ -51,39 +68,47 @@ export function connectionText(c: Connection, ended: boolean): string {
   }
 }
 
+/** historyText is shown when no history entries are loaded. Pure. */
+export function historyText(c: Connection, finishedOnLoad: boolean): string {
+  if (finishedOnLoad) {
+    return "This request had already finished when the page loaded, so the live history is not loaded. The audit log keeps every change.";
+  }
+  if (c.state === "polling" || c.state === "stopped") return "The change history is only available over the live connection.";
+  return "No status changes recorded yet.";
+}
+
 /**
  * RequestLive shows a request's status, progress and history, kept current by the SSE stream
  * (GET /v1/requests/{id}/events). The server-rendered request seeds it; every status change
  * also refreshes the server components, so links and queue state follow. If the stream cannot
  * be used it polls the request instead.
  */
-export function RequestLive({ request, client, streamOptions, pollMs = POLL_MS }: RequestLiveProps) {
+export function RequestLive({ request, client, streamOptions, pollMs = POLL_MS, visibility }: RequestLiveProps) {
   const router = useRouter();
   const [live, dispatch] = useReducer(reduceLive, undefined, () => initialLive(request.status, request.updated_at));
   const [connection, setConnection] = useState<Connection>({ state: "connecting" });
   const previous = useRef(live.status);
   const id = request.id;
+  // A request that was already terminal never changes again: no stream, no polling.
+  const finishedOnLoad = isTerminal(request.status);
 
   useEffect(() => {
+    if (finishedOnLoad) return;
     const api = client ?? browserApi();
-    let pollTimer: ReturnType<typeof setInterval> | undefined;
     let closed = false;
 
-    const poll = async () => {
-      try {
-        const r = await api.getRequest(id);
-        if (closed) return;
-        dispatch({ type: "polled", status: r.status, at: r.updated_at });
-        if (isTerminal(r.status) && pollTimer !== undefined) clearInterval(pollTimer);
-      } catch {
-        // A failed poll is retried on the next tick; the page keeps its last known status.
-      }
-    };
-    const startPolling = () => {
-      if (pollTimer !== undefined) return;
-      void poll();
-      pollTimer = setInterval(() => void poll(), pollMs);
-    };
+    const poller = new RequestPoller({
+      read: () => api.getRequest(id),
+      onStatus: (status, at) => {
+        if (!closed) dispatch({ type: "polled", status, at });
+      },
+      onStop: (notice) => {
+        if (!closed) setConnection({ state: "stopped", notice });
+      },
+      isFinal: isTerminal,
+      intervalMs: pollMs,
+      visibility: visibility ?? documentVisibility(),
+    });
 
     const stream = new StatusStream({
       ...streamOptions,
@@ -95,7 +120,7 @@ export function RequestLive({ request, client, streamOptions, pollMs = POLL_MS }
         if (state === "closed") return;
         if (state === "unavailable") {
           setConnection({ state: "polling", notice });
-          startPolling();
+          poller.start();
         } else {
           setConnection({ state, notice });
         }
@@ -106,11 +131,11 @@ export function RequestLive({ request, client, streamOptions, pollMs = POLL_MS }
     return () => {
       closed = true;
       stream.close();
-      if (pollTimer !== undefined) clearInterval(pollTimer);
+      poller.stop();
     };
     // The stream belongs to the request id; the other props are fixed for the page's life.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
+  }, [id, finishedOnLoad]);
 
   // Pull fresh server data (PR link, stack status, queue) whenever the status changes.
   useEffect(() => {
@@ -186,9 +211,7 @@ export function RequestLive({ request, client, streamOptions, pollMs = POLL_MS }
         </h2>
         {live.entries.length === 0 ? (
           <p className="text-sm text-slate-600">
-            {connection.state === "polling" || connection.state === "stopped"
-              ? "The change history is only available over the live connection."
-              : "No status changes recorded yet."}
+            {historyText(connection, finishedOnLoad)}
           </p>
         ) : (
           <ol className="space-y-2 rounded-lg border border-slate-200 bg-white p-4 text-sm">
