@@ -110,6 +110,10 @@ type Store interface {
 	UpdateRequest(ctx context.Context, r *Request, from Status) error
 	// Enqueue adds an outbox job in the same transaction.
 	Enqueue(ctx context.Context, m outbox.Message) (bool, error)
+	// UpdateStackApplied writes the outcome of an apply on the stack row, which the caller
+	// holds locked (LockStackTarget). It fails with a concurrent_update conflict when the
+	// stored status is no longer w.From.
+	UpdateStackApplied(ctx context.Context, w StackApplied) error
 }
 
 // StackLocker takes the per-stack platform lock inside the request-creation transaction
