@@ -1,0 +1,318 @@
+# Nightly drift detection (docs/05-automation-pipeline.md section 4.4, docs/06 section 4).
+# Local-first (ADR-0009): the schedule is 02:00 UTC, and every scan job runs against its
+# own LocalStack service container with the dummy test/test credentials and the Terraform
+# local backend.
+#
+#   list   -> the active stack roots under environments/ (tools.stack_pipeline drift list),
+#             or the subset named by the workflow_dispatch input
+#   scan   -> per stack, one scan at a time per stack (concurrency iacp-stack-<id>-drift):
+#               verify module pins, init, verify installed modules
+#               terraform plan -refresh-only -lock=false -detailed-exitcode
+#               drift scan: classify the exit code (0 clean, 2 drift, 1 error) and write a
+#               result file with addresses, types, actions and changed attribute NAMES only
+#               (never values), uploaded as the only artifact
+#   report -> one job, the only one with id-token: write: GET the stacks the API lists as
+#             due, then POST every scan result for a listed stack to /v1/internal/drift,
+#             each request with its own OIDC token
+#
+# WHAT IS AND IS NOT MEANINGFUL TODAY. Stack state is hermetic: no state file is committed,
+# the local backend starts empty in every job, and the LocalStack container is thrown away.
+# A refresh-only plan with an empty state has nothing to refresh, so the scan exits 0 and
+# the result is "clean" for every stack. What this run proves is the pipeline: listing,
+# pins, init, plan, classification, the result file, the API list, one OIDC token per
+# report, the report and the stack-health transition. A "drifted" result needs state that
+# survives between runs (the S3 backend, when ADR-0009 ends) or a long-lived LocalStack
+# with its state restored. Until then drift is exercised by the backend and tools tests,
+# which feed recorded refresh-only plans through the same code.
+#
+# Only main is ever scanned and reported: scan and report jobs run only on refs/heads/main,
+# and the list job fails loudly on any other ref. There is no pull_request trigger, so a
+# fork cannot run this workflow with a token; the repository-fork guard keeps a fork's own
+# schedule from running it too. Terraform and module code run in the scan jobs, which have
+# no id-token permission. The report job runs no Terraform: it checks out main, reads the
+# result files as untrusted data (strict schema, unknown fields refused, the API validates
+# again) and calls the API with the job's OIDC token only. IACP_INTERNAL_TOKEN is never
+# passed to this workflow.
+#
+# While vars.IACP_API_URL is empty the report step prints a notice and sends nothing.
+name: drift
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      stacks:
+        description: 'JSON array of stack paths to check (default: every active stack), e.g. ["environments/development/platform/smoke"]'
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  TF_IN_AUTOMATION: "1"
+  TF_INPUT: "0"
+  PYTHON_VERSION: "3.12"
+  # Dummy credentials for LocalStack only; never real keys.
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  AWS_DEFAULT_REGION: us-east-1
+  # Same switch as pr-validate.yml and apply.yml: every pinned module tag must be published.
+  IACP_PIN_BOOTSTRAP: "false"
+
+jobs:
+  list:
+    name: list active stacks
+    if: github.event.repository.fork != true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+      count: ${{ steps.list.outputs.count }}
+      terraform_version: ${{ steps.versions.outputs.terraform_version }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Fail loudly rather than skip: a dispatch from a branch would run unreviewed
+      # Terraform.
+      - name: Require main
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "::error title=drift.yml runs only on main::dispatch it from main; branches are never scanned"
+            exit 1
+          fi
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - id: versions
+        name: Read tool versions
+        run: echo "terraform_version=$(cat .terraform-version)" >> "$GITHUB_OUTPUT"
+
+      # The dispatch input is validated by the tool (a JSON array of existing, active stack
+      # paths) and never echoed: a dispatcher could put a workflow command in it.
+      - id: list
+        name: List the active stacks
+        env:
+          DISPATCH_STACKS: ${{ inputs.stacks }}
+        run: |
+          python -m tools.stack_pipeline --repo-root "$GITHUB_WORKSPACE" drift list --paths "$DISPATCH_STACKS" \
+            | tee "$RUNNER_TEMP/list.json"
+          {
+            echo "### Stacks to check for drift"
+            jq -r 'if .count == 0 then "No active stack roots." else (.stacks[] | "- `\(.)`") end' "$RUNNER_TEMP/list.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  scan:
+    name: scan (${{ matrix.stack.path }})
+    needs: list
+    if: github.ref == 'refs/heads/main' && needs.list.outputs.count != '0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        stack: ${{ fromJSON(needs.list.outputs.matrix) }}
+    # One scan per stack across all runs. A newer run replaces an older one: a scan is
+    # read-only and the newest result is the one worth reporting.
+    concurrency:
+      group: iacp-stack-${{ matrix.stack.id }}-drift
+      cancel-in-progress: true
+    services:
+      localstack:
+        image: localstack/localstack:4.4@sha256:b52c16663c70b7234f217cb993a339b46686e30a1a5d9279cb5feeb2202f837c
+        ports:
+          - 4566:4566
+        env:
+          SERVICES: s3,sqs,sns,lambda,iam,sts,kms,logs,cloudwatch,secretsmanager,events,ec2,dynamodb,dynamodbstreams,kinesis
+          AWS_DEFAULT_REGION: us-east-1
+        options: >-
+          --health-cmd "curl -sf http://localhost:4566/_localstack/health"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      AWS_ENDPOINT_URL: http://localhost:4566
+      STACK_ID: ${{ matrix.stack.id }}
+      STACK_PATH: ${{ matrix.stack.path }}
+      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform.d/plugin-cache
+      PYTHONPATH: ${{ github.workspace }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ matrix.stack.path }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Full history: module pins are checked against origin.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: ${{ needs.list.outputs.terraform_version }}
+          terraform_wrapper: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache Terraform providers
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ env.TF_PLUGIN_CACHE_DIR }}
+          key: tf-providers-${{ runner.os }}-${{ hashFiles(format('{0}/.terraform.lock.hcl', matrix.stack.path)) }}
+          restore-keys: tf-providers-${{ runner.os }}-
+
+      # A step that fails here must not fail the job: the scan step below turns it into an
+      # "error" result (a failed check is not drift), which the report job sends.
+      - id: pins
+        name: Verify module pins
+        continue-on-error: true
+        run: |
+          args=(--mirror "$RUNNER_TEMP/module-mirror.git")
+          if [ "${IACP_PIN_BOOTSTRAP:-false}" = "true" ]; then args+=(--allow-unpublished); fi
+          python -m tools.stack_pipeline --repo-root "$GITHUB_WORKSPACE" verify-pins . "${args[@]}"
+
+      - id: init
+        name: terraform init (local backend)
+        if: steps.pins.outcome == 'success'
+        continue-on-error: true
+        run: |
+          mkdir -p "$TF_PLUGIN_CACHE_DIR"
+          terraform init -input=false -lockfile=readonly -no-color
+
+      - id: modules
+        name: Verify installed modules
+        if: steps.init.outcome == 'success'
+        continue-on-error: true
+        run: python -m tools.stack_pipeline --repo-root "$GITHUB_WORKSPACE" verify-modules .
+
+      # -lock=false: a drift check only reads, and must not take the state lock a request
+      # needs. -refresh-only isolates real-world changes from unapplied configuration
+      # changes on main. Exit 0 is clean, 2 is drift, 1 an error; the code is an output,
+      # the step itself never fails.
+      - id: plan
+        name: terraform plan -refresh-only
+        if: steps.modules.outcome == 'success'
+        run: |
+          set +e
+          terraform plan -refresh-only -lock=false -detailed-exitcode -input=false -no-color -out=drift.tfplan \
+            > "$RUNNER_TEMP/drift.txt" 2>&1
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          if [ "$code" = "0" ] || [ "$code" = "2" ]; then
+            terraform show -json drift.tfplan > "$RUNNER_TEMP/drift.json"
+          else
+            # The tail of terraform's log is the error message; the tool flattens it to one line.
+            tail -n 5 "$RUNNER_TEMP/drift.txt" > "$RUNNER_TEMP/drift-error.txt"
+          fi
+          rm -f drift.tfplan
+
+      # Local-first: say what the result means (see the header of this workflow).
+      - name: Note on hermetic state
+        run: |
+          echo "::notice title=Hermetic state::$STACK_PATH starts this job with no state, so a refresh-only plan has nothing to refresh; drift is only detectable once state persists between runs (ADR-0009)"
+
+      - id: result
+        name: Classify the check
+        env:
+          OUT_PINS: ${{ steps.pins.outcome }}
+          OUT_INIT: ${{ steps.init.outcome }}
+          OUT_MODULES: ${{ steps.modules.outcome }}
+          PLAN_EXIT_CODE: ${{ steps.plan.outputs.exit_code }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/drift-result"
+          out="$RUNNER_TEMP/drift-result/$STACK_ID.json"
+          args=(--out "$out")
+          if [ -n "$PLAN_EXIT_CODE" ]; then
+            args+=(--exit-code "$PLAN_EXIT_CODE")
+            if [ -f "$RUNNER_TEMP/drift.json" ]; then args+=(--plan "$RUNNER_TEMP/drift.json"); fi
+            if [ -f "$RUNNER_TEMP/drift-error.txt" ]; then args+=(--error-message "$(cat "$RUNNER_TEMP/drift-error.txt")"); fi
+          else
+            # The plan never ran: say which earlier step stopped it.
+            failed="module pins"
+            if [ "$OUT_PINS" = "success" ]; then failed="terraform init"; fi
+            if [ "$OUT_INIT" = "success" ]; then failed="installed module verification"; fi
+            if [ "$OUT_MODULES" = "success" ]; then failed="the plan step"; fi
+            args+=(--exit-code 1 --error-message "$failed failed before the refresh-only plan could run")
+          fi
+          python -m tools.stack_pipeline --repo-root "$GITHUB_WORKSPACE" drift scan . "${args[@]}"
+          {
+            echo "### Drift check of \`$STACK_PATH\`"
+            jq -r '"- result: **\(.result)** (terraform exit code \(.terraform_exit_code))", (.changed[]? | "- `\(.address)`: \(.actions | join(", "))")' "$out"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The result file holds addresses, types, actions and attribute names, never plan
+      # values. It is the only artifact; the plan file is deleted above.
+      - name: Upload the result
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: drift-${{ matrix.stack.id }}
+          path: ${{ runner.temp }}/drift-result/${{ matrix.stack.id }}.json
+          if-no-files-found: error
+          retention-days: 1
+
+  report:
+    name: report to the platform
+    needs: [list, scan]
+    # Reports whatever was scanned, even when another stack's scan job failed.
+    if: always() && github.ref == 'refs/heads/main' && needs.list.result == 'success' && needs.list.outputs.count != '0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # The only job that can mint an OIDC token. It runs no Terraform and no module code.
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: iacp-drift-report
+      cancel-in-progress: false
+    env:
+      PYTHON_VERSION: "3.12"
+      PYTHONPATH: ${{ github.workspace }}
+      IACP_API_URL: ${{ vars.IACP_API_URL }}
+      IACP_OIDC_AUDIENCE: ${{ vars.IACP_OIDC_AUDIENCE }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Download the scan results
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: drift-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/drift-results
+
+      # Lists the stacks the API wants checked (GET /v1/internal/drift/stacks), then sends
+      # one report per scanned stack on that list, a fresh OIDC token per request. The
+      # route class accepts only drift.yml on main via schedule or workflow_dispatch
+      # (auth.RouteDrift). A stack that became busy since its scan is skipped with a notice.
+      - name: Report to the Platform API
+        env:
+          RESULTS_DIR: ${{ runner.temp }}/drift-results
+        run: |
+          mkdir -p "$RESULTS_DIR"
+          python -m tools.stack_pipeline --repo-root "$GITHUB_WORKSPACE" drift report \
+            --results-dir "$RESULTS_DIR" --skip-if-unconfigured
