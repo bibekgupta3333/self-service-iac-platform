@@ -62,6 +62,7 @@ func DefaultPolicies() PolicyTable {
 		"GET /v1/catalog/modules/{name}":                    {Action: rbac.ActionRead, Scope: ScopeAuthenticated},
 		"GET /v1/catalog/modules/{name}/versions":           {Action: rbac.ActionRead, Scope: ScopeAuthenticated},
 		"GET /v1/catalog/modules/{name}/versions/{version}": {Action: rbac.ActionRead, Scope: ScopeAuthenticated},
+		"GET /v1/catalog/modules/{name}/upgrade-path":       {Action: rbac.ActionRead, Scope: ScopeAuthenticated},
 		// POST /v1/requests is checked in the service against the caller's role in the
 		// target team (rbac.Decide); the entry only records that the decision was made.
 		"POST /v1/requests": {Action: rbac.ActionRequestCreate, Scope: ScopeAuthenticated},

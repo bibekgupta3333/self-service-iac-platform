@@ -20,6 +20,7 @@ type CatalogService interface {
 	GetModule(ctx context.Context, name string) (catalog.ModuleSummary, error)
 	ListVersions(ctx context.Context, name string) ([]catalog.ModuleVersion, error)
 	GetVersion(ctx context.Context, name, version string) (catalog.ModuleVersion, error)
+	UpgradePath(ctx context.Context, name, from, to string) (catalog.UpgradePath, error)
 	Index(ctx context.Context, by identity.Principal, cmd catalog.IndexCommand) (catalog.ModuleVersion, bool, error)
 	SourceAddress(v catalog.ModuleVersion) string
 }
@@ -36,6 +37,7 @@ func (h *CatalogHandler) Routes(r chi.Router) {
 	r.Get("/catalog/modules/{name}", h.getModule)
 	r.Get("/catalog/modules/{name}/versions", h.listVersions)
 	r.Get("/catalog/modules/{name}/versions/{version}", h.getVersion)
+	r.Get("/catalog/modules/{name}/upgrade-path", h.upgradePath)
 }
 
 // InternalRoutes registers the routes called by GitHub Actions. Only module-release.yml
@@ -151,6 +153,77 @@ func (h *CatalogHandler) getVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, h.toVersionDTO(v))
+}
+
+type upgradeStepDTO struct {
+	Version         string         `json:"version"`
+	GitTag          string         `json:"git_tag"`
+	Status          string         `json:"status"`
+	DeprecationNote string         `json:"deprecation_note,omitempty"`
+	ReleasedAt      time.Time      `json:"released_at"`
+	Change          catalog.Change `json:"change"`
+	Breaking        bool           `json:"breaking"`
+	Changelog       string         `json:"changelog_md"`
+	UpgradeNotes    string         `json:"upgrade_notes"`
+}
+
+type upgradeTargetsDTO struct {
+	Patch *string `json:"patch"`
+	Minor *string `json:"minor"`
+	Major *string `json:"major"`
+}
+
+type upgradePathDTO struct {
+	Module        string            `json:"module"`
+	From          string            `json:"from"`
+	To            string            `json:"to"`
+	UpToDate      bool              `json:"up_to_date"`
+	Change        catalog.Change    `json:"change"`
+	MajorsCrossed int               `json:"majors_crossed"`
+	Next          *string           `json:"next"`
+	Targets       upgradeTargetsDTO `json:"targets"`
+	Steps         []upgradeStepDTO  `json:"steps"`
+}
+
+func semverPtr(v *catalog.SemVer) *string {
+	if v == nil {
+		return nil
+	}
+	s := v.String()
+	return &s
+}
+
+func toUpgradePathDTO(p catalog.UpgradePath) upgradePathDTO {
+	steps := fp.Map(p.Steps, func(s catalog.UpgradeStep) upgradeStepDTO {
+		v := s.Version
+		return upgradeStepDTO{Version: v.Version.String(), GitTag: v.GitTag, Status: string(v.Status),
+			DeprecationNote: v.DeprecationNote, ReleasedAt: v.ReleasedAt.UTC(), Change: s.Change,
+			Breaking: s.Change.Breaking(), Changelog: v.Changelog, UpgradeNotes: s.Notes()}
+	})
+	if steps == nil {
+		steps = []upgradeStepDTO{}
+	}
+	return upgradePathDTO{
+		Module: p.Module, From: p.From.String(), To: p.To.String(), UpToDate: p.UpToDate(), Change: p.Change,
+		MajorsCrossed: p.MajorsCrossed(), Next: semverPtr(p.Next),
+		Targets: upgradeTargetsDTO{Patch: semverPtr(p.Targets.Patch), Minor: semverPtr(p.Targets.Minor), Major: semverPtr(p.Targets.Major)},
+		Steps:   steps,
+	}
+}
+
+// upgradePath serves GET /v1/catalog/modules/{name}/upgrade-path?from=X.Y.Z[&to=latest|X.Y.Z].
+func (h *CatalogHandler) upgradePath(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	if q.Get("from") == "" {
+		writeError(w, r, badRequest("from is required: the pinned version, such as 1.2.0"))
+		return
+	}
+	p, err := h.svc.UpgradePath(r.Context(), chi.URLParam(r, "name"), q.Get("from"), q.Get("to"))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toUpgradePathDTO(p))
 }
 
 func (h *CatalogHandler) index(w http.ResponseWriter, r *http.Request) {
