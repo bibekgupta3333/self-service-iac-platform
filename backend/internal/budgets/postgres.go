@@ -38,21 +38,34 @@ func (r *PostgresRepository) Environment(ctx context.Context, name string) (Envi
 // MonthlyBudget implements Repository.
 func (r *PostgresRepository) MonthlyBudget(ctx context.Context, team, env string, month time.Time) (*Budget, error) {
 	b := Budget{Month: month}
-	var envSpecific bool
+	var (
+		envSpecific bool
+		ov          struct {
+			by     *string
+			reason *string
+			expiry *time.Time
+		}
+	)
 	err := r.db.QueryRow(ctx, `
-		SELECT b.limit_usd::float8, b.spent_usd::float8, b.hard_block, b.environment_id IS NOT NULL
+		SELECT b.limit_usd::float8, b.spent_usd::float8, b.actual_usd::float8, b.hard_block, b.environment_id IS NOT NULL,
+		       o.github_login::text, b.override_reason, b.override_expires_at
 		FROM budgets b
 		JOIN teams t ON t.id = b.team_id
 		LEFT JOIN environments e ON e.id = b.environment_id
+		LEFT JOIN users o ON o.id = b.override_by
 		WHERE t.slug = $1 AND b.month = $3::date
 		  AND (b.environment_id IS NULL OR e.name::text = $2)
 		ORDER BY b.environment_id IS NULL
-		LIMIT 1`, team, env, month).Scan(&b.LimitUSD, &b.SpentUSD, &b.HardBlock, &envSpecific)
+		LIMIT 1`, team, env, month).Scan(&b.LimitUSD, &b.SpentUSD, &b.ActualUSD, &b.HardBlock, &envSpecific,
+		&ov.by, &ov.reason, &ov.expiry)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("load budget for %s/%s: %w", team, env, err)
+	}
+	if ov.by != nil && ov.reason != nil && ov.expiry != nil {
+		b.Override = &Override{GrantedBy: *ov.by, Reason: *ov.reason, ExpiresAt: *ov.expiry}
 	}
 	b.Scope = ScopeTeam
 	if envSpecific {

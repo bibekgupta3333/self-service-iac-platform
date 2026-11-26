@@ -78,9 +78,19 @@ const (
 type Budget struct {
 	Month     time.Time
 	LimitUSD  float64
-	SpentUSD  float64 // committed estimate; 0 until cost data is recorded (WBS 8.5)
+	SpentUSD  float64  // committed estimate; 0 until cost estimates are recorded
+	ActualUSD *float64 // recorded actual spend (POST /v1/internal/budget-actuals); nil until recorded
 	HardBlock bool
 	Scope     Scope
+	Override  *Override // an admin override, nil when none was granted
+}
+
+// Override is an admin's waiver of the budget's hard limit until ExpiresAt. The policy
+// ignores it in production (docs/07 section 6.7).
+type Override struct {
+	GrantedBy string // GitHub login of the admin
+	Reason    string
+	ExpiresAt time.Time
 }
 
 // YankedVersion is a module version that must not be newly deployed.
@@ -107,7 +117,7 @@ type Context struct {
 	StackPath            string             `json:"stack_path"`
 	AllowedRegions       []string           `json:"allowed_regions"`
 	Budget               *BudgetDTO         `json:"budget"`
-	BudgetOverride       *struct{}          `json:"budget_override"` // always null until WBS 8.5
+	BudgetOverride       *OverrideDTO       `json:"budget_override"` // null unless an admin granted one
 	Exceptions           []ExceptionDTO     `json:"exceptions"`
 	YankedModuleVersions []YankedVersionDTO `json:"yanked_module_versions"`
 	Now                  string             `json:"now"`
@@ -118,8 +128,18 @@ type BudgetDTO struct {
 	Month     string  `json:"month"` // YYYY-MM
 	LimitUSD  float64 `json:"limit_usd"`
 	SpentUSD  float64 `json:"spent_usd"`
-	HardBlock bool    `json:"hard_block"`
-	Scope     Scope   `json:"scope"`
+	// ActualUSD is the recorded actual spend, null until one is recorded. The budget policy
+	// counts the larger of spent_usd and actual_usd as already used.
+	ActualUSD *float64 `json:"actual_usd"`
+	HardBlock bool     `json:"hard_block"`
+	Scope     Scope    `json:"scope"`
+}
+
+// OverrideDTO is the budget override as the policies see it.
+type OverrideDTO struct {
+	GrantedBy string `json:"granted_by"`
+	Reason    string `json:"reason"`
+	ExpiresAt string `json:"expires_at"` // RFC 3339, UTC
 }
 
 // ExceptionDTO is an approved policy exception (none are served until policy
@@ -153,7 +173,11 @@ func BuildContext(ref StackRef, env Environment, budget *Budget, yanked []Yanked
 	}
 	if budget != nil {
 		c.Budget = &BudgetDTO{Month: budget.Month.Format("2006-01"), LimitUSD: budget.LimitUSD,
-			SpentUSD: budget.SpentUSD, HardBlock: budget.HardBlock, Scope: budget.Scope}
+			SpentUSD: budget.SpentUSD, ActualUSD: budget.ActualUSD, HardBlock: budget.HardBlock, Scope: budget.Scope}
+		if o := budget.Override; o != nil {
+			c.BudgetOverride = &OverrideDTO{GrantedBy: o.GrantedBy, Reason: o.Reason,
+				ExpiresAt: o.ExpiresAt.UTC().Format(time.RFC3339)}
+		}
 	}
 	d.IACP.Context = c
 	return d

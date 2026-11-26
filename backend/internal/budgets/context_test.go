@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,12 +52,26 @@ func TestBuildContextShape(t *testing.T) {
 	}
 	want := `{"iacp":{"context":{"environment":"production","team":"payments","stack":"order-events",` +
 		`"stack_path":"environments/production/payments/order-events","allowed_regions":["us-east-1"],` +
-		`"budget":{"month":"2026-11","limit_usd":2000,"spent_usd":0,"hard_block":true,"scope":"environment"},` +
+		`"budget":{"month":"2026-11","limit_usd":2000,"spent_usd":0,"actual_usd":null,"hard_block":true,"scope":"environment"},` +
 		`"budget_override":null,"exceptions":[],` +
 		`"yanked_module_versions":[{"module":"s3","version":"1.2.0","tag":"modules/s3/v1.2.0"},` +
 		`{"module":"sqs","version":"1.1.0","tag":"modules/sqs/v1.1.0"}],"now":"2026-11-24T10:05:00Z"}}}`
 	if string(raw) != want {
 		t.Fatalf("got  %s\nwant %s", raw, want)
+	}
+}
+
+func TestBuildContextActualAndOverride(t *testing.T) {
+	actual := 1450.1
+	budget := &Budget{Month: MonthOf(now), LimitUSD: 2000, SpentUSD: 900, ActualUSD: &actual, HardBlock: true, Scope: ScopeTeam,
+		Override: &Override{GrantedBy: "ada", Reason: "launch week capacity", ExpiresAt: time.Date(2026, 12, 1, 3, 0, 0, 0, time.FixedZone("x", 3600))}}
+	doc := BuildContext(StackRef{Environment: "staging", Team: "payments", Stack: "orders"}, Environment{Name: "staging"}, budget, nil, now)
+	raw, _ := json.Marshal(doc)
+	for _, want := range []string{`"actual_usd":1450.1`,
+		`"budget_override":{"granted_by":"ada","reason":"launch week capacity","expires_at":"2026-12-01T02:00:00Z"}`} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("context lacks %s: %s", want, raw)
+		}
 	}
 }
 
