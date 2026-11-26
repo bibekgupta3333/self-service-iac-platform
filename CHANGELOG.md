@@ -145,6 +145,19 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
   - requests list (All/Mine, team filter, cursor paging) and request detail with a status timeline, refreshed every 5 s until terminal
   - CI job `portal` (npm ci, lint, typecheck, test, build) and make targets `portal-install`, `portal-dev`, `portal-test`
 
+- Phase 2 modules `ecs-service`, `postgres` and `redis` v1.0.0 (WBS 8.1, partial). Each has a `module.yaml`, secure defaults, a plan-only `examples/complete` with `policy-context.json`, a README and a CHANGELOG:
+  - `ecs-service`: Fargate service with a deployment circuit breaker and rollback, an ECR repository (scan on push, immutable tags, KMS, lifecycle policy), task and execution roles under `/iacp/` with the `iacp-boundary` permissions boundary, KMS-encrypted logs, ALB-only ingress, and an optional internal or public ALB with an HTTPS listener and an HTTP-to-HTTPS redirect
+  - `postgres`: private RDS PostgreSQL with CMK storage, `rds.force_ssl=1`, an RDS-managed master password in Secrets Manager, backups, deletion protection and a final snapshot outside development, Multi-AZ in production and encrypted Performance Insights
+  - `redis`: private ElastiCache replication group with CMK at-rest encryption, required TLS, an AUTH token in Secrets Manager or an RBAC user group, and automatic failover in production
+  - Offline `terraform test` suites, because LocalStack community 4.4 has no ECS, ECR, ELBv2, RDS or ElastiCache: `plan` runs use the real provider with every endpoint on a closed local port, and `apply` runs use `mock_provider "aws"`
+- OPA rules for the new resource types, each with positive and negative tests (213 tests, 99.9 % coverage):
+  - `iacp.encryption.rds_storage`, `iacp.encryption.rds_cmk`, `iacp.encryption.elasticache_at_rest`, `iacp.encryption.elasticache_cmk`, `iacp.encryption.elasticache_transit`, `iacp.encryption.ecr_kms`
+  - `iacp.network.rds_public`, `iacp.network.ecs_public_ip`
+  - `iacp.ecr.scan_on_push`, `iacp.ecr.immutable_tags`
+  - The non-compliant conftest fixture trips every new rule; `verify.sh` now asserts 30 deny and 4 warn rule IDs.
+- `policies/example-plan.sh` and `make example-plans`: plan a module's `examples/complete` and run conftest with its `policy-context.json`, allowing only the relative-source deny.
+- CI: a `module-tests-offline` job runs suites that mock the AWS provider without LocalStack, and the `module-tests` job, which skips those suites, now plans and checks every module example with conftest. LocalStack suites run as before.
+
 ### Security
 - The backend fails closed: it binds to loopback by default, refuses to start without `IACP_AUTH_MODE`, keeps internal endpoints behind a constant-time token check, and enforces team membership on request creation.
 - The API runs as the `iacp_app` role, which can only INSERT and SELECT on `audit_events`. Triggers block UPDATE, DELETE and TRUNCATE.

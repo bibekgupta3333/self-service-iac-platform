@@ -95,8 +95,10 @@ policies/
 │   ├── lib/iacp.rego                  # lib.iacp: pure helpers (selection, tags, environment, exceptions, messages)
 │   ├── main.rego                      # main: aggregates every iacp.* package for `conftest test -p policies/opa`
 │   ├── tags.rego                      # iacp.tags        (required iacp:* tags; iacp.tags.mismatch vs context)
-│   ├── encryption.rego                # iacp.encryption  (S3 SSE-KMS, SQS SSE / CMK outside dev, KMS rotation)
+│   ├── encryption.rego                # iacp.encryption  (S3 SSE-KMS, SQS SSE, RDS storage, ElastiCache at rest + TLS; CMK outside dev; ECR KMS outside dev; KMS rotation)
 │   ├── s3_public.rego                 # iacp.s3          (public access block, public ACLs, public bucket policies)
+│   ├── network.rego                   # iacp.network     (publicly accessible RDS instances, ECS tasks with public IPs)
+│   ├── ecr.rego                       # iacp.ecr         (scan on push, immutable tags)
 │   ├── iam.rego                       # iacp.iam         (Action "*", NotAction/NotResource, write or sensitive actions on all resources, admin managed policies)
 │   ├── placement.rego                 # iacp.placement   (allowed regions; instance sizes are planned)
 │   ├── forbidden.rego                 # iacp.forbidden   (pinned module source, force_destroy outside development, data external/http, provisioners)
@@ -104,6 +106,7 @@ policies/
 │   ├── budget.rego                    # iacp.budget      (planned; input = infracost JSON)
 │   ├── prod_approval.rego             # iacp.approval    (planned; pre-apply gate)
 │   └── *_test.rego                    # opa test cases; CI gate: coverage >= 90 %
+├── example-plan.sh                    # plans a module's examples/complete and runs conftest with its policy-context.json
 ├── fixtures/                          # sample plan JSONs, context.json / context-yanked.json + verify.sh (outside opa/: opa test loads JSON as data)
 └── checkov/
     ├── __init__.py                    # makes the dir loadable by --external-checks-dir policies/checkov
@@ -532,7 +535,9 @@ Implemented in `policies/opa/modules.rego` from `data.iacp.context.yanked_module
 
 Without the API context nothing is listed as yanked, so the rule is inert. The deny can be waived with a time-boxed exception for `module.<name>`.
 
-Policy tests (`opa test policies/opa -v --coverage`) run in `ci.yml` on every PR and push to `main`; the coverage gate is 90 % (currently about 99.9 %). `policies/fixtures/verify.sh` runs conftest with a stack context against a compliant plan (no denies or warnings allowed) and a non-compliant plan that must trip every deny and warn rule ID, then reruns the compliant plan with `context-yanked.json` (its pinned `modules/s3/v1.2.0` listed as yanked), which must be denied by `iacp.modules.yanked` alone.
+Policy tests (`opa test policies/opa -v --coverage`) run in `ci.yml` on every PR and push to `main`; the coverage gate is 90 % (currently about 99.9 %). `policies/fixtures/verify.sh` runs conftest with a stack context against a compliant plan (no denies or warnings allowed) and a non-compliant plan that must trip every deny and warn rule ID, then reruns the compliant plan with `context-yanked.json` (its pinned `modules/s3/v1.2.0` listed as yanked), which must be denied by `iacp.modules.yanked` alone. `policies/example-plan.sh` plans each module's `examples/complete` (against LocalStack, which only answers STS while planning) and runs conftest with the example's `policy-context.json`; the only deny it accepts is `iacp.forbidden.module_source`, because examples call their module through a relative path. CI runs it for every module in the `module-tests` job.
+
+For data stores and containers, the attributes that matter are only known at plan time when the configuration sets them. RDS reports `kms_key_id` as computed even when it is omitted (AWS then uses `aws/rds`), so `iacp.encryption.rds_cmk` and `iacp.encryption.elasticache_cmk` accept an unknown key only when the configuration sets `kms_key_id`. Missing flags such as `storage_encrypted` or `transit_encryption_enabled` count as off.
 
 ### 6.10 Custom Checkov checks
 
