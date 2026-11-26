@@ -59,7 +59,7 @@ variable "tags" {
 # ---- Module inputs ----
 
 variable "versioning_enabled" {
-  description = "Keep object versions. Always enabled in production."
+  description = "Keep object versions. Always enabled in production. Set it at creation: a versioned bucket can be suspended but never returned to unversioned."
   type        = bool
   default     = true
 }
@@ -119,5 +119,49 @@ variable "access_logging" {
   validation {
     condition     = var.access_logging == null || can(regex("^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$", var.access_logging.target_bucket))
     error_message = "access_logging.target_bucket must be a valid S3 bucket name."
+  }
+}
+
+variable "key_service_principals" {
+  description = "AWS service principals (for example logging.s3.amazonaws.com) allowed to use the module-created KMS key on behalf of this account. Ignored when kms_key_arn is set."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for p in var.key_service_principals : can(regex("^[a-z0-9-]+(\\.[a-z0-9-]+)*\\.amazonaws\\.com$", p))])
+    error_message = "key_service_principals must be AWS service principals such as logging.s3.amazonaws.com."
+  }
+}
+
+variable "additional_policy_statements" {
+  description = "Extra bucket policy statements, for example granting a service principal write access. resources defaults to the bucket and its objects. Allow statements must name specific principals."
+  type = list(object({
+    sid                   = string
+    effect                = string
+    actions               = list(string)
+    principal_type        = string
+    principal_identifiers = list(string)
+    resources             = optional(list(string))
+    conditions = optional(list(object({
+      test     = string
+      variable = string
+      values   = list(string)
+    })), [])
+  }))
+  default = []
+
+  validation {
+    condition     = length(var.additional_policy_statements) <= 10 && alltrue([for s in var.additional_policy_statements : can(regex("^[A-Za-z0-9]{1,64}$", s.sid)) && !contains(["DenyInsecureTransport", "DenyOutdatedTls"], s.sid)])
+    error_message = "At most 10 statements; each sid must be 1-64 alphanumerics and must not reuse a built-in sid."
+  }
+
+  validation {
+    condition     = alltrue([for s in var.additional_policy_statements : contains(["Allow", "Deny"], s.effect) && contains(["AWS", "Service", "CanonicalUser", "*"], s.principal_type)])
+    error_message = "effect must be Allow or Deny, and principal_type must be AWS, Service, CanonicalUser or *."
+  }
+
+  validation {
+    condition     = alltrue([for s in var.additional_policy_statements : s.effect == "Deny" || (s.principal_type != "*" && !contains(s.principal_identifiers, "*"))])
+    error_message = "Allow statements must name specific principals; wildcard principals would make the bucket public."
   }
 }

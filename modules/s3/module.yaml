@@ -70,9 +70,49 @@ inputs:
         target_prefix:
           type: string
       x-iacp-group: Logging
+    key_service_principals:
+      type: array
+      items: { type: string, pattern: "^[a-z0-9-]+(\\.[a-z0-9-]+)*\\.amazonaws\\.com$" }
+      uniqueItems: true
+      default: []
+      description: AWS service principals allowed to use the module-created key for this account.
+      x-iacp-group: Encryption
+    additional_policy_statements:
+      type: array
+      maxItems: 10
+      default: []
+      description: Extra bucket policy statements. Allow statements must name specific principals.
+      items:
+        type: object
+        additionalProperties: false
+        required: [sid, effect, actions, principal_type, principal_identifiers]
+        properties:
+          sid: { type: string, pattern: "^[A-Za-z0-9]{1,64}$", not: { enum: [DenyInsecureTransport, DenyOutdatedTls] } }
+          effect: { enum: [Allow, Deny] }
+          actions: { type: array, minItems: 1, items: { type: string } }
+          principal_type: { enum: [AWS, Service, CanonicalUser, "*"] }
+          principal_identifiers: { type: array, minItems: 1, items: { type: string } }
+          resources: { type: array, items: { type: string } }
+          conditions:
+            type: array
+            items:
+              type: object
+              additionalProperties: false
+              required: [test, variable, values]
+              properties:
+                test: { type: string }
+                variable: { type: string }
+                values: { type: array, items: { type: string } }
+        if: { properties: { effect: { const: Allow } } }
+        then:
+          properties:
+            principal_type: { not: { const: "*" } }
+            principal_identifiers: { not: { contains: { const: "*" } } }
+      x-iacp-group: Access
     tags:
       type: object
       additionalProperties: { type: string }
+      propertyNames: { not: { pattern: "^iacp:" } }
       maxProperties: 30
       description: Extra tags. The iacp:* prefix is reserved.
       x-iacp-ui: key-value
