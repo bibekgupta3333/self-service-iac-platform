@@ -337,7 +337,7 @@ environment-specific row wins over a team-wide one; `null` when no budget is set
 
 - **Model.** A create with `"ephemeral": {"ttl_hours": N}` (0 or omitted: `IACP_TTL_DEFAULT_HOURS`) on a
   non-production environment stores `stacks.is_ephemeral`, `ttl_hours` and `expires_at`. Production never
-  allows it: `ttl.EnvRule.AllowsEphemeral` is false for it, and migration `0011` has a trigger and a CHECK
+  allows it: `ttl.EnvRule.AllowsEphemeral` is false for it, and migration `0016` has a trigger and a CHECK
   that keep `environments.allow_ephemeral` false there. The spec stored on the request records the TTL
   actually applied, so a retried publish renders the same thing.
 - **Pure core** (`ttl.go`, no I/O): `Policy.Resolve`, `ExpiresAt`, `PhaseAt` (none, warn from 24 h before,
