@@ -111,7 +111,57 @@ describe("RequestForm", () => {
     await fillValid(user);
     await user.click(screen.getByText("Preview request"));
     const pre = screen.getByText(/POST \/v1\/requests/, { selector: "pre code" });
-    expect(pre.textContent).toContain("Idempotency-Key: <a UUID created on the first submit");
+    expect(pre.textContent).toContain("Idempotency-Key: <a new UUID, created on submit");
     expect(pre.textContent).toContain('"stack": "order-events"');
+  });
+
+  it("keeps the key after an ambiguous failure and mints a new one once the payload changes", async () => {
+    const outcomes: Array<() => Promise<CreateRequestResult>> = [
+      async () => {
+        throw ApiError.network(new TypeError("fetch failed"));
+      },
+      async () => {
+        throw new ApiError(parseProblem(502, { status: 502, code: "api_unreachable", title: "Bad gateway" }));
+      },
+      async () => ({ request: created, replayed: true }),
+    ];
+    const { client, onCreated, user } = setup(() => outcomes.shift()!());
+    await fillValid(user);
+    await user.click(screen.getByRole("button", { name: "Submit request" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByText(/may have received the request/)).toBeInTheDocument();
+    expect(within(alert).getByRole("link", { name: "your requests" })).toHaveAttribute("href", "/requests?mine=true");
+
+    // Same values: same key, so a request that did get through is replayed, not duplicated.
+    await user.click(screen.getByRole("button", { name: "Submit request" }));
+    // Edited values: a new key, so the backend never answers idempotency_key_reuse.
+    await user.type(screen.getByLabelText(/^Justification/), "FEAT-1");
+    await user.click(screen.getByRole("button", { name: "Submit request" }));
+
+    expect(client.createRequest.mock.calls.map((c) => c[1])).toEqual(["key-0001-fixed", "key-0001-fixed", "key-0002-fixed"]);
+    expect(client.createRequest.mock.calls[2]?.[0].justification).toBe("FEAT-1");
+    expect(onCreated).toHaveBeenCalledWith(created);
+  });
+
+  it("explains idempotency_key_reuse and starts over with a new key", async () => {
+    const outcomes: Array<() => Promise<CreateRequestResult>> = [
+      async () => {
+        throw new ApiError(
+          parseProblem(422, { status: 422, code: "idempotency_key_reuse", title: "Request failed validation" }),
+        );
+      },
+      async () => ({ request: created, replayed: false }),
+    ];
+    const { client, user } = setup(() => outcomes.shift()!());
+    await fillValid(user);
+    await user.click(screen.getByRole("button", { name: "Submit request" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByText("This form was already submitted with different values")).toBeInTheDocument();
+    expect(within(alert).getByRole("link", { name: "your requests" })).toHaveAttribute("href", "/requests?mine=true");
+
+    await user.click(screen.getByRole("button", { name: "Submit request" }));
+    expect(client.createRequest.mock.calls.map((c) => c[1])).toEqual(["key-0001-fixed", "key-0002-fixed"]);
   });
 });

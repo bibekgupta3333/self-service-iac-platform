@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { type FormEvent, useMemo, useRef, useState } from "react";
 
@@ -20,6 +21,7 @@ import {
   type StackFields,
   validateStackFields,
 } from "@/lib/request/form";
+import { classifyFailure, type FailureKind, type KeyedPayload, keyFor } from "@/lib/request/idempotency";
 import { SchemaAdapter } from "@/lib/schema/adapter";
 import type { FieldValue } from "@/lib/schema/values";
 
@@ -37,6 +39,7 @@ export interface RequestFormProps {
 }
 
 interface Failure {
+  kind: FailureKind;
   title: string;
   detail?: string;
   requestId?: string;
@@ -57,10 +60,11 @@ const labelFor = (key: FormKey): string =>
 export function RequestForm({ version, client, newIdempotencyKey, onCreated }: RequestFormProps) {
   const router = useRouter();
   const adapter = useMemo(() => new SchemaAdapter(version), [version]);
-  // One key per form session, created on the first submit (not during render, so server and
-  // client markup match). Retries after a network error or a validation failure reuse it, so a
-  // request that did reach the backend is never created twice (docs/03 §5).
-  const [idempotencyKey, setIdempotencyKey] = useState<string | null>(null);
+  // The Idempotency-Key is bound to the payload it was sent with (src/lib/request/idempotency.ts):
+  // resubmitting the same payload reuses it, so a request that reached the backend is never
+  // created twice; changing the payload mints a new one. It is created on submit, never during
+  // render, so server and client markup match.
+  const [sent, setSent] = useState<KeyedPayload | null>(null);
   const [stack, setStack] = useState<StackFields>(() => ({
     team: "",
     environment: "development",
@@ -76,6 +80,8 @@ export function RequestForm({ version, client, newIdempotencyKey, onCreated }: R
 
   const { inputs, errors: inputProblems } = adapter.toInputs(values);
   const payload = buildCreatePayload(stack, adapter.module, adapter.version, inputs);
+  const payloadText = JSON.stringify(payload);
+  const currentKey = sent !== null && sent.payload === payloadText ? sent.key : null;
 
   const setStackField = (key: keyof StackFields) => (value: string) => setStack((s) => ({ ...s, [key]: value }));
   const setValue = (name: string, value: FieldValue) => setValues((v) => ({ ...v, [name]: value }));
@@ -94,26 +100,38 @@ export function RequestForm({ version, client, newIdempotencyKey, onCreated }: R
       showProblems(clientErrors, null);
       return;
     }
-    const key = idempotencyKey ?? (newIdempotencyKey ?? (() => crypto.randomUUID()))();
-    if (idempotencyKey === null) setIdempotencyKey(key);
+    const keyed = keyFor(sent, payloadText, newIdempotencyKey ?? (() => crypto.randomUUID()));
+    setSent(keyed);
     setSubmitting(true);
     setErrors({});
     setFailure(null);
     try {
-      const { request } = await (client ?? browserApi()).createRequest(payload, key);
+      const { request } = await (client ?? browserApi()).createRequest(payload, keyed.key);
       if (onCreated) onCreated(request);
       else router.push(`/requests/${encodeURIComponent(request.id)}`);
     } catch (err) {
-      if (isApiError(err)) {
+      const kind = classifyFailure(err);
+      if (kind === "key_reused") {
+        // Only reachable if the payload changed under the same key; start over with a new one.
+        setSent(null);
+        showProblems({}, {
+          kind,
+          title: "This form was already submitted with different values",
+          detail: "An earlier submit may have created a request. Check your requests before submitting again.",
+          requestId: isApiError(err) ? err.requestId : undefined,
+          general: [],
+        });
+      } else if (isApiError(err)) {
         const mapped = mapFieldErrors(err.fieldErrors);
         showProblems(mapped.fields, {
+          kind,
           title: err.problem.title,
           detail: err.problem.detail,
           requestId: err.requestId,
           general: mapped.general,
         });
       } else {
-        showProblems({}, { title: "Request failed", detail: String(err), general: [] });
+        showProblems({}, { kind, title: "Request failed", detail: String(err), general: [] });
       }
     } finally {
       setSubmitting(false);
@@ -157,6 +175,17 @@ export function RequestForm({ version, client, newIdempotencyKey, onCreated }: R
                 <li key={g}>{g}</li>
               ))}
             </ul>
+          )}
+          {(failure?.kind === "ambiguous" || failure?.kind === "key_reused") && (
+            <p className="mt-2">
+              {failure.kind === "ambiguous" &&
+                "The platform may have received the request. Submitting again without changes is safe; if you change the form, check "}
+              {failure.kind === "key_reused" && "See "}
+              <Link href="/requests?mine=true" className="underline">
+                your requests
+              </Link>
+              {failure.kind === "ambiguous" ? " first." : "."}
+            </p>
           )}
           {failure?.requestId && (
             <p className="mt-2 text-xs">
@@ -254,7 +283,7 @@ export function RequestForm({ version, client, newIdempotencyKey, onCreated }: R
         </p>
         <pre className="mt-3 overflow-x-auto rounded-md bg-slate-900 p-4 text-xs text-slate-100">
           <code>
-            {`POST /v1/requests\nIdempotency-Key: ${idempotencyKey ?? "<a UUID created on the first submit and reused for retries>"}\nContent-Type: application/json\n\n${JSON.stringify(payload, null, 2)}`}
+            {`POST /v1/requests\nIdempotency-Key: ${currentKey ?? "<a new UUID, created on submit and reused while the values stay the same>"}\nContent-Type: application/json\n\n${JSON.stringify(payload, null, 2)}`}
           </code>
         </pre>
         <p className="mt-2 text-xs text-slate-500">
