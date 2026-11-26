@@ -7,8 +7,8 @@
 #                any environments/ path outside a valid stack root
 #   validate  -> per stack: fmt, module pins, init, installed-module check,
 #                validate, TFLint, Checkov (both also as SARIF),
-#                plan, show -json, conftest, hermetic LocalStack apply
-#                round trip; uploads the plan summary and SARIF
+#                plan, show -json, Infracost (informational), conftest, hermetic
+#                LocalStack apply round trip; uploads the plan summary and SARIF
 #   comment   -> sticky PR comment per stack (the only job that can write to the PR)
 #   code-scanning -> per stack: uploads the SARIF (the only job with
 #                security-events: write); skipped for fork and Dependabot PRs
@@ -40,6 +40,9 @@ env:
   TFLINT_VERSION: v0.59.1
   CONFTEST_VERSION: 0.71.1
   CONFTEST_SHA256: c3f6b2a753bd56e377a1e51a95ae3e057f926f2e9139f7d5b5dfbbaf810f7985
+  INFRACOST_VERSION: 0.10.49
+  # sha256 of infracost-linux-amd64.tar.gz (matches the release's .sha256 file).
+  INFRACOST_SHA256: d47ce327416d8d8b9e4c8e42ccbd9b8841e838eb9711fd02319f3bc62a258ee9
   # Dummy credentials for LocalStack only; never real keys.
   AWS_ACCESS_KEY_ID: test
   AWS_SECRET_ACCESS_KEY: test
@@ -295,6 +298,36 @@ jobs:
         name: terraform show -json
         run: terraform show -json tfplan > "$RUNNER_TEMP/plan.json"
 
+      # Informational cost estimate (WBS 5.5); never fails the build, and the summary
+      # leaves the cost line out when it did not run. Only this step sees the API key:
+      # it runs the checksum-verified Infracost binary on plan.json and nothing from
+      # the PR. Fork and Dependabot PRs get no secrets, so they take the notice path.
+      # Infracost sends resource attributes (types, regions, sizes) to its pricing
+      # API, not the plan file.
+      - id: cost
+        name: Infracost (informational)
+        if: steps.show.outcome == 'success'
+        continue-on-error: true
+        env:
+          INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
+          INFRACOST_SKIP_UPDATE_CHECK: "true"
+          INFRACOST_ENABLE_CLOUD: "false"
+          INFRACOST_NO_COLOR: "true"
+        run: |
+          if [ -z "$INFRACOST_API_KEY" ]; then
+            echo "::notice title=Infracost skipped::INFRACOST_API_KEY is not configured for this run; no cost estimate for $STACK_PATH"
+            exit 0
+          fi
+          tarball=infracost-linux-amd64.tar.gz
+          curl -fsSLo "$RUNNER_TEMP/$tarball" \
+            "https://github.com/infracost/infracost/releases/download/v${INFRACOST_VERSION}/${tarball}"
+          echo "${INFRACOST_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/infracost"
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/infracost" infracost-linux-amd64
+          "$RUNNER_TEMP/infracost/infracost-linux-amd64" breakdown --path "$RUNNER_TEMP/plan.json" \
+            --format json --out-file "$RUNNER_TEMP/infracost.json"
+          "$RUNNER_TEMP/infracost/infracost-linux-amd64" output --path "$RUNNER_TEMP/infracost.json" --format table
+
       - id: conftest
         name: OPA policies (conftest)
         # The context comes from iacp.stack.json until GET /v1/internal/budget-context
@@ -342,6 +375,7 @@ jobs:
             --plan "$RUNNER_TEMP/plan.json" \
             --conftest "$RUNNER_TEMP/conftest.json" \
             --plan-text "$RUNNER_TEMP/plan.txt" \
+            --cost "$RUNNER_TEMP/infracost.json" \
             --step "fmt=$OUT_FMT" --step "module pins=$OUT_PINS" --step "init=$OUT_INIT" \
             --step "installed modules=$OUT_MODULES" \
             --step "validate=$OUT_VALIDATE" --step "tflint=$OUT_TFLINT" --step "checkov=$OUT_CHECKOV" \
