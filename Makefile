@@ -15,7 +15,7 @@ export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION AWS_ENDPOINT_U
 unexport AWS_PROFILE AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
 
 .PHONY: help up down ps fmt fmt-check validate tflint checkov policy-test lint \
-        module-test integration-test validate-manifests module-gate go-test go-integration generator-update api py-test test diagrams \
+        module-test integration-test validate-manifests module-gate go-test go-integration generator-update api portal-install portal-dev portal-test py-test test diagrams \
         stack-detect stack-plan stack-apply stack-destroy stack-clean
 
 help: ## Show available targets
@@ -117,6 +117,20 @@ generator-update: ## Regenerate generator golden files after an intended templat
 
 api: ## Run the API locally in dev auth mode (needs `make up`)
 	cd backend && IACP_AUTH_MODE=dev IACP_INTERNAL_TOKEN=local-dev-internal-token-0123456789abcdef go run ./cmd/api
+
+## ---- portal ----
+PORTAL_API_URL ?= http://127.0.0.1:8080
+
+portal-install: ## Install portal dependencies from the lock file (Node version in portal/.nvmrc)
+	cd portal && npm ci --no-audit --no-fund
+
+portal-dev: ## Run the portal on :3000 against the local API (needs `make api`)
+	@[ -d portal/node_modules ] || $(MAKE) portal-install
+	cd portal && IACP_API_URL=$(PORTAL_API_URL) npm run dev
+
+portal-test: ## Portal lint, typecheck and unit tests
+	@[ -d portal/node_modules ] || $(MAKE) portal-install
+	cd portal && npm run lint && npm run typecheck && npm test
 
 integration-test: ## Terratest suite in tests/ against LocalStack (needs `make up`)
 	cd tests && go test -count=1 -timeout 45m ./...

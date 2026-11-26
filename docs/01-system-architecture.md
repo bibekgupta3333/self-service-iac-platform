@@ -32,6 +32,8 @@ Three planes:
 | **Control** | Go API + worker (`backend/`), PostgreSQL, SQS, EventBridge Scheduler — AWS `platform` account | Identity/RBAC, catalog, request orchestration, config generation, GitHub App integration, locks, budgets, audit, scheduling (drift/TTL). Never holds AWS write credentials for workload accounts. |
 | **Execution** | GitHub Actions in the monorepo; workload accounts `development` / `staging` / `production` | `terraform fmt/validate/plan/apply`, TFLint, Checkov, OPA/conftest, Infracost, Terratest. Authenticates via GitHub OIDC to per-account `iacp-plan` / `iacp-apply` roles. |
 
+The portal renders catalog and request pages on the server, calling the API directly. Browser-side calls (the request form) go through the portal's same-origin route `/api/iacp/v1/...`, which forwards only an allow-list of user routes (`/v1/catalog/*`, `/v1/requests*`) to the API and rejects cross-site POSTs. Until GitHub OAuth (WBS 4.4) lands, the portal uses the API's dev auth mode through its `AuthProvider` seam ([portal/README.md](../portal/README.md)).
+
 The backend's internal structure:
 
 ![Backend components](diagrams/images/component-backend.png)

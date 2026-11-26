@@ -109,7 +109,7 @@ Durations assume one engineer; adjust linearly.
 
 | Tasks |
 |---|
-| Next.js portal: GitHub login, catalog list + module detail (README, versions, inputs), dynamic form from JSON Schema (`@rjsf/core`), request detail with status timeline, plan summary, links to PR and run; stack list per team |
+| Next.js portal: GitHub login, catalog list + module detail (README, versions, inputs), dynamic form from JSON Schema (typed renderer, [ADR-0011](adr/0011-portal-form-renderer.md)), request detail with status timeline, plan summary, links to PR and run; stack list per team |
 | `destroy` request: `desired_state: absent` → `plan -destroy` → apply → cleanup PR → stack `destroyed` |
 | Infracost in PR comment (informational only in MVP) |
 | Basic observability: structured logs, `/metrics`, CloudWatch dashboard for lead time and failure rate |

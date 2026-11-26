@@ -893,9 +893,9 @@ Called only by GitHub Actions jobs with `Authorization: Bearer <GitHub OIDC JWT>
 | POST | `/drift` | `drift.yml` | Drift result per stack (see [6.6](#66-drift)). |
 | POST | `/internal/catalog/index` | `module-release.yml` | Index a released module version (see [6.2](#62-catalog-modules-and-versions)). |
 | GET | `/internal/stacks/{id}/lock` | worker, `apply.yml` | Current platform lock: `stack_id`, `request_id`, `holder`, `fencing_token`, `acquired_at`, `expires_at`; `404` when unlocked. |
-| POST | `/internal/stacks/{id}/lock` | worker | Acquire for `{"request_id"}`: `200 {"lock": "granted"\|"held", "queued_behind": null, "current": {…}}` or `202 {"lock": "queued", "queued_behind": "<holder request id>", "current": {…}}`. |
+| POST | `/internal/stacks/{id}/lock` | worker, `apply.yml` | Acquire for `{"request_id"}`: `200 {"lock": "granted"\|"held", "queued_behind": null, "current": {…}}` or `202 {"lock": "queued", "queued_behind": "<holder request id>", "current": {…}}`. |
 | POST | `/internal/stacks/{id}/lock/heartbeat` | worker, `apply.yml` | Renew the lease: `{"request_id", "fencing_token"}`; `409 stale_fencing_token` when superseded. |
-| DELETE | `/internal/stacks/{id}/lock?request_id=&fencing_token=` | worker | Release (terminal request) and promote the oldest queued request: `200 {"released": {…}, "promoted": {…}\|null}`; `409 stale_fencing_token`. |
+| DELETE | `/internal/stacks/{id}/lock?request_id=&fencing_token=` | worker, `apply.yml` | Release (terminal request) and promote the oldest queued request: `200 {"released": {…}, "promoted": {…}\|null}`; `409 stale_fencing_token`. |
 
 Machine endpoints accept the GitHub OIDC JWT, and, as a fallback while workflows migrate, the shared `IACP_INTERNAL_TOKEN`. Neither configured means every call is rejected.
 

@@ -68,6 +68,27 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
     - New `verify-modules` step after init: the installed module calls must match the pins one to one, at the recorded commits.
     - Serving unpublished tags now requires `IACP_PIN_BOOTSTRAP` (`--allow-unpublished`).
     - The comment job writes the comment marker itself.
+
+- Run reports and the apply pipeline (WBS 5.2 report, 5.3, 5.6):
+  - `tools/stack_pipeline report` builds a `POST /v1/runs` body that mirrors `runs.Report` and `runs.Validate`, from the plan summary, `terraform output -json` (sensitive values redacted) and the runner environment. `head_sha` is always `GITHUB_SHA`.
+  - `tools/stack_pipeline lock acquire|release` claims and releases the platform stack lock.
+  - `api_client.py`: a GitHub OIDC token for the configured audience, falling back to `IACP_INTERNAL_TOKEN`. Tokens are masked, redirects are refused, and only idempotent calls are retried. Both commands skip with a notice while `IACP_API_URL` is empty.
+  - `.github/actions/iacp-report`: a thin composite action over `report`. Every input passes through `env:`.
+  - `pr-validate.yml`: a separate `report` job, the only one with `id-token: write`, reports each stack's summary as pipeline `validate`. It never affects `pr-validate-result`.
+  - `.github/workflows/apply.yml`: on push to `main` (`environments/**`) or dispatch, per stack against LocalStack:
+    - lock claim, verify-pins, init, verify-modules
+    - plan (or `plan -destroy`), then a conftest pre-apply gate
+    - plan report and the plan-hash check when an approved hash is given
+    - apply, outputs, apply and summary reports, then lock release in an `always()` step
+    - one apply per stack (`iacp-stack-<id>-apply`, never cancelled)
+  - State is hermetic per job until the S3 backend arrives. That limit is documented in docs/05 and ADR-0009.
+  - Review hardening:
+    - The pr-validate `report` job is OIDC only, and `apply.yml` never receives `IACP_INTERNAL_TOKEN`. A job that can mint OIDC tokens no longer falls back to the shared token.
+    - `apply.yml` runs only from `main`.
+    - The plan-hash check fails closed once the API is configured, and both hashes are format-checked.
+    - A lock claim is recorded before the call, so an ambiguous claim is still released (by request when no token came back). A failed release is reported as its own stage.
+    - Destroy dispatches have their own concurrency group.
+    - The dispatched `stack_path` and server text are kept out of workflow commands.
     - The workflow runs on every PR, and policy and tool-version changes re-validate every stack.
   - After the first module releases:
     - The smoke stack is pinned to the published `modules/s3/v1.0.0` (`681144a`).
@@ -108,6 +129,25 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
   - RS256 only, cached JWKS with refetch on an unknown `kid` (rate limited), `iss`/`aud`/`exp`/`nbf`/`iat` with leeway, and `repository`/`repository_owner`/`repository_id`/`ref`/`job_workflow_ref` allow-lists
   - configured with `IACP_OIDC_AUDIENCE` and `IACP_OIDC_REPOSITORY` (plus optional overrides); accepted on `/v1/internal/*` next to the shared token
 - `POST /v1/runs` records run reports in the new `pipeline_runs` table (migration `0005`), checking the fencing token, the reporting run id and commit, and the workflow and trigger allowed for each pipeline. Replayed stage reports replace their entry instead of duplicating it, and reports lock the stack row before the lock row so they cannot deadlock with lock release.
+- Developer portal `portal/` (WBS 7.1–7.3, 7.5 partial):
+  - Next.js 16 App Router with strict TypeScript, Tailwind 4, ESLint and Vitest + Testing Library; exact dependency pins and a committed `package-lock.json`; Node 24 from `portal/.nvmrc`
+  - typed `ApiClient` (fetch, base URL and `AuthProvider` injected) with `ApiError` built from the backend's problem+json, including `errors[].pointer`
+  - `AuthProvider` seam with `DevAuthProvider`, matching the backend's dev auth mode (no credentials, fixed login); GitHub OAuth plugs in later
+  - same-origin proxy `/api/iacp/v1/...` for browser calls (the API sends no CORS headers):
+    - forwards only an allow-list of user routes (`catalog`, `requests`; POST only on `/v1/requests`), matched exactly, with no dot segments or encoded slashes
+    - allow-lists request and response headers and rewrites `Location` into the proxy prefix
+    - answers HEAD without a body, rejects other methods (405) and bodies over 1 MiB (413)
+    - rejects cross-site POSTs (403) using `Sec-Fetch-Site` or `Origin`
+  - catalog list (category filters derived from the modules) and module detail with versions, outputs and an inputs table generated from the JSON Schema
+  - Content-Security-Policy and other security headers on every response
+  - request form generated from the version's input schema by a small typed renderer ([ADR-0011](docs/adr/0011-portal-form-renderer.md)):
+    - the `Idempotency-Key` is bound to the payload: reused for unchanged retries, renewed when the values change
+    - `idempotency_key_reuse` and ambiguous failures (network error, 5xx) are explained, with a link to the user's requests
+    - backend validation errors are mapped onto fields by pointer, including missing required inputs
+    - exclusive bounds are respected, and clearing an optional field sends null or an explicit empty value where the schema allows it
+    - a preview shows the exact request
+  - requests list (All/Mine, team filter, cursor paging) and request detail with a status timeline, refreshed every 5 s until terminal
+  - CI job `portal` (npm ci, lint, typecheck, test, build) and make targets `portal-install`, `portal-dev`, `portal-test`
 
 ### Security
 - The backend fails closed: it binds to loopback by default, refuses to start without `IACP_AUTH_MODE`, keeps internal endpoints behind a constant-time token check, and enforces team membership on request creation.
