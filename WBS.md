@@ -112,7 +112,7 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 | [ ] 7.4 | Request detail: status timeline (SSE), plan summary, cost, PR/run links (backend `GET /v1/requests/{id}/events` is ready; the portal side is open) | 1.5 | 4.9 |
 | [~] 7.5 | Stacks list per team, outputs view — requests list and detail with status timeline (polling) done; `GET /v1/stacks` and `GET /v1/stacks/{id}` (status, outputs) are available; the portal views are open | 1 | 4.5 |
 | [ ] 7.6 | Destroy flow: `plan -destroy` → apply → cleanup PR → `destroyed` (the `destroy` request and its empty marked root are done under 4.5; the cleanup PR and the `destroyed` transition are open) | 1.5 | 5.3 |
-| [ ] 7.7 | Observability: CloudWatch dashboard (lead time, failure rate), alarms | 1 | 4.1 |
+| [~] 7.7 | Observability: CloudWatch dashboard (lead time, failure rate), alarms — stack `development/platform/observability` (dashboard, SNS topic, six queue alarms, [runbook](docs/09-observability.md)) done; the request, apply, lock and stack metrics, a CloudWatch exporter, and custom-metric alarms (failure rate, stuck lock, needs a `monitoring` minor release) are open | 1 | 4.1 |
 
 **MVP exit:** the end-to-end demo script in `docs/08-mvp-roadmap.md` §4 passes in development and staging.
 
