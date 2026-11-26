@@ -234,14 +234,60 @@ run "existing_key_and_boundary" {
   }
 }
 
-run "rejects_shared_nat_in_production" {
+run "production_defaults_to_nat_per_zone" {
   command = plan
 
   variables {
     environment = "production"
   }
 
+  assert {
+    condition     = length(aws_nat_gateway.this) == 2 && length(aws_route.private_nat) == 2 && keys(aws_nat_gateway.this) == keys(aws_route.private_nat)
+    error_message = "With single_nat_gateway left null, production must get one NAT gateway per zone."
+  }
+
+  assert {
+    condition     = aws_kms_key.this[0].deletion_window_in_days == 30
+    error_message = "Production keys use a 30-day deletion window."
+  }
+}
+
+run "rejects_shared_nat_in_production" {
+  command = plan
+
+  variables {
+    environment        = "production"
+    single_nat_gateway = true
+  }
+
   expect_failures = [var.single_nat_gateway]
+}
+
+run "rejects_more_zones_than_the_region_has" {
+  command = plan
+
+  variables {
+    az_count = 3
+  }
+
+  override_data {
+    target = data.aws_availability_zones.available
+    values = {
+      names = ["us-east-1a", "us-east-1b"]
+    }
+  }
+
+  expect_failures = [data.aws_availability_zones.available]
+}
+
+run "rejects_unavailable_explicit_zone" {
+  command = plan
+
+  variables {
+    availability_zones = ["us-east-1a", "us-east-1z"]
+  }
+
+  expect_failures = [data.aws_availability_zones.available]
 }
 
 run "rejects_public_cidr" {
