@@ -105,7 +105,9 @@ async function forward(req: Request, ctx: Context): Promise<Response> {
   headers.delete("location");
   if (location !== null) headers.set("location", location);
   if (decision.head) {
-    await upstream.body?.cancel();
+    // Drain (API responses are small) rather than cancel: cancelling the upstream stream
+    // stalled the HEAD response under next start.
+    await upstream.arrayBuffer().catch(() => undefined);
     return new Response(null, { status: upstream.status, headers });
   }
   return new Response(upstream.body, { status: upstream.status, headers });
