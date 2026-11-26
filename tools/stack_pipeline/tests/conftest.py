@@ -48,11 +48,15 @@ def make_stack(tmp_path: Path) -> Callable[..., Path]:
 class FakeRepository:
     """In-memory StackRepository for detector tests."""
 
-    def __init__(self, *stacks: StackMetadata) -> None:
+    def __init__(self, *stacks: StackMetadata, orphans: tuple[StackRef, ...] = ()) -> None:
         self.stacks = {s.ref: s for s in stacks}
+        self.orphans = set(orphans)  # roots with files but no iacp.stack.json
 
     def load(self, ref: StackRef) -> StackMetadata | None:
         return self.stacks.get(ref)
+
+    def has_files(self, ref: StackRef) -> bool:
+        return ref in self.stacks or ref in self.orphans
 
     def all_refs(self) -> list[StackRef]:
         return sorted(self.stacks)

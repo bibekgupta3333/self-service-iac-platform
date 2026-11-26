@@ -11,7 +11,24 @@ STACK_FILE = "iacp.stack.json"
 ENVIRONMENTS = ("development", "staging", "production")
 
 # Same identity rule as backend/internal/generator (nameRe).
-_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,40}$")
+_NAME_RE = re.compile(r"[a-z][a-z0-9-]{1,40}")
+
+# Files under environments/ that are not part of any stack root.
+_NON_STACK_FILE_RE = re.compile(r"environments/README\.md|environments/(development|staging|production)/\.gitkeep")
+
+
+def is_environments_path(path: str) -> bool:
+    """True for any repo-relative path under environments/."""
+    return _normalize(path).startswith(f"{ENVIRONMENTS_DIR}/")
+
+
+def is_non_stack_file(path: str) -> bool:
+    """True for the allow-listed files under environments/ that belong to no stack."""
+    return _NON_STACK_FILE_RE.fullmatch(_normalize(path)) is not None
+
+
+def _normalize(path: str) -> str:
+    return path.replace("\\", "/").strip("/")
 
 
 class StackMetadataError(ValueError):
@@ -35,11 +52,11 @@ class StackRef:
         (``environments/README.md``, ``environments/development/.gitkeep``) or with
         segments that are not valid names do not belong to a stack.
         """
-        parts = path.replace("\\", "/").strip("/").split("/")
+        parts = _normalize(path).split("/")
         if len(parts) < 5 or parts[0] != ENVIRONMENTS_DIR:
             return None
         env, team, stack = parts[1:4]
-        if env not in ENVIRONMENTS or not _NAME_RE.match(team) or not _NAME_RE.match(stack):
+        if env not in ENVIRONMENTS or not _NAME_RE.fullmatch(team) or not _NAME_RE.fullmatch(stack):
             return None
         return cls(env, team, stack)
 

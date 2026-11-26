@@ -13,10 +13,11 @@ from tools.stack_pipeline import (
     dependency_conflicts,
     stack_roots,
     triggers_full_run,
+    unmapped_paths,
 )
 from tools.stack_pipeline.adapters import FileSystemStackRepository, GitDiff
 from tools.stack_pipeline.cli import main
-from tools.stack_pipeline.models import StackMetadata
+from tools.stack_pipeline.models import StackMetadata, is_non_stack_file
 
 from .conftest import FakeRepository, metadata, stack_json
 
@@ -37,6 +38,8 @@ class TestStackRef:
             ("environments/sandbox/platform/smoke/main.tf", None),  # unknown environment
             ("environments/development/Platform/smoke/main.tf", None),  # invalid team
             ("environments/development/platform/s/main.tf", None),  # name too short
+            ("environments/development/platform/smoke\n/main.tf", None),  # trailing newline in a name
+            ("environments/development/my team/x/main.tf", None),  # space in a name
             ("modules/s3/main.tf", None),
             ("docs/environments/development/platform/smoke/main.tf", None),
         ],
@@ -141,6 +144,66 @@ class TestPureFunctions:
             check_guard_rails(stacks, 20)
 
 
+# Every path here is under environments/ but outside a valid stack root.
+UNMAPPED = [
+    "environments/dev/platform/x/main.tf",  # unknown environment
+    "environments/development/Platform/x/main.tf",  # uppercase segment
+    "environments/development/platform/evil.tf",  # file directly under a team
+    "environments/development/my team/x/main.tf",  # space in a segment
+    "environments/development/platform/x Y/main.tf",  # space in the stack segment
+    "environments/rogue.tf",  # file directly under environments/
+    "environments/development/notes.md",  # file directly under an environment
+    "environments/staging/README.md",  # only the top-level README is allow-listed
+]
+
+
+class TestFailClosed:
+    @pytest.mark.parametrize("path", UNMAPPED)
+    def test_unmapped_path_fails(self, path):
+        assert unmapped_paths([path]) == [path]
+        with pytest.raises(DetectionError, match="not inside an environments/<env>/<team>/<stack>/ root"):
+            StackDetector(FakeRepository()).detect([path, "README.md"])
+
+    @pytest.mark.parametrize(
+        "path",
+        ["environments/README.md", "environments/development/.gitkeep", "environments/production/.gitkeep", "README.md"],
+    )
+    def test_allow_listed_and_outside_paths_pass(self, path):
+        assert unmapped_paths([path]) == []
+        assert StackDetector(FakeRepository()).detect([path]).count == 0
+
+    def test_is_non_stack_file_is_exact(self):
+        assert is_non_stack_file("environments/README.md")
+        assert not is_non_stack_file("environments/README.md.tf")
+        assert not is_non_stack_file("environments/sandbox/.gitkeep")
+
+    def test_all_unmapped_paths_are_reported_together(self):
+        with pytest.raises(DetectionError) as exc:
+            StackDetector(FakeRepository()).detect(UNMAPPED[:2])
+        assert UNMAPPED[0] in str(exc.value) and UNMAPPED[1] in str(exc.value)
+
+    def test_root_with_files_but_no_stack_json_fails(self):
+        rogue = StackRef("development", "platform", "rogue")
+        with pytest.raises(DetectionError, match="have files but no iacp.stack.json: environments/development/platform/rogue"):
+            StackDetector(FakeRepository(orphans=(rogue,))).detect(["environments/development/platform/rogue/main.tf"])
+
+    def test_root_whose_directory_is_gone_is_skipped(self):
+        result = StackDetector(FakeRepository()).detect(["environments/development/platform/gone/main.tf"])
+        assert result.count == 0 and [r.path for r in result.skipped] == ["environments/development/platform/gone"]
+
+    def test_cli_exits_non_zero_on_reviewer_cases(self, tmp_path, make_stack, capsys):
+        rogue = tmp_path / "environments" / "development" / "platform" / "rogue"
+        rogue.mkdir(parents=True)
+        (rogue / "main.tf").write_text("resource {}\n")
+        changed = tmp_path / "changed.txt"
+        changed.write_text("environments/development/platform/rogue/main.tf\n")
+        rc = main(["--repo-root", str(tmp_path), "detect", "--files-from", str(changed), "--github-output", ""])
+        assert rc == 1 and "no iacp.stack.json" in capsys.readouterr().err
+        changed.write_text("\n".join(UNMAPPED) + "\n")
+        rc = main(["--repo-root", str(tmp_path), "detect", "--files-from", str(changed), "--github-output", ""])
+        assert rc == 1 and "not inside" in capsys.readouterr().err
+
+
 class TestStackDetector:
     def test_maps_changes_to_existing_stacks(self):
         repo = FakeRepository(metadata("development", "platform", "smoke"), metadata("staging", "payments", "orders"))
@@ -184,6 +247,15 @@ class TestFileSystemStackRepository:
         assert repo.all_refs() == [SMOKE, StackRef("staging", "payments", "orders")]
         assert repo.load(SMOKE).region == "us-east-1"
         assert repo.load(StackRef("development", "platform", "empty")) is None
+
+    def test_has_files(self, tmp_path, make_stack):
+        make_stack("development", "platform", "smoke")
+        empty = tmp_path / "environments" / "development" / "platform" / "empty" / "sub"
+        empty.mkdir(parents=True)
+        repo = FileSystemStackRepository(tmp_path)
+        assert repo.has_files(SMOKE)
+        assert not repo.has_files(StackRef("development", "platform", "empty"))  # only empty dirs
+        assert not repo.has_files(StackRef("development", "platform", "missing"))
 
     def test_invalid_json(self, tmp_path, make_stack):
         root = make_stack("development", "platform", "smoke")

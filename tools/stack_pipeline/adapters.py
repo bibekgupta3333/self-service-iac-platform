@@ -86,6 +86,10 @@ class FileSystemStackRepository:
             raise StackMetadataError(f"{ref.path}/{STACK_FILE}: invalid JSON: {exc}") from exc
         return StackMetadata.from_json(ref, data)
 
+    def has_files(self, ref: StackRef) -> bool:
+        root = self.repo_root / ref.path
+        return root.is_dir() and any(p.is_file() for p in root.rglob("*"))
+
     def load_dir(self, stack_dir: Path) -> StackMetadata:
         """Metadata for a stack directory given on the command line."""
         resolved = Path(stack_dir).resolve()

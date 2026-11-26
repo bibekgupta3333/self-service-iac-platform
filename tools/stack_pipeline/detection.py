@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Protocol, Sequence
 
-from .models import StackMetadata, StackRef
+from .models import STACK_FILE, StackMetadata, StackRef, is_environments_path, is_non_stack_file
 
 DEFAULT_MAX_STACKS = 20
 
@@ -23,7 +23,10 @@ class StackRepository(Protocol):
     """Reads stack roots from somewhere (the working tree in production)."""
 
     def load(self, ref: StackRef) -> StackMetadata | None:
-        """Metadata for ref, or None when the root has no iacp.stack.json (deleted)."""
+        """Metadata for ref, or None when the root has no iacp.stack.json."""
+
+    def has_files(self, ref: StackRef) -> bool:
+        """True when any file remains under the root (so it was not deleted)."""
 
     def all_refs(self) -> list[StackRef]:
         """Every stack root that has an iacp.stack.json."""
@@ -35,6 +38,18 @@ class StackRepository(Protocol):
 def stack_roots(paths: Iterable[str]) -> list[StackRef]:
     """Distinct stack roots touched by paths, sorted."""
     return sorted({ref for ref in map(StackRef.from_path, paths) if ref is not None})
+
+
+def unmapped_paths(paths: Iterable[str]) -> list[str]:
+    """Paths under environments/ that belong to no valid stack root and are not allow-listed.
+
+    Fail closed: Terraform placed anywhere else under environments/ (an unknown
+    environment, an uppercase or spaced segment, a file directly under a team)
+    would otherwise never be validated.
+    """
+    return sorted(
+        p for p in paths if is_environments_path(p) and not is_non_stack_file(p) and StackRef.from_path(p) is None
+    )
 
 
 def triggers_full_run(paths: Iterable[str], prefixes: Sequence[str]) -> bool:
@@ -110,10 +125,21 @@ class StackDetector:
         self.policy = policy or DetectionPolicy()
 
     def detect(self, changed_paths: Sequence[str]) -> DetectionResult:
+        unmapped = unmapped_paths(changed_paths)
+        if unmapped:
+            raise DetectionError(
+                "changed paths under environments/ are not inside an environments/<env>/<team>/<stack>/ root "
+                "(env: development|staging|production; team and stack: lowercase letters, digits, hyphens): "
+                + ", ".join(unmapped)
+            )
         full_run = triggers_full_run(changed_paths, self.policy.full_run_prefixes)
         refs = sorted(set(stack_roots(changed_paths)) | (set(self.repository.all_refs()) if full_run else set()))
         loaded = [(ref, self.repository.load(ref)) for ref in refs]
+        orphans = [ref.path for ref, meta in loaded if meta is None and self.repository.has_files(ref)]
+        if orphans:
+            raise DetectionError(f"stack roots have files but no {STACK_FILE}: {', '.join(orphans)}")
         stacks = tuple(meta for _, meta in loaded if meta is not None)
+        # Only a root whose directory is gone counts as deleted (cleanup after destroy).
         skipped = tuple(ref for ref, meta in loaded if meta is None)
         # A full run re-validates what exists; the size limit guards change sets, not the repo.
         check_guard_rails(stacks, len(stacks) if full_run else self.policy.max_stacks)

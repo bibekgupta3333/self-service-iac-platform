@@ -9,6 +9,7 @@ from .detection import (
     dependency_conflicts,
     stack_roots,
     triggers_full_run,
+    unmapped_paths,
 )
 from .models import ModulePin, StackMetadata, StackMetadataError, StackRef
 
@@ -25,4 +26,5 @@ __all__ = [
     "dependency_conflicts",
     "stack_roots",
     "triggers_full_run",
+    "unmapped_paths",
 ]
