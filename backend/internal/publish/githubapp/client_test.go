@@ -137,6 +137,18 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		reply(http.StatusOK, map[string]any{"object": map[string]string{"sha": sha}})
+	case r.Method == http.MethodGet && p == "/git/trees/basetree":
+		if r.URL.Query().Get("recursive") != "1" {
+			reply(http.StatusBadRequest, map[string]string{"message": "recursive listing expected"})
+			return
+		}
+		reply(http.StatusOK, map[string]any{"truncated": false, "tree": []map[string]string{
+			{"path": "README.md", "type": "blob"},
+			{"path": "environments/development/payments/orders", "type": "tree"},
+			{"path": "environments/development/payments/orders/main.tf", "type": "blob"},
+			{"path": "environments/development/payments/orders/old.tf", "type": "blob"},
+			{"path": "environments/development/payments/orders-v2/main.tf", "type": "blob"},
+		}})
 	case r.Method == http.MethodGet && strings.HasPrefix(p, "/git/commits/"):
 		reply(http.StatusOK, map[string]any{"tree": map[string]string{"sha": "basetree"}})
 	case r.Method == http.MethodPost && p == "/git/blobs":
@@ -268,7 +280,7 @@ func TestCommitFilesOpensPRAndLabels(t *testing.T) {
 	paths := make([]string, len(entries))
 	for i, e := range entries {
 		paths[i] = e.Path
-		if e.Mode != "100644" || e.Type != "blob" || string(f.blobs[e.SHA]) != string(files[e.Path]) {
+		if e.Mode != "100644" || e.Type != "blob" || e.SHA == nil || string(f.blobs[*e.SHA]) != string(files[e.Path]) {
 			t.Fatalf("entry %+v does not match its file", e)
 		}
 	}
@@ -295,6 +307,29 @@ func TestCommitFilesOpensPRAndLabels(t *testing.T) {
 	// One installation token served every call.
 	if f.tokens != 1 {
 		t.Fatalf("installation tokens fetched = %d, want 1 (cached)", f.tokens)
+	}
+}
+
+func TestCommitReplacesTheStackRoot(t *testing.T) {
+	f, srv := newFake(t)
+	c, _ := newClient(t, srv, f)
+	ref, err := c.CommitFiles(context.Background(), publish.Commit{Branch: "iacp/req-7k3p9x", Message: "m", Files: files,
+		Root: "environments/development/payments/orders"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var deleted []string
+	for _, e := range f.trees[ref.TreeSHA] {
+		if e.SHA == nil {
+			deleted = append(deleted, e.Path)
+		}
+	}
+	// Only the stale file under the root goes; README and the sibling orders-v2 stay.
+	if !slices.Equal(deleted, []string{"environments/development/payments/orders/old.tf"}) {
+		t.Fatalf("deleted = %v", deleted)
+	}
+	if _, err := c.CommitFiles(context.Background(), publish.Commit{Branch: "iacp/req-7k3p9x", Files: files, Root: "environments/x"}); !errors.Is(err, publish.ErrInvalidPath) {
+		t.Fatalf("files outside the root: %v", err)
 	}
 }
 

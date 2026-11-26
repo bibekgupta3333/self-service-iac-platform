@@ -10,6 +10,9 @@ package publish
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
+	"strings"
 )
 
 // Commit is a set of files committed atomically on top of the base branch.
@@ -17,6 +20,47 @@ type Commit struct {
 	Branch  string            // e.g. iacp/req-7k3p9x; created, or moved to the new commit
 	Message string            // commit message
 	Files   map[string][]byte // repository-relative path → content
+	// Root, when set, is replaced as a whole: files under it on the base branch that are
+	// not in Files are deleted, so a re-render never leaves stale files behind. Every
+	// path in Files must be under Root.
+	Root string
+}
+
+// CheckCommit validates a commit's branch, paths and root. Pure.
+func CheckCommit(c Commit) error {
+	if err := ValidatePath(c.Branch); err != nil {
+		return fmt.Errorf("branch: %w", err)
+	}
+	if len(c.Files) == 0 {
+		return fmt.Errorf("commit %s: no files", c.Branch)
+	}
+	if c.Root != "" {
+		if err := ValidatePath(c.Root); err != nil {
+			return fmt.Errorf("root: %w", err)
+		}
+	}
+	for p := range c.Files {
+		if err := ValidatePath(p); err != nil {
+			return err
+		}
+		if c.Root != "" && !strings.HasPrefix(p, c.Root+"/") {
+			return fmt.Errorf("%w: %q is outside the commit root %q", ErrInvalidPath, p, c.Root)
+		}
+	}
+	return nil
+}
+
+// StaleFiles returns the existing paths under root that the commit does not write, sorted:
+// the files a full replacement of root deletes. Pure.
+func StaleFiles(existing []string, root string, files map[string][]byte) []string {
+	var out []string
+	for _, p := range existing {
+		if _, keep := files[p]; !keep && strings.HasPrefix(p, root+"/") {
+			out = append(out, p)
+		}
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // CommitRef is the commit the branch points at after CommitFiles.

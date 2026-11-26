@@ -34,21 +34,52 @@ type shaObject struct {
 	SHA string `json:"sha"`
 }
 
-// TreeEntry is one blob in a git data API tree.
+// TreeEntry is one blob in a git data API tree. A nil SHA deletes the path.
 type TreeEntry struct {
-	Path string `json:"path"`
-	Mode string `json:"mode"`
-	Type string `json:"type"`
-	SHA  string `json:"sha"`
+	Path string  `json:"path"`
+	Mode string  `json:"mode"`
+	Type string  `json:"type"`
+	SHA  *string `json:"sha"`
 }
 
-// TreeEntries turns path → blob sha into regular-file tree entries sorted by path. Pure.
-func TreeEntries(blobs map[string]string) []TreeEntry {
-	out := make([]TreeEntry, 0, len(blobs))
+// TreeEntries turns path → blob sha into regular-file tree entries, plus deletions for
+// the stale paths, sorted by path. Pure.
+func TreeEntries(blobs map[string]string, deletes []string) []TreeEntry {
+	out := make([]TreeEntry, 0, len(blobs)+len(deletes))
 	for _, p := range fp.SortedKeys(blobs) {
-		out = append(out, TreeEntry{Path: p, Mode: "100644", Type: "blob", SHA: blobs[p]})
+		sha := blobs[p]
+		out = append(out, TreeEntry{Path: p, Mode: "100644", Type: "blob", SHA: &sha})
 	}
+	for _, p := range deletes {
+		out = append(out, TreeEntry{Path: p, Mode: "100644", Type: "blob"})
+	}
+	slices.SortFunc(out, func(a, b TreeEntry) int { return strings.Compare(a.Path, b.Path) })
 	return out
+}
+
+// existingFiles lists the blob paths of a tree (recursively). A truncated listing is an
+// error: deleting stale files from a partial list could miss some.
+func (c *Client) existingFiles(ctx context.Context, treeSHA string) ([]string, error) {
+	var tree struct {
+		Tree []struct {
+			Path string `json:"path"`
+			Type string `json:"type"`
+		} `json:"tree"`
+		Truncated bool `json:"truncated"`
+	}
+	if err := c.do(ctx, http.MethodGet, c.repoPath("/git/trees/"+url.PathEscape(treeSHA)+"?recursive=1"), nil, &tree, authInstallation); err != nil {
+		return nil, fmt.Errorf("list base tree: %w", err)
+	}
+	if tree.Truncated {
+		return nil, errors.New("list base tree: GitHub truncated the recursive listing")
+	}
+	var out []string
+	for _, e := range tree.Tree {
+		if e.Type == "blob" {
+			out = append(out, e.Path)
+		}
+	}
+	return out, nil
 }
 
 // CommitFiles implements publish.Publisher with the git data API: read the base branch
@@ -56,16 +87,8 @@ func TreeEntries(blobs map[string]string) []TreeEntry {
 // is the base head, then create the branch ref (or force-move it if it already exists,
 // so a retried publish lands the same files). Nothing is visible until the ref moves.
 func (c *Client) CommitFiles(ctx context.Context, cm publish.Commit) (publish.CommitRef, error) {
-	if err := publish.ValidatePath(cm.Branch); err != nil {
-		return publish.CommitRef{}, fmt.Errorf("branch: %w", err)
-	}
-	if len(cm.Files) == 0 {
-		return publish.CommitRef{}, fmt.Errorf("commit %s: no files", cm.Branch)
-	}
-	for p := range cm.Files {
-		if err := publish.ValidatePath(p); err != nil {
-			return publish.CommitRef{}, err
-		}
+	if err := publish.CheckCommit(cm); err != nil {
+		return publish.CommitRef{}, err
 	}
 
 	var head struct {
@@ -91,9 +114,17 @@ func (c *Client) CommitFiles(ctx context.Context, cm publish.Commit) (publish.Co
 		blobs[p] = blob.SHA
 	}
 
+	var deletes []string
+	if cm.Root != "" {
+		existing, err := c.existingFiles(ctx, base.Tree.SHA)
+		if err != nil {
+			return publish.CommitRef{}, err
+		}
+		deletes = publish.StaleFiles(existing, cm.Root, cm.Files)
+	}
 	var tree shaObject
 	if err := c.do(ctx, http.MethodPost, c.repoPath("/git/trees"),
-		map[string]any{"base_tree": base.Tree.SHA, "tree": TreeEntries(blobs)}, &tree, authInstallation); err != nil {
+		map[string]any{"base_tree": base.Tree.SHA, "tree": TreeEntries(blobs, deletes)}, &tree, authInstallation); err != nil {
 		return publish.CommitRef{}, fmt.Errorf("create tree: %w", err)
 	}
 	var commit shaObject

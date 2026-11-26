@@ -99,6 +99,27 @@ func TestStackFiles(t *testing.T) {
 	}
 }
 
+func TestStaleFilesAndCheckCommit(t *testing.T) {
+	files := map[string][]byte{"env/a/main.tf": nil}
+	got := StaleFiles([]string{"env/a/old.tf", "env/a/main.tf", "env/ab/x.tf", "README.md", "env/a/sub/y.tf", "env/a/old.tf"}, "env/a", files)
+	if !slices.Equal(got, []string{"env/a/old.tf", "env/a/sub/y.tf"}) {
+		t.Fatalf("stale = %v", got)
+	}
+	if err := CheckCommit(Commit{Branch: "iacp/req-abcdef", Files: files, Root: "env/a"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []Commit{
+		{Branch: "iacp/req-abcdef", Files: files, Root: "env/b"},
+		{Branch: "iacp/req-abcdef", Files: files, Root: "../env"},
+		{Branch: "iacp/req-abcdef"},
+		{Branch: "-x", Files: files},
+	} {
+		if err := CheckCommit(c); err == nil {
+			t.Errorf("CheckCommit(%+v) must fail", c)
+		}
+	}
+}
+
 func prContext() PRContext {
 	return PRContext{
 		RequestID: "0d7e3a52-6c11-4f0e-b9b6-5f2f3c8d1a90", ShortID: "req-7k3p9x", Kind: "create",

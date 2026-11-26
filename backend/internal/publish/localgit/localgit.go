@@ -141,16 +141,8 @@ func (p *Publisher) resolve(ctx context.Context, branch string) (string, error) 
 // index seeded from the base branch, committed with the base head as parent, and the
 // branch is pointed at the commit (created, or force-moved on a retry).
 func (p *Publisher) CommitFiles(ctx context.Context, c publish.Commit) (publish.CommitRef, error) {
-	if err := publish.ValidatePath(c.Branch); err != nil {
-		return publish.CommitRef{}, fmt.Errorf("branch: %w", err)
-	}
-	if len(c.Files) == 0 {
-		return publish.CommitRef{}, fmt.Errorf("commit %s: no files", c.Branch)
-	}
-	for path := range c.Files {
-		if err := publish.ValidatePath(path); err != nil {
-			return publish.CommitRef{}, err
-		}
+	if err := publish.CheckCommit(c); err != nil {
+		return publish.CommitRef{}, err
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -168,6 +160,11 @@ func (p *Publisher) CommitFiles(ctx context.Context, c publish.Commit) (publish.
 
 	if _, err := p.git(ctx, idx, nil, "read-tree", base); err != nil {
 		return publish.CommitRef{}, err
+	}
+	if c.Root != "" { // full replacement: drop everything under the root, then add the files
+		if _, err := p.git(ctx, idx, nil, "rm", "--cached", "-r", "-q", "--ignore-unmatch", "--", c.Root); err != nil {
+			return publish.CommitRef{}, fmt.Errorf("clear %s: %w", c.Root, err)
+		}
 	}
 	for _, path := range fp.SortedKeys(c.Files) {
 		blob, err := p.git(ctx, nil, c.Files[path], "hash-object", "-w", "--stdin")

@@ -156,7 +156,8 @@ func (s *Service) Publish(ctx context.Context, r *requests.Request) (requests.Pu
 	}
 	pc := PRContextFor(r, spec, s.opts.PortalURL)
 
-	ref, err := s.pub.CommitFiles(ctx, publish.Commit{Branch: branch, Message: publish.CommitMessage(pc), Files: files})
+	ref, err := s.pub.CommitFiles(ctx, publish.Commit{Branch: branch, Message: publish.CommitMessage(pc), Files: files,
+		Root: r.Stack.Path})
 	if err != nil {
 		return requests.PublishedPR{}, fmt.Errorf("commit files: %w", err)
 	}

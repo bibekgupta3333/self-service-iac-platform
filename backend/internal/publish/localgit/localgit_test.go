@@ -99,6 +99,33 @@ func TestCommitFilesOnBranchWithoutTouchingWorktree(t *testing.T) {
 	}
 }
 
+func TestCommitReplacesTheStackRoot(t *testing.T) {
+	dir := scratchRepo(t)
+	ctx := context.Background()
+	for _, f := range []string{"stacks/orders/old.tf", "stacks/orders/main.tf", "stacks/orders-v2/main.tf"} {
+		if err := os.MkdirAll(filepath.Join(dir, filepath.Dir(f)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("old\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitOut(t, dir, "add", ".")
+	gitOut(t, dir, "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "-m", "stacks")
+	p, err := New(ctx, Config{RepoPath: dir, BaseBranch: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.CommitFiles(ctx, publish.Commit{Branch: "iacp/req-aaaaaa", Message: "m", Root: "stacks/orders",
+		Files: map[string][]byte{"stacks/orders/main.tf": []byte("new\n")}}); err != nil {
+		t.Fatal(err)
+	}
+	got := gitOut(t, dir, "ls-tree", "-r", "--name-only", "iacp/req-aaaaaa")
+	if got != "README.md\nstacks/orders-v2/main.tf\nstacks/orders/main.tf" {
+		t.Fatalf("tree = %q", got)
+	}
+}
+
 func TestFakePullRequests(t *testing.T) {
 	dir := scratchRepo(t)
 	ctx := context.Background()
