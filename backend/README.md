@@ -84,7 +84,7 @@ together apply each migration once.
 | `0009_sessions.sql` | `sessions` (hashed opaque session ids, absolute and idle expiry, revocation) |
 | `0010_outbox_purge.sql` | `purge_processed_outbox(cutoff, max_rows)`, a `SECURITY DEFINER` function that deletes only processed outbox rows; `iacp_app` gets `EXECUTE` on it and still no `DELETE` on `outbox` |
 | `0011_stack_health.sql` | `stacks.health` (`unknown`, `healthy`, `degraded`), set from the post-apply smoke test |
-| `0012_drift_reports.sql` | `drift_result`, `drift_status`, `drift_reports` (one row per drift.yml run and stack, CHECKs tie result, status, counts and resolution together) and `stacks.health` widened with `drifted`; `iacp_app` gets SELECT/INSERT and UPDATE on the resolution columns only, no DELETE |
+| `0013_drift_reports.sql` | `drift_result`, `drift_status`, `drift_reports` (one row per drift.yml run and stack, CHECKs tie result, status, counts and resolution together) and `stacks.health` widened with `drifted` ([ADR-0013](../docs/adr/0013-drift-in-stack-health.md)); `iacp_app` gets SELECT/INSERT and UPDATE on the resolution columns only, no DELETE |
 
 ### Database roles
 

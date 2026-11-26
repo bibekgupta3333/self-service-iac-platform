@@ -66,7 +66,6 @@ CREATE TYPE request_status    AS ENUM ('draft', 'pr_open', 'validating', 'plan_r
                                        'applied', 'failed', 'rejected', 'cancelled');
 CREATE TYPE pipeline_kind     AS ENUM ('validate', 'apply', 'drift', 'ttl_destroy', 'module_release');
 CREATE TYPE pipeline_status   AS ENUM ('queued', 'in_progress', 'succeeded', 'failed', 'cancelled', 'timed_out');
-CREATE TYPE stack_health      AS ENUM ('healthy', 'drifted');   -- drift health, separate from stack_status (see 4.2)
 CREATE TYPE drift_result      AS ENUM ('clean', 'drifted', 'error');
 CREATE TYPE drift_status      AS ENUM ('open', 'reconciled', 'ignored', 'codified');   -- resolution of a drifted report
 
@@ -167,7 +166,6 @@ CREATE TABLE stacks (
     state_key        text        NOT NULL UNIQUE,        -- development/payments/order-events/terraform.tfstate
     region           text        NOT NULL,
     status           stack_status NOT NULL DEFAULT 'provisioning',
-    health           stack_health NOT NULL DEFAULT 'healthy',   -- moved only by drift checks (migration 0012)
     is_ephemeral     boolean     NOT NULL DEFAULT false,
     expires_at       timestamptz,
     ttl_warned_at    timestamptz,
@@ -591,7 +589,7 @@ Transitions are enforced in `internal/requests/statemachine.go` by a pure transi
 
 ### 4.2 Stack
 
-Drift is **not** a lifecycle state. A drift check moves `stacks.health` (`healthy` ⇄ `drifted`) and never `stacks.status`, so it cannot disturb a request in flight: an `active` stack stays `active` and takes update and destroy requests while it is `drifted`. `stack_status` still lists `drifted` (editable like `active` in `requests.CheckStackAllowsKind`); no code path sets it any more. Health moves through the pure table `drift.NextHealth`: a drifted report sets `drifted`, a clean report restores `healthy`, a failed check (`error`) changes nothing.
+Drift is **not** a lifecycle state. A drift check moves `stacks.health` (migration 0013 adds `drifted` to #25's `unknown`, `healthy`, `degraded`) and never `stacks.status`, so it cannot disturb a request in flight: an `active` stack stays `active` and takes update and destroy requests while it is `drifted`. `stack_status` still lists `drifted` (editable like `active` in `requests.CheckStackAllowsKind`); no code path sets it any more. Health has two writers and moves through the pure table `drift.NextHealth` ([ADR-0013](adr/0013-drift-in-stack-health.md)): a drifted report sets `drifted`, a clean report only clears `drifted` to `healthy` (never `unknown` or `degraded`), a failed check (`error`) changes nothing, and an apply sets health from its smoke result.
 
 ```mermaid
 stateDiagram-v2
@@ -609,7 +607,7 @@ stateDiagram-v2
     destroyed --> [*]
 ```
 
-`stacks.health` (migration `0011_stack_health.sql`: `unknown`, `healthy`, `degraded`) is separate from this status. A successful apply sets it from the smoke stage (`healthy`, `degraded`, or `unknown` when none ran); a failed apply leaves it alone and a destroy resets it to `unknown`. The stack row also keeps `outputs`, `last_applied_sha` and `last_applied_request_id` of the last successful apply (a destroy clears the outputs and stamps `destroyed_at`).
+`stacks.health` (migration `0011_stack_health.sql`: `unknown`, `healthy`, `degraded`; `drifted` from `0013_drift_reports.sql`) is separate from this status. A successful apply sets it from the smoke stage (`healthy`, `degraded`, or `unknown` when none ran); a failed apply leaves it alone and a destroy resets it to `unknown`. The stack row also keeps `outputs`, `last_applied_sha` and `last_applied_request_id` of the last successful apply (a destroy clears the outputs and stamps `destroyed_at`).
 
 ## 5. API conventions
 
