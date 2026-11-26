@@ -311,15 +311,19 @@ outbox worker ─────────► Applier → ApplyGitHubEvent / Reco
 ```
 
 - **Publisher port** (`internal/publish`): `CommitFiles`, `OpenPullRequest`, `AddLabels`,
-  `DispatchWorkflow`, `ClosePullRequest`, `DeleteBranch`. Commits replace the stack root as a whole
-  (`Commit.Root`): files under it that a render no longer produces are deleted. Every call except
+  `DispatchWorkflow`, `ClosePullRequest`, `DeleteBranch`, `PullRequestHead`. Commits replace the
+  stack root as a whole (`Commit.Root`): files under it that a render no longer produces are
+  deleted, except `publish.KeepFiles` that the generator does not render but the stack commits
+  (`.terraform.lock.hcl`, which CI checks with `terraform init -lockfile=readonly`). Every call except
   dispatch is safe to retry: the branch is created or force-moved, and opening a PR whose head
   already has one returns it.
 - **`githubapp`**: RS256 App JWT (iat −60 s, exp +9 min) exchanged for an installation token
   scoped to `IACP_GITHUB_REPOSITORY` with `contents`, `pull_requests` and `actions` write only,
   cached until 5 minutes before expiry and refreshed once on a 401. Files are committed atomically
-  with the git data API (blobs, one tree on the base tree with null-sha deletions from a recursive
-  listing, a commit, then the ref; the ref is force-moved only when GitHub says it already exists).
+  with the git data API (blobs, one tree on the base tree with null-sha deletions, a commit, then
+  the ref; the ref is force-moved only when GitHub says it already exists). Stale files are found by
+  walking down to the stack root and listing only that subtree recursively, so the monorepo size
+  does not matter; a truncated subtree listing fails the commit.
   15 s per-request timeout, redirects only to the API host, bodies capped at 10 MiB, retries
   (4 attempts) on 5xx, 429 and secondary rate limits honouring `Retry-After` (more than 60 s fails
   fast). Workflow dispatch is sent once, never retried. The App needs Contents, Pull requests and
@@ -339,7 +343,8 @@ outbox worker ─────────► Applier → ApplyGitHubEvent / Reco
   to 5 min), or a permanent error such as an unresolvable module version or a conflict when
   recording, the request moves to `failed` (`failure_reason = publish_failed`), releases its lock,
   and the branch and PR it left behind are withdrawn best effort (PR closed, branch deleted; the
-  outcome is in the audit payload).
+  outcome is in the audit payload). Before withdrawing, the request is re-read: if a PR is
+  recorded after all (for example a lost reply from `RecordPublished`), nothing is touched.
 - **Promotion**: every time a queued request becomes the lock holder (a terminal transition,
   `DELETE /v1/internal/stacks/{id}/lock`, or an expired lease handed to the head of the queue by a
   newcomer's acquire), `locks.Service`'s promotion hook (`requests.PublishOnPromote`) enqueues its
@@ -354,11 +359,16 @@ outbox worker ─────────► Applier → ApplyGitHubEvent / Reco
   `iacp/<short id>` branches map to requests; everything else gets `202` with no job. The
   repository filter ignores case.
 - **Ordering and replay**: commands carry the PR head SHA. `requests.github_head_sha` tracks the
-  head (published commit, then each accepted push); a push must start from it and any other event
-  must name it, otherwise the event is audited as `stale_head`. Since the delivery id is not signed,
-  this is what stops a replayed body from moving a request. Events not allowed in the current
-  status are audited as `request.github_event_ignored`. An event that arrives before the PR is
-  recorded is retried through the outbox instead of being dropped.
+  head (published commit, then each accepted push). A push (`new_commit`, the only event whose
+  replay could clear an approval) must start from the known head; otherwise the Applier reads the
+  real head through `PullRequestHead` and, if it moved, applies one push from the known head to
+  it, so a lost or reordered `synchronize` cannot leave the head behind. A replayed old push finds
+  the head unchanged and is only audited as `stale_head`. Closes and merges are not head-checked:
+  they are status-guarded and `rejected` is terminal, and dropping them would leave the request
+  holding its stack lock. Events not allowed in the current status are audited as
+  `request.github_event_ignored`. An event that arrives before the PR is recorded is retried
+  through the outbox for about 13.5 minutes (`outbox.RetryLonger`, 10 attempts) instead of being
+  dropped.
 - **Queue**: the `outbox` table (migration 0008) and an in-process worker goroutine
   (`FOR UPDATE SKIP LOCKED`, 2-minute lease, so several API replicas can drain it). Outcome writes
   are guarded by the claim's attempt number, so a worker whose lease ran out cannot complete or
