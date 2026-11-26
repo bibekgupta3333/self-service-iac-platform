@@ -33,6 +33,12 @@ class SmokeConfigError(ValueError):
     """The smoke test is not configured to run against LocalStack."""
 
 
+# Resource types whose tags LocalStack 4.4 does not keep: PutMetricAlarm drops its
+# Tags and the provider reads none back, so neither state nor the API can show the
+# required tags. Real AWS stores them; the smoke test only ever runs against LocalStack
+# (see local_endpoint), so these types are left out of the tag checks and reported.
+EMULATOR_UNTAGGED = frozenset({"aws_cloudwatch_metric_alarm"})
+
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 LOCALSTACK_DOMAIN = ".localstack.cloud"
 
@@ -194,6 +200,7 @@ class SmokeResult:
     stack_path: str
     checks: tuple[Check, ...] = ()
     unprobed: tuple[str, ...] = field(default=())  # tagged types without a live probe
+    emulator_untagged: tuple[str, ...] = field(default=())  # types the emulator cannot tag, not checked
 
     @property
     def ok(self) -> bool:
@@ -215,6 +222,7 @@ class SmokeResult:
             "empty": self.empty,
             "checks": [{"kind": c.kind, "subject": c.subject, "passed": c.passed, "detail": c.detail} for c in self.checks],
             "unprobed_types": list(self.unprobed),
+            "emulator_untagged_types": list(self.emulator_untagged),
         }
 
     def _verdict(self) -> str:
@@ -236,6 +244,13 @@ class SmokeResult:
             lines += ["", *(f"- {c.kind} `{c.subject}`: {c.detail}" for c in self.failures)]
         if self.unprobed:
             lines += ["", f"Tags checked in state only (no live probe): {', '.join(f'`{t}`' for t in self.unprobed)}."]
+        if self.emulator_untagged:
+            lines += [
+                "",
+                "Tags not checked (LocalStack does not keep them): "
+                + ", ".join(f"`{t}`" for t in self.emulator_untagged)
+                + ".",
+            ]
         return "\n".join(lines) + "\n"
 
 
@@ -266,15 +281,22 @@ def state_tag_checks(resources: Sequence[AppliedResource], expected: Mapping[str
 class SmokeTester:
     """Runs the smoke checks for one stack; the only I/O is through the TagReader."""
 
-    def __init__(self, reader: TagReader, probes: Mapping[str, TagProbe] = PROBES) -> None:
+    def __init__(
+        self,
+        reader: TagReader,
+        probes: Mapping[str, TagProbe] = PROBES,
+        emulator_untagged: frozenset[str] = EMULATOR_UNTAGGED,
+    ) -> None:
         self._reader = reader
         self._probes = probes
+        self._emulator_untagged = emulator_untagged
 
     def run(
         self, meta: StackMetadata, plan: Mapping[str, Any], outputs: Mapping[str, Any], state: Mapping[str, Any]
     ) -> SmokeResult:
         expected = required_tags(meta)
-        resources = applied_resources(state)
+        all_resources = applied_resources(state)
+        resources = [r for r in all_resources if r.type not in self._emulator_untagged]
         tagged = [r for r in resources if r.tagged]
         return SmokeResult(
             stack_path=meta.ref.path,
@@ -284,6 +306,7 @@ class SmokeTester:
                 *(self._live(r, expected) for r in tagged if r.type in self._probes),
             ),
             unprobed=tuple(sorted({r.type for r in tagged if r.type not in self._probes})),
+            emulator_untagged=tuple(sorted({r.type for r in all_resources if r.type in self._emulator_untagged})),
         )
 
     def _live(self, resource: AppliedResource, expected: Mapping[str, str]) -> Check:
