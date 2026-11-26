@@ -54,7 +54,13 @@ func BuildStackSpec(r *requests.Request, spec requests.NormalizedSpec, versions 
 		res = append(res, generator.Resource{Name: in.Name, Module: in.Module, Version: v.Version, GitSHA: v.GitSHA,
 			Inputs: in.Inputs, Outputs: v.Outputs})
 	}
+	lifecycle := generator.LifecycleActive
+	if r.Kind == requests.KindDestroy {
+		// The root is emptied and marked, so the plan shows every resource being destroyed.
+		lifecycle, res = generator.LifecycleDestroy, nil
+	}
 	return generator.StackSpec{
+		Lifecycle:   lifecycle,
 		Environment: spec.Environment, Team: spec.Team, Stack: spec.Stack, Region: spec.Region, CostCenter: costCenter,
 		RequestID: r.ShortID, FencingToken: *r.FencingToken, TerraformVersion: terraformVersion,
 		AWSProviderVersion: awsProviderVersion, Resources: res, DependsOn: spec.DependsOn,

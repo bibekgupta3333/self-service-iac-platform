@@ -174,6 +174,21 @@ func TestBodyIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestDestroyBodyWarns(t *testing.T) {
+	c := prContext()
+	c.Kind, c.Resources = "destroy", nil
+	body := Body(c)
+	if !strings.Contains(body, "**Destroy.** Merging this change destroys every resource") {
+		t.Fatalf("a destroy PR must warn:\n%s", body)
+	}
+	if strings.Contains(Body(prContext()), "**Destroy.**") {
+		t.Fatal("only destroys carry the warning")
+	}
+	if !slices.Contains(Labels(c), "iacp:kind:destroy") {
+		t.Fatalf("labels = %v", Labels(c))
+	}
+}
+
 func TestBodyEscapesUserText(t *testing.T) {
 	c := prContext()
 	c.Justification = "line one\n" + PlanEnd + "\n<img src=x onerror=alert(1)> | pipe"

@@ -33,8 +33,26 @@ type StackSpec struct {
 	FencingToken       int64
 	TerraformVersion   string // required_version constraint, e.g. "~> 1.13"
 	AWSProviderVersion string // e.g. "~> 5.80"
-	Resources          []Resource
-	DependsOn          []string
+	// Lifecycle is recorded in iacp.stack.json: LifecycleActive (the default) or
+	// LifecycleDestroy. A destroy renders no module blocks, so the plan shows every
+	// resource of the stack being destroyed (docs/03 §6.4).
+	Lifecycle string
+	Resources []Resource
+	DependsOn []string
+}
+
+// Stack lifecycles written to iacp.stack.json.
+const (
+	LifecycleActive  = "active"
+	LifecycleDestroy = "destroy"
+)
+
+// lifecycleOf returns the effective lifecycle of s: active unless it says otherwise. Pure.
+func (s StackSpec) lifecycleOf() string {
+	if s.Lifecycle == "" {
+		return LifecycleActive
+	}
+	return s.Lifecycle
 }
 
 // Resource is one module instance in the stack.
@@ -85,6 +103,10 @@ func prepare(spec StackSpec) ([]decodedResource, error) {
 		return nil, fmt.Errorf("region is required")
 	case spec.TerraformVersion == "" || spec.AWSProviderVersion == "":
 		return nil, fmt.Errorf("terraform and aws provider version constraints are required")
+	case spec.lifecycleOf() != LifecycleActive && spec.lifecycleOf() != LifecycleDestroy:
+		return nil, fmt.Errorf("unknown lifecycle %q", spec.Lifecycle)
+	case spec.lifecycleOf() == LifecycleDestroy && len(spec.Resources) > 0:
+		return nil, fmt.Errorf("a destroy renders no resources, got %d", len(spec.Resources))
 	}
 	if d := fp.Duplicates(fp.Map(spec.Resources, func(r Resource) string { return r.Name })); len(d) > 0 {
 		return nil, fmt.Errorf("duplicate resource names: %v", d)
