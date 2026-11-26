@@ -3,6 +3,8 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 
 import { Nav } from "@/components/Nav";
+import { UserBadge } from "@/components/UserBadge";
+import { authEnv, createAuthProvider } from "@/lib/auth/provider";
 
 import "./globals.css";
 
@@ -11,7 +13,8 @@ export const metadata: Metadata = {
   description: "Request versioned Terraform modules and track their lifecycle.",
 };
 
-export default function RootLayout({ children }: { children: ReactNode }) {
+export default async function RootLayout({ children }: { children: ReactNode }) {
+  const viewer = await createAuthProvider(authEnv()).viewer();
   return (
     <html lang="en">
       <body className="min-h-screen font-sans">
@@ -26,6 +29,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
               </Link>
               <Nav />
             </div>
+            <UserBadge viewer={viewer} />
           </div>
         </header>
         <main id="main" className="mx-auto max-w-6xl px-4 py-8">
