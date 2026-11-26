@@ -8,6 +8,7 @@ import {
   inputErrors,
   keyForPointer,
   mapFieldErrors,
+  parseMissingProperties,
   type StackFields,
   validateStackFields,
 } from "./form";
@@ -95,6 +96,40 @@ describe("mapFieldErrors", () => {
       },
       general: ["/resources/0/version: sqs@1.0.0 is yanked", "whole body"],
     });
+  });
+});
+
+describe("parseMissingProperties", () => {
+  it.each([
+    ["missing property 'name'", ["name"]],
+    ["missing properties 'name', 'runtime'", ["name", "runtime"]],
+    ["missing property 'it\\'s'", ["it's"]],
+    ["maximum: got 5, want 3", []],
+    ["missing property", []],
+  ])("%s", (msg, want) => expect(parseMissingProperties(msg)).toEqual(want));
+});
+
+describe("mapFieldErrors for required inputs", () => {
+  it("puts a missing required input on its field", () => {
+    expect(
+      mapFieldErrors([
+        { pointer: "/resources/0/inputs", code: "required", message: "missing properties 'name', 'runtime'" },
+      ]),
+    ).toEqual({ fields: { "input:name": ["is required"], "input:runtime": ["is required"] }, general: [] });
+  });
+
+  it("keeps nested required errors on the parent input", () => {
+    expect(
+      mapFieldErrors([
+        { pointer: "/resources/0/inputs/sqs_trigger", code: "required", message: "missing property 'queue_arn'" },
+      ]).fields,
+    ).toEqual({ "input:sqs_trigger": ["missing property 'queue_arn'"] });
+  });
+
+  it("falls back to a general error when the message cannot be parsed", () => {
+    expect(mapFieldErrors([{ pointer: "/resources/0/inputs", code: "required", message: "odd" }]).general).toEqual([
+      "/resources/0/inputs: odd",
+    ]);
   });
 });
 

@@ -91,6 +91,17 @@ export function keyForPointer(pointer: string, resourceIndex = 0): { key: FormKe
   return undefined;
 }
 
+/**
+ * parseMissingProperties extracts the property names from the backend's JSON Schema
+ * "required" message ("missing property 'name'" or "missing properties 'a', 'b'", with ' and
+ * \ escaped by a backslash). Returns [] for any other message. Pure.
+ */
+export function parseMissingProperties(message: string): string[] {
+  const m = /^missing propert(?:y|ies) (.+)$/.exec(message);
+  if (!m?.[1]) return [];
+  return [...m[1].matchAll(/'((?:[^'\\]|\\.)*)'/g)].map((x) => (x[1] ?? "").replace(/\\(.)/g, "$1"));
+}
+
 const append = (errors: FormErrors, key: FormKey, msg: string): FormErrors => ({
   ...errors,
   [key]: [...(errors[key] ?? []), msg],
@@ -104,6 +115,17 @@ const append = (errors: FormErrors, key: FormKey, msg: string): FormErrors => ({
 export function mapFieldErrors(errors: readonly FieldError[], resourceIndex = 0): MappedErrors {
   return errors.reduce<MappedErrors>(
     (acc, e) => {
+      // A missing required input is reported on the inputs object itself, naming the
+      // properties in the message; put "is required" on each named field instead.
+      if (e.code === "required" && e.pointer === `/resources/${resourceIndex}/inputs`) {
+        const names = parseMissingProperties(e.message);
+        if (names.length > 0) {
+          return {
+            ...acc,
+            fields: names.reduce((f, n) => append(f, `input:${n}`, "is required"), acc.fields),
+          };
+        }
+      }
       const target = keyForPointer(e.pointer, resourceIndex);
       if (!target) return { ...acc, general: [...acc.general, e.pointer ? `${e.pointer}: ${e.message}` : e.message] };
       const msg = target.rest.length > 0 ? `${target.rest.join("/")}: ${e.message}` : e.message;
