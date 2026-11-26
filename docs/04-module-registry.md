@@ -287,11 +287,25 @@ e.g.  modules/s3/v1.2.0
 
 Enforcement in `module-release.yml`:
 
-1. **Interface diff** — `terraform-config-inspect --json` of previous tag vs. HEAD; removed/renamed variables or outputs, or new required variables, fail unless the bump is MAJOR.
-2. **Upgrade plan test** — apply `examples/complete` at the previous tag against LocalStack, switch source to HEAD, run `terraform plan -detailed-exitcode`. Any `delete` or `replace` action fails a MINOR/PATCH release.
-3. **CHANGELOG / upgrade notes check** — `CHANGELOG.md` must contain a section for the new version. MAJOR releases must contain a `### Migration` subsection and `module.yaml` `upgrade.notes`; its text is copied to `module_versions.upgrade_notes`.
+1. **Interface diff** (implemented: `tools/module_release`, `make module-gate`). The gate parses the module's `*.tf` files with `python-hcl2` at the last final release tag and at HEAD, compares the public interface and classifies each change:
 
-`module-release.yml` fails if a breaking change (checks 1 or 2) is not accompanied by a major bump **and** upgrade notes.
+   | Change | Required bump |
+   |---|---|
+   | Variable or output removed (a rename is a removal plus an addition) | MAJOR |
+   | New variable without a default | MAJOR |
+   | Variable type changed (compared after removing whitespace) | MAJOR |
+   | Default removed, so the variable becomes required | MAJOR |
+   | `nullable` turned off | MAJOR |
+   | Validation `condition` added or changed (it may reject values that were valid before) | MAJOR |
+   | New optional variable, new output | MINOR |
+   | Default added or changed, `nullable` turned on, validation removed | MINOR |
+   | Any other change to the module directory (descriptions, `error_message`, resources, README) | PATCH |
+
+   Changes only under `tests/` or `examples/` need no new version. The required bump is the largest of these. The gate then compares `metadata.version` with the last tag: it fails when the declared bump is smaller than required, when the version is lower than the last release, and when the module changed but the version did not. With no previous tag (first release) the gate passes. Prerelease tags are never used as the comparison base. For a `0.x` module, a breaking change needs only a MINOR bump (SemVer item 4).
+2. **Upgrade plan test** (planned, not yet in the workflow) — apply `examples/complete` at the previous tag against LocalStack, switch source to HEAD, run `terraform plan -detailed-exitcode`. Any `delete` or `replace` action fails a MINOR/PATCH release.
+3. **CHANGELOG / upgrade notes check** (planned) — `CHANGELOG.md` must contain a section for the new version. MAJOR releases must contain a `### Migration` subsection and `module.yaml` `upgrade.notes`; its text is copied to `module_versions.upgrade_notes`. Today the release notes come from the CHANGELOG section when it exists, and otherwise from a generated interface-diff summary.
+
+`module-release.yml` fails if a breaking change is not accompanied by a major bump (check 1). Once checks 2 and 3 land, it also requires upgrade notes.
 
 ## 6. Compatibility matrix
 
@@ -372,6 +386,12 @@ Pinning rules:
 7. A reconciliation job in the worker runs hourly: it lists `modules/**` tags via the GitHub API and indexes any tag missing from `module_versions` (covers callback failures).
 
 Indexing is idempotent on `(module, version)`; re-indexing the same version with a different `commit_sha` is rejected and raises a security alert.
+
+**Current implementation (local-first, ADR-0009).** The flow above is the target. What runs today:
+
+- Static checks, `terraform test`, the manifest validator and Terratest run on every PR in `ci.yml`. `module-release.yml` in PR mode runs only the interface-diff gate (check 1 of section 5.2), for modules the PR changes and for modules whose declared version is not tagged yet. Its single required check is `semver gate result`.
+- On a push to `main`, `module-release.yml` runs the gate again and, for each such module, creates the tag `modules/<name>/v<version>` if it does not exist, pointing at the pushed commit. It uses the workflow `GITHUB_TOKEN` with `contents: write` until the GitHub App exists (WBS 4.8). An existing tag is never moved. It then creates a GitHub release whose notes are the module's CHANGELOG section, or a generated interface-diff summary. Because untagged versions are always included, a failed or skipped run is picked up by the next push.
+- The index call (`python -m tools.module_release index`) sends the parsed `module.yaml` inline, matching `catalog.IndexCommand` (see [03](03-data-model-and-api.md)), with the shared bearer token. A 201 means indexed and a 200 means already indexed. The step is skipped with a notice while the `IACP_API_URL` variable and the `IACP_INTERNAL_TOKEN` secret are not configured, which is the case until a hosted API exists.
 
 ## 10. Package catalogue
 
