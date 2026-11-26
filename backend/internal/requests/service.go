@@ -178,6 +178,10 @@ type CreateCommand struct {
 	IdempotencyKey string
 	RequestHash    string // RequestHash(method, path, body)
 	CorrelationID  string
+	// RefuseIfOpen makes an update or destroy of an existing stack fail with stack_busy when
+	// the stack has any open request, instead of queueing behind it. The check runs under
+	// the stack row lock, in the transaction that would queue the request.
+	RefuseIfOpen bool
 }
 
 // CreateResult is the outcome of Create.
@@ -463,6 +467,10 @@ func (s *Service) createForStack(ctx context.Context, st Store, by identity.Prin
 	}
 	if err := CheckStackAllowsKind(in.Kind, t.Status, open); err != nil {
 		return nil, err
+	}
+	if cmd.RefuseIfOpen && len(open) > 0 {
+		return nil, apperr.Conflict("stack_busy",
+			"a request is open for the stack; it re-asserts the configuration when it applies, so a reconcile now would race it")
 	}
 	if in.Kind == KindUpdate && !in.AllowRemovals {
 		if err := s.checkNoRemovals(ctx, st, t.ID, in); err != nil {

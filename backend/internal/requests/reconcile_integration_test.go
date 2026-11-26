@@ -18,8 +18,8 @@ func TestReconcileStackAgainstPostgres(t *testing.T) {
 	id := created.Request.Stack.ID
 
 	// Nothing has applied yet.
-	if _, err := f.svc.ReconcileStack(ctx, f.user, id, "x", "drift-reconcile-none1"); !hasCode(err, "stack_busy") {
-		t.Fatalf("reconcile while the create is open: %v", err)
+	if _, err := f.svc.ReconcileStack(ctx, f.user, id, "x", "drift-reconcile-none1"); !hasCode(err, "no_recorded_spec") {
+		t.Fatalf("reconcile before anything applied: %v", err)
 	}
 	// The create applied: it is the stack's last applied request, the lock is free.
 	if _, err := f.pool.Exec(ctx, `UPDATE requests SET status = 'applied', approved_plan_hash = repeat('a', 64),
