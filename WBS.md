@@ -66,7 +66,7 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 ## 4. Orchestration engine (Go backend) — M2
 | ID | Task | Est | Dep |
 |----|------|-----|-----|
-| [x] 4.1 | Backend scaffold: chi, config, structured logging, health/metrics, migrations, sqlc | 1 | 2.2 |
+| [x] 4.1 | Backend scaffold: chi, config, structured logging, health checks, migrations (metrics endpoint pending) | 1 | 2.2 |
 | [x] 4.2 | DB migrations for all core tables (incl. hash-chained `audit_events`, `locks`) | 1.5 | 4.1 |
 | [x] 4.3 | Catalog service: `GET /v1/catalog/modules`, `/versions`, index endpoint | 1 | 4.2 |
 | [~] 4.4 | Auth: GitHub OAuth login, sessions/JWT, team sync → memberships, RBAC middleware (membership check on create done) | 2 | 4.2 |
