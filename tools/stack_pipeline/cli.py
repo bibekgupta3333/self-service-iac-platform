@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .adapters import FileSystemStackRepository, GitCli, GitDiff
-from .api_client import ApiError, IacpApiClient, TokenSource
+from .api_client import ApiError, FreshCredentials, IacpApiClient, TokenSource
 from .detection import DEFAULT_MAX_STACKS, DetectionError, DetectionPolicy, DetectionResult, StackDetector
 from .models import StackMetadataError
 from .module_install import MANIFEST, ModuleInstallVerifier, parse_manifest
@@ -276,7 +276,9 @@ def _build_report(args: argparse.Namespace, env: Mapping[str, str]) -> RunReport
 
 
 def _client(args: argparse.Namespace, env: Mapping[str, str]) -> IacpApiClient:
-    credential = TokenSource(env, stdout=sys.stdout).credential(args.audience)
+    # One OIDC token per request: the API rejects a reused jti (lock release reads the
+    # lock first, and retries resend), so the client mints a fresh token for each call.
+    credential = FreshCredentials.start(TokenSource(env, stdout=sys.stdout), args.audience)
     if credential is None:
         raise ApiError(
             f"no credential for {args.api_url}: grant the job id-token: write and set {AUDIENCE_ENV}, "

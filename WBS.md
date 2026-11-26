@@ -66,7 +66,7 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 ## 4. Orchestration engine (Go backend) — M2
 | ID | Task | Est | Dep |
 |----|------|-----|-----|
-| [x] 4.1 | Backend scaffold: chi, config, structured logging, health checks, migrations (metrics endpoint pending) | 1 | 2.2 |
+| [x] 4.1 | Backend scaffold: chi, config, structured logging, health checks, migrations, Prometheus `/metrics` (route-pattern labels, pool gauges; loopback or `IACP_METRICS_TOKEN`) | 1 | 2.2 |
 | [x] 4.2 | DB migrations for all core tables (incl. hash-chained `audit_events`, `locks`) | 1.5 | 4.1 |
 | [x] 4.3 | Catalog service: `GET /v1/catalog/modules`, `/versions`, index endpoint | 1 | 4.2 |
 | [~] 4.4 | Auth: GitHub OAuth login, sessions/JWT, team sync → memberships, RBAC middleware (membership check on create done) | 2 | 4.2 |
@@ -75,7 +75,7 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 | [x] 4.7 | Config generator: templates (main/backend/versions/providers/`iacp.stack.json`), golden tests | 2 | 4.3 |
 | [ ] 4.8 | GitHub App client: branch, commit, PR, labels, workflow_dispatch | 1.5 | 2.5 |
 | [ ] 4.9 | Webhook ingester (HMAC, delivery dedupe) → SQS → worker status updates | 1.5 | 4.5 |
-| [~] 4.10 | OIDC JWT verifier for `POST /v1/runs` and `/v1/internal/*` (verifier, allow-lists, run provenance and `POST /v1/runs` done; `jti` replay cache pending) | 1 | 4.1 |
+| [x] 4.10 | OIDC JWT verifier for `POST /v1/runs` and `/v1/internal/*` (verifier, allow-lists, run provenance, `POST /v1/runs`, `jti` replay protection in `oidc_jti` shared by replicas) | 1 | 4.1 |
 | [x] 4.11 | Audit writer with hash chain + `/audit/verify` | 0.5 | 4.2 |
 
 **Exit:** `POST /v1/requests` opens a PR in under 10 s with golden-matching files, and the request reaches `applied` after merge.
@@ -95,11 +95,11 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 | ID | Task | Est | Dep |
 |----|------|-----|-----|
 | [x] 6.1 | TFLint config + Checkov (+ custom `IACP_*` checks); SARIF upload pending | 1.5 | 5.2 |
-| [x] 6.2 | OPA policies: tags, encryption, no public access, source allow-list + exact pin, IAM wildcard deny, env restrictions; yanked-version check pending backend context | 3 | 5.2 |
+| [x] 6.2 | OPA policies: tags, encryption, no public access, source allow-list + exact pin, IAM wildcard deny, env restrictions; yanked-version check (`iacp.modules.yanked`) from the budget-context `yanked_module_versions` | 3 | 5.2 |
 | [x] 6.3 | `opa test` suite with ≥ 90% rule coverage | 1 | 6.2 |
-| [ ] 6.4 | `GET /v1/internal/budget-context` for conftest input | 0.5 | 4.2 |
+| [x] 6.4 | `GET /v1/internal/budget-context` for conftest input (`budgets` table, `budget_context` route class; workflows not wired yet, 5.2/5.6) | 0.5 | 4.2 |
 | [ ] 6.5 | Apply-role scoping + boundary validated with IAM Access Analyzer | 1 | 2.4 |
-| [ ] 6.6 | CODEOWNERS generation, branch ruleset, Environment protection for staging/prod | 1 | 2.5 |
+| [~] 6.6 | CODEOWNERS generation, branch ruleset, Environment protection for staging/prod (`tools/codeowners` + CI `--check` done; ruleset and Environment payloads checked in under `.github/rulesets/`, applying them is part of 2.5) | 1 | 2.5 |
 
 **Exit:** OPA denies `force_destroy` in staging and `?ref=main`, with readable messages in the PR and the portal.
 

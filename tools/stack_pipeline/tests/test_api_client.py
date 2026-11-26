@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from tools.stack_pipeline.api_client import ApiError, Credential, IacpApiClient, TokenSource
+from tools.stack_pipeline.api_client import ApiError, Credential, FreshCredentials, IacpApiClient, TokenSource
 from tools.stack_pipeline.cli import annotation, main
 
 SHA = "e4" * 20
@@ -215,6 +215,37 @@ class TestTokenSource:
 
     def test_nothing_available(self):
         assert TokenSource({}).credential("aud") is None
+
+
+class TestFreshCredentials:
+    """OIDC tokens are single-use at the API (jti replay check), so each request needs its own."""
+
+    def oidc_env(self, api):
+        return {"ACTIONS_ID_TOKEN_REQUEST_URL": f"{api.url}/token", "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "x"}
+
+    def test_each_request_and_retry_gets_a_new_oidc_token(self, api):
+        for n in (1, 2, 3):
+            api.reply("GET", "/token", 200, {"value": f"jwt-{n}"})
+        api.reply("POST", "/v1/runs", 503, {"code": "replay_store_unavailable"})
+        api.reply("POST", "/v1/runs", 200, {"accepted": True})
+        api.reply("GET", f"/v1/internal/stacks/{STACK}/lock", 200, LOCK)
+        creds = FreshCredentials.start(TokenSource(self.oidc_env(api)), "aud")
+        c = IacpApiClient(api.url, creds, sleep=lambda _: None)
+        assert c.post_run({}).status == 200  # first attempt 503, retried
+        c.get_lock(STACK)
+        used = [call["headers"]["Authorization"] for call in api.calls if call["path"] != "/token"]
+        assert used == ["Bearer jwt-1", "Bearer jwt-2", "Bearer jwt-3"]
+
+    def test_internal_token_is_reused(self, api):
+        api.reply("POST", "/v1/runs", 200, {"accepted": True})
+        creds = FreshCredentials.start(TokenSource({"IACP_INTERNAL_TOKEN": INTERNAL}), "aud")
+        c = IacpApiClient(api.url, creds, sleep=lambda _: None)
+        c.post_run({})
+        c.post_run({})
+        assert {call["headers"]["Authorization"] for call in api.calls} == {f"Bearer {INTERNAL}"}
+
+    def test_nothing_available(self):
+        assert FreshCredentials.start(TokenSource({}), "aud") is None
 
 
 # ---- CLI ----------------------------------------------------------------------------

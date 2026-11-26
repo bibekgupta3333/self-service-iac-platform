@@ -15,7 +15,7 @@ export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION AWS_ENDPOINT_U
 unexport AWS_PROFILE AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
 
 .PHONY: help up down ps fmt fmt-check validate tflint checkov policy-test lint \
-        module-test integration-test validate-manifests module-gate go-test go-integration generator-update api portal-install portal-dev portal-test py-test test diagrams \
+        module-test integration-test validate-manifests module-gate codeowners codeowners-check go-test go-integration generator-update api portal-install portal-dev portal-test py-test test diagrams \
         stack-detect stack-plan stack-apply stack-destroy stack-clean
 
 help: ## Show available targets
@@ -58,7 +58,7 @@ policy-test: ## Unit-test OPA policies and verify conftest fixtures
 	opa test policies/opa
 	policies/fixtures/verify.sh
 
-lint: fmt-check validate validate-manifests module-gate tflint checkov policy-test ## All static checks
+lint: fmt-check validate validate-manifests module-gate codeowners-check tflint checkov policy-test ## All static checks
 
 ## ---- stacks (environments/, mirrors pr-validate.yml) ----
 STACK ?= environments/development/platform/smoke
@@ -137,6 +137,12 @@ integration-test: ## Terratest suite in tests/ against LocalStack (needs `make u
 
 validate-manifests: ## Validate every modules/*/module.yaml against the schema and variables.tf
 	$(PYTHON) -m tools.manifest_validator modules/
+
+codeowners: ## Regenerate .github/CODEOWNERS from .github/teams.yaml
+	$(PYTHON) -m tools.codeowners
+
+codeowners-check: ## Fail when .github/CODEOWNERS drifted from .github/teams.yaml
+	$(PYTHON) -m tools.codeowners --check
 
 module-gate: ## SemVer interface-diff gate: every module vs its last modules/<name>/vX.Y.Z tag
 	$(PYTHON) -m tools.module_release gate --all

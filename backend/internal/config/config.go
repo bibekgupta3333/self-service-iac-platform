@@ -59,6 +59,10 @@ type Config struct {
 	// InternalToken is the shared bearer token for /v1/internal/* and /v1/runs, accepted
 	// alongside GitHub OIDC. Empty means the token path rejects every call.
 	InternalToken string
+	// MetricsToken lets non-loopback scrapers read /metrics ("Authorization: Bearer").
+	// Empty means /metrics answers loopback peers only. It is deliberately separate from
+	// InternalToken, which can take stack locks.
+	MetricsToken string
 	// OIDC configures GitHub Actions OIDC verification; disabled when Audience is empty.
 	OIDC OIDCConfig
 }
@@ -76,7 +80,18 @@ type OIDCConfig struct {
 	Refs         []string      // IACP_OIDC_ALLOWED_REFS: comma-separated patterns; empty means the defaults
 	WorkflowRefs []string      // IACP_OIDC_ALLOWED_WORKFLOWS: comma-separated job_workflow_ref patterns
 	Leeway       time.Duration // IACP_OIDC_LEEWAY: clock skew allowed on exp/nbf/iat
+	ReplayStore  ReplayStore   // IACP_OIDC_REPLAY_STORE: where used jti values are kept
 }
+
+// ReplayStore selects where used OIDC token ids are remembered.
+type ReplayStore string
+
+const (
+	// ReplayStorePostgres shares used ids across replicas (table oidc_jti). Default.
+	ReplayStorePostgres ReplayStore = "postgres"
+	// ReplayStoreMemory keeps them in a bounded per-process cache: single instance only.
+	ReplayStoreMemory ReplayStore = "memory"
+)
 
 // Enabled reports whether OIDC verification is configured.
 func (o OIDCConfig) Enabled() bool { return o.Audience != "" }
@@ -119,6 +134,7 @@ func Load(lookup LookupFunc) (Config, error) {
 		DevUserLogin:       get("DEV_USER", "local-dev"),
 		ModuleRepoURL:      get("MODULE_REPO_URL", "https://github.com/bibekgupta3333/self-service-iac-platform.git"),
 		InternalToken:      get("INTERNAL_TOKEN", ""),
+		MetricsToken:       get("METRICS_TOKEN", ""),
 	}
 	oidc, err := loadOIDC(get)
 	errs = append(errs, err)
@@ -135,6 +151,12 @@ func Load(lookup LookupFunc) (Config, error) {
 	}
 	if cfg.InternalToken != "" && len(cfg.InternalToken) < MinInternalTokenLen {
 		errs = append(errs, fmt.Errorf("%sINTERNAL_TOKEN must be at least %d characters", Prefix, MinInternalTokenLen))
+	}
+	if cfg.MetricsToken != "" && len(cfg.MetricsToken) < MinInternalTokenLen {
+		errs = append(errs, fmt.Errorf("%sMETRICS_TOKEN must be at least %d characters", Prefix, MinInternalTokenLen))
+	}
+	if cfg.MetricsToken != "" && cfg.MetricsToken == cfg.InternalToken {
+		errs = append(errs, fmt.Errorf("%sMETRICS_TOKEN must differ from %sINTERNAL_TOKEN", Prefix, Prefix))
 	}
 	if err := errors.Join(errs...); err != nil {
 		return Config{}, fmt.Errorf("load config: %w", err)
@@ -160,6 +182,10 @@ func loadOIDC(get func(name, def string) string) (OIDCConfig, error) {
 		errs = append(errs, fmt.Errorf("%sOIDC_LEEWAY must be a duration between 0 and 5m", Prefix))
 	}
 	o.Leeway = leeway
+	o.ReplayStore = ReplayStore(get("OIDC_REPLAY_STORE", string(ReplayStorePostgres)))
+	if o.ReplayStore != ReplayStorePostgres && o.ReplayStore != ReplayStoreMemory {
+		errs = append(errs, fmt.Errorf("%sOIDC_REPLAY_STORE must be postgres or memory", Prefix))
+	}
 	if (o.Audience == "") != (o.Repository == "") {
 		errs = append(errs, fmt.Errorf("%sOIDC_AUDIENCE and %sOIDC_REPOSITORY must be set together", Prefix, Prefix))
 	}

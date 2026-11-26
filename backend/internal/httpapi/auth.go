@@ -102,7 +102,8 @@ func (a *OIDCAuthenticator) Authenticate(r *http.Request) (identity.Principal, e
 
 // AnyAuthenticator tries each authenticator in order and returns the first success.
 // It is used to accept GitHub OIDC tokens and the shared internal token side by side.
-// A Forbidden error (a genuine identity that is not allowed) wins over plain failures.
+// A Forbidden error (a genuine identity that is not allowed) or an Unavailable one (a
+// dependency such as the replay store is down) wins over plain failures.
 type AnyAuthenticator []Authenticator
 
 // Authenticate implements Authenticator.
@@ -113,7 +114,7 @@ func (as AnyAuthenticator) Authenticate(r *http.Request) (identity.Principal, er
 		if err == nil {
 			return p, nil
 		}
-		if apperr.IsKind(err, apperr.KindForbidden) {
+		if apperr.IsKind(err, apperr.KindForbidden) || apperr.IsKind(err, apperr.KindUnavailable) {
 			return identity.Principal{}, err
 		}
 		errs = append(errs, err)
@@ -147,6 +148,12 @@ func requireAuth(auth Authenticator) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			p, err := auth.Authenticate(r)
 			if apperr.IsKind(err, apperr.KindForbidden) {
+				writeError(w, r, err)
+				return
+			}
+			if apperr.IsKind(err, apperr.KindUnavailable) {
+				observability.Logger(r.Context()).ErrorContext(r.Context(), "authentication dependency unavailable", "error", err)
+				w.Header().Set("Retry-After", "5")
 				writeError(w, r, err)
 				return
 			}

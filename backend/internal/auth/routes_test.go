@@ -33,6 +33,12 @@ func TestAuthorizeRoute(t *testing.T) {
 		{"pr-validate may not index", RouteCatalogIndex, wfFor("pr-validate.yml", pr, "pull_request"), false},
 		{"pr-validate may report runs", RouteRuns, wfFor("pr-validate.yml", pr, "pull_request"), true},
 		{"module release may not report runs", RouteRuns, wfFor("module-release.yml", main, "push"), false},
+		{"pr-validate may read the budget context", RouteBudgetContext, wfFor("pr-validate.yml", pr, "pull_request"), true},
+		{"apply may read the budget context", RouteBudgetContext, wfFor("apply.yml", main, "push"), true},
+		{"shared token may read the budget context", RouteBudgetContext, nil, true},
+		{"drift may not read the budget context", RouteBudgetContext, wfFor("drift.yml", main, "schedule"), false},
+		{"module release may not read the budget context", RouteBudgetContext, wfFor("module-release.yml", main, "push"), false},
+		{"budget context refuses workflow_run", RouteBudgetContext, wfFor("apply.yml", main, "workflow_run"), false},
 		{"unknown class denies", RouteClass("other"), wfFor("apply.yml", main, "push"), false},
 	}
 	for _, tt := range tests {
