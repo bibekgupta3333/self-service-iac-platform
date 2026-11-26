@@ -110,7 +110,7 @@ CREATE TABLE modules (
     name           text        NOT NULL UNIQUE CHECK (name ~ '^[a-z][a-z0-9-]{1,40}$'),
     display_name   text        NOT NULL,
     description    text        NOT NULL,
-    category       text        NOT NULL,                 -- storage, messaging, compute, data, network, observability
+    category       text        NOT NULL,                 -- storage, messaging, compute, database, cache, network, observability
     owners         text[]      NOT NULL,                 -- GitHub team slugs
     repo_path      text        NOT NULL,                 -- modules/s3
     status         module_status NOT NULL DEFAULT 'active',
