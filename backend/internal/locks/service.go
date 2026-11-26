@@ -237,41 +237,51 @@ func (s *Service) Heartbeat(ctx context.Context, cmd TokenCommand) (Lock, error)
 func (s *Service) Release(ctx context.Context, cmd TokenCommand) (ReleaseResult, error) {
 	var res ReleaseResult
 	err := s.repo.InTx(ctx, func(st Store) error {
-		current, teamID, err := s.holderCheck(ctx, st, cmd)
-		if err != nil {
-			return err
-		}
-		if err := st.Delete(ctx, cmd.StackID); err != nil {
-			return fmt.Errorf("delete lock: %w", err)
-		}
-		now := s.clock.Now()
-		a := auditor{st: st, by: cmd.By, correlationID: cmd.CorrelationID, stackID: cmd.StackID, teamID: teamID, at: now}
-		if err := a.append(ctx, "lock.released", map[string]any{"request_id": current.RequestID,
-			"fencing_token": current.FencingToken}); err != nil {
-			return err
-		}
-		res.Released = *current
-
-		waiters, err := st.Waiters(ctx, cmd.StackID)
-		if err != nil {
-			return fmt.Errorf("read queue: %w", err)
-		}
-		next, ok := NextInQueue(waiters, cmd.RequestID)
-		if !ok {
-			return nil
-		}
-		req, err := st.Request(ctx, next.RequestID)
-		if err != nil {
-			return err
-		}
-		l, err := s.grant(ctx, st, a, req, nil, true)
-		if err != nil {
-			return err
-		}
-		res.Promoted = &l
-		return nil
+		var err error
+		res, err = s.ReleaseIn(ctx, st, cmd)
+		return err
 	})
 	return res, err
+}
+
+// ReleaseIn is Release inside a caller's transaction (a request reaching a terminal status
+// releases its lock in the same transaction as the transition). The caller must not have
+// locked rows of requests on the stack before this call: it takes the stacks row first.
+func (s *Service) ReleaseIn(ctx context.Context, st Store, cmd TokenCommand) (ReleaseResult, error) {
+	var res ReleaseResult
+	current, teamID, err := s.holderCheck(ctx, st, cmd)
+	if err != nil {
+		return res, err
+	}
+	if err := st.Delete(ctx, cmd.StackID); err != nil {
+		return res, fmt.Errorf("delete lock: %w", err)
+	}
+	now := s.clock.Now()
+	a := auditor{st: st, by: cmd.By, correlationID: cmd.CorrelationID, stackID: cmd.StackID, teamID: teamID, at: now}
+	if err := a.append(ctx, "lock.released", map[string]any{"request_id": current.RequestID,
+		"fencing_token": current.FencingToken}); err != nil {
+		return res, err
+	}
+	res.Released = *current
+
+	waiters, err := st.Waiters(ctx, cmd.StackID)
+	if err != nil {
+		return res, fmt.Errorf("read queue: %w", err)
+	}
+	next, ok := NextInQueue(waiters, cmd.RequestID)
+	if !ok {
+		return res, nil
+	}
+	req, err := st.Request(ctx, next.RequestID)
+	if err != nil {
+		return res, err
+	}
+	l, err := s.grant(ctx, st, a, req, nil, true)
+	if err != nil {
+		return res, err
+	}
+	res.Promoted = &l
+	return res, nil
 }
 
 func (s *Service) holderCheck(ctx context.Context, st Store, cmd TokenCommand) (*Lock, uuid.UUID, error) {
