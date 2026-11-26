@@ -31,6 +31,45 @@ class GitDiff:
         return [p for p in out.split("\0") if p]
 
 
+class GitCli:
+    """The git operations ModulePinVerifier needs, run in a local clone."""
+
+    def __init__(self, repo_root: Path, remote: str = "origin") -> None:
+        self.repo_root = Path(repo_root)
+        self.remote = remote
+
+    def _git(self, *args: str, check: bool = True, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["git", *args], cwd=cwd or self.repo_root, check=check, capture_output=True, text=True)
+
+    def remote_tag_commit(self, tag: str) -> str | None:
+        """Commit the remote tag points at, or None when the remote has no such tag.
+
+        A failing ls-remote (network, auth) raises instead of returning None, so
+        an unreachable remote is never mistaken for an unpublished tag.
+        """
+        out = self._git("ls-remote", "--tags", self.remote, f"refs/tags/{tag}", f"refs/tags/{tag}^{{}}").stdout
+        refs = {ref: sha for sha, ref in (line.split("\t", 1) for line in out.splitlines() if "\t" in line)}
+        return refs.get(f"refs/tags/{tag}^{{}}") or refs.get(f"refs/tags/{tag}")
+
+    def is_commit(self, sha: str) -> bool:
+        return self._git("cat-file", "-e", f"{sha}^{{commit}}", check=False).returncode == 0
+
+    def is_ancestor(self, sha: str, ref: str) -> bool:
+        return self._git("merge-base", "--is-ancestor", sha, ref, check=False).returncode == 0
+
+    def show(self, sha: str, path: str) -> str | None:
+        result = self._git("show", f"{sha}:{path}", check=False)
+        return result.stdout if result.returncode == 0 else None
+
+    def publish_tag(self, mirror: Path, sha: str, tag: str) -> None:
+        """Push one commit as a tag into a bare mirror (created on first use)."""
+        mirror = Path(mirror)
+        if not (mirror / "HEAD").is_file():
+            mirror.mkdir(parents=True, exist_ok=True)
+            self._git("init", "--quiet", "--bare", str(mirror))
+        self._git("push", "--quiet", "--force", str(mirror), f"{sha}:refs/tags/{tag}")
+
+
 class FileSystemStackRepository:
     """Reads iacp.stack.json files from a checkout."""
 

@@ -5,14 +5,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Sequence
 
-from .adapters import FileSystemStackRepository, GitDiff
+from .adapters import FileSystemStackRepository, GitCli, GitDiff
 from .detection import DEFAULT_MAX_STACKS, DetectionError, DetectionPolicy, DetectionResult, StackDetector
 from .models import StackMetadataError
+from .module_pins import DEFAULT_REPO_URL, DEFAULT_TRUSTED_REF, ModulePinVerifier, PinError, Resolution, insteadof_config
 from .plan_summary import render_markdown, summarize
 from .policy_context import build_context
 
@@ -55,6 +57,19 @@ def build_parser() -> argparse.ArgumentParser:
     summary.add_argument("--run-url", default="", help="workflow run URL shown in the comment")
     summary.add_argument("--markdown-out", type=Path, required=True)
     summary.add_argument("--json-out", type=Path, required=True)
+
+    pins = sub.add_parser("verify-pins", help="verify module pins; serve unpublished tags from a local mirror")
+    pins.add_argument("stack_dirs", type=Path, nargs="+")
+    pins.add_argument("--mirror", type=Path, required=True, help="bare mirror for unpublished tags (created if needed)")
+    pins.add_argument("--trusted-ref", default=DEFAULT_TRUSTED_REF, help="unpublished pins must be on this ref")
+    pins.add_argument("--remote", default="origin", help="remote that holds published tags")
+    pins.add_argument("--repo-url", default=DEFAULT_REPO_URL, help="module repository URL used in stack sources")
+    pins.add_argument(
+        "--github-env",
+        type=str,
+        default=os.environ.get("GITHUB_ENV"),
+        help="append GIT_CONFIG_* here; otherwise print export lines (default: $GITHUB_ENV)",
+    )
     return parser
 
 
@@ -136,14 +151,31 @@ def run_summary(args: argparse.Namespace) -> int:
     return 0
 
 
-COMMANDS = {"detect": run_detect, "context": run_context, "summary": run_summary}
+def run_verify_pins(args: argparse.Namespace) -> int:
+    repo = FileSystemStackRepository(args.repo_root)
+    stacks = [repo.load_dir(d) for d in args.stack_dirs]
+    verifier = ModulePinVerifier(GitCli(args.repo_root, args.remote), args.mirror, args.trusted_ref)
+    checks = verifier.verify(stacks)
+    for check in checks:
+        print(check.render(), file=sys.stderr)
+    if any(c.resolution is Resolution.BOOTSTRAPPED for c in checks):
+        env = insteadof_config(args.mirror, args.repo_url)
+        if args.github_env:
+            with Path(args.github_env).open("a", encoding="utf-8") as fh:
+                fh.writelines(f"{k}={v}\n" for k, v in env.items())
+        else:
+            print("\n".join(f"export {k}={shlex.quote(v)}" for k, v in env.items()))
+    return 0
+
+
+COMMANDS = {"detect": run_detect, "context": run_context, "summary": run_summary, "verify-pins": run_verify_pins}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return COMMANDS[args.command](args)
-    except (DetectionError, StackMetadataError) as exc:
+    except (DetectionError, StackMetadataError, PinError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
