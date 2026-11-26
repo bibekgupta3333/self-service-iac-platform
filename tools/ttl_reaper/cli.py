@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -48,12 +49,13 @@ def run(args: argparse.Namespace, env: Mapping[str, str]) -> int:
             raise ValueError(f"{API_URL_ENV} is not set; pass --api-url or --skip-if-unconfigured")
         print(f"::notice title=Platform API not configured::TTL reaper skipped: {API_URL_ENV} is empty (local-first, ADR-0009)")
         return 0
+    now = datetime.now(timezone.utc)
     result = Reaper(_client(args, env), max_teardowns=args.max_teardowns, dry_run=args.dry_run).run()
     for o in result.outcomes:
         line = f"{o.action.kind} {o.action.stack.path}: {o.status}: {o.detail}"
         if o.failed:
             print(f"::error title=TTL {o.action.kind} failed::{escape(line)}")
-        elif needs_attention(o):
+        elif needs_attention(o, now):
             print(f"::warning title=TTL {o.status}::{escape(line)}")
         else:
             print(line)

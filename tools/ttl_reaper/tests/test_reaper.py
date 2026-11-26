@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Mapping
@@ -75,13 +76,16 @@ def test_a_malformed_or_production_list_is_refused_whole(body):
         parse_due(body)
 
 
-def test_plan_puts_teardowns_first_and_caps_them():
-    due = DueList(warnings=(stack(9),), teardowns=(stack(1), stack(2), stack(3)))
-    actions, deferred = plan_actions(due, max_teardowns=2)
-    assert [(a.kind, a.stack.stack_id) for a in actions] == [("teardown", sid(1)), ("teardown", sid(2)), ("warn", sid(9))]
-    assert [s.stack_id for s in deferred] == [sid(3)]
-    actions, deferred = plan_actions(due, max_teardowns=0)
-    assert [a.kind for a in actions] == ["warn"] and len(deferred) == 3
+def test_plan_puts_teardowns_first_and_leaves_blocked_stacks_out():
+    due = DueList(warnings=(stack(9),), teardowns=(stack(1), stack(2)), blocked=(stack(7),))
+    assert [(a.kind, a.stack.stack_id) for a in plan_actions(due)] == [("teardown", sid(1)), ("teardown", sid(2)), ("warn", sid(9))]
+
+
+def test_a_blocked_stack_is_never_listed_as_a_teardown():
+    body = {"warnings": [], "teardowns": [item(1), item(2)], "blocked": [item(2)]}
+    due = parse_due(body)
+    assert [s.stack_id for s in due.teardowns] == [sid(1)] and [s.stack_id for s in due.blocked] == [sid(2)]
+    assert parse_due({"warnings": [], "teardowns": []}).blocked == ()  # an API without the list
 
 
 @pytest.mark.parametrize("code,want", [("ttl_not_due", "skipped"), ("ttl_backoff", "skipped"), ("ttl_blocked", "blocked"), ("stack_busy", "skipped"), ("stack_not_found", "skipped"),
@@ -90,13 +94,17 @@ def test_classify_failure(code, want):
     assert classify_failure(409, code) == want
 
 
-def test_needs_attention_flags_busy_skips_and_blocked_stacks():
-    a = Action("teardown", stack(1))
-    assert needs_attention(Outcome(a, "skipped", "busy", "stack_busy"))
-    assert needs_attention(Outcome(a, "blocked", "no attempts left", "ttl_blocked"))
-    assert not needs_attention(Outcome(a, "skipped", "extended", "ttl_not_due"))
-    assert not needs_attention(Outcome(a, "skipped", "backing off", "ttl_backoff"))
-    assert not needs_attention(Outcome(a, "done"))
+NOW = datetime(2026, 11, 27, 12, 0, tzinfo=timezone.utc)  # 25 h after the fixtures' expiry
+
+
+def test_needs_attention_flags_long_busy_skips_and_blocked_stacks():
+    a = Action("teardown", stack(1))  # expired 2026-11-26T11:00:00Z
+    assert needs_attention(Outcome(a, "skipped", "busy", "stack_busy"), NOW)
+    assert not needs_attention(Outcome(a, "skipped", "busy", "stack_busy"), NOW - timedelta(hours=2)), "expired only 23 h ago"
+    assert needs_attention(Outcome(a, "blocked", "no attempts left", "ttl_blocked"), NOW)
+    assert not needs_attention(Outcome(a, "skipped", "extended", "ttl_not_due"), NOW)
+    assert not needs_attention(Outcome(a, "skipped", "backing off", "ttl_backoff"), NOW)
+    assert not needs_attention(Outcome(a, "done"), NOW)
 
 
 def test_summary_escapes_table_cells():
@@ -156,10 +164,29 @@ def test_dry_run_changes_nothing():
     assert [o.status for o in result.outcomes] == ["dry-run", "dry-run"]
 
 
-def test_the_teardown_cap_defers_the_rest():
+def test_the_teardown_cap_counts_only_opened_destroys():
     api = FakeApi(DueList(teardowns=tuple(stack(n) for n in range(1, 6))))
     result = Reaper(api, max_teardowns=2).run()
     assert api.torn == [sid(1), sid(2)] and [s.stack_id for s in result.deferred] == [sid(3), sid(4), sid(5)]
+
+
+def test_busy_backoff_and_blocked_stacks_do_not_crowd_out_fresh_teardowns():
+    cap = 3
+    busy = [stack(n) for n in range(1, 31)]            # many more than the cap, oldest first
+    backoff = [stack(n) for n in range(31, 61)]
+    fresh = [stack(n) for n in range(61, 66)]          # five expired stacks that can be torn down
+    blocked = [stack(n) for n in range(100, 140)]
+    teardown = {s.stack_id: ApiError("busy", 409, "stack_busy") for s in busy}
+    teardown.update({s.stack_id: ApiError("later", 409, "ttl_backoff") for s in backoff})
+    api = FakeApi(DueList(teardowns=tuple(busy + backoff + fresh), blocked=tuple(blocked)), teardown=teardown)
+    result = Reaper(api, max_teardowns=cap).run()
+    fresh_ids = {f.stack_id for f in fresh}
+    assert [i for i in api.torn if i in fresh_ids] == [s.stack_id for s in fresh[:cap]], "the fresh stacks were torn down, up to the cap"
+    assert [s.stack_id for s in result.deferred] == [s.stack_id for s in fresh[cap:]]
+    assert len(api.torn) == len(busy) + len(backoff) + cap, "skips cost a call, never a slot"
+    assert [o.status for o in result.outcomes if o.status == "blocked"] == ["blocked"] * len(blocked)
+    assert not set(api.torn) & {s.stack_id for s in blocked}, "a blocked stack is reported, not called"
+    assert result.ok
 
 
 # ---- CLI against a loopback server ---------------------------------------------------
@@ -264,9 +291,8 @@ def test_plain_http_to_a_remote_host_is_refused(capsys):
 
 def test_cli_warns_about_busy_and_blocked_stacks_without_failing(capsys):
     with Server() as api:
-        api.routes[("GET", "/v1/internal/ttl/due")] = (200, {"warnings": [], "teardowns": [item(1), item(2), item(3)]})
+        api.routes[("GET", "/v1/internal/ttl/due")] = (200, {"warnings": [], "teardowns": [item(1, expires_at="2026-01-01T00:00:00Z"), item(3)], "blocked": [item(2)]})
         api.routes[("POST", f"/v1/internal/ttl/{sid(1)}/teardown")] = (409, {"code": "stack_busy", "title": "an apply is in flight"})
-        api.routes[("POST", f"/v1/internal/ttl/{sid(2)}/teardown")] = (409, {"code": "ttl_blocked", "title": "no attempts left"})
         api.routes[("POST", f"/v1/internal/ttl/{sid(3)}/teardown")] = (409, {"code": "ttl_backoff", "title": "later"})
         code = main(["--api-url", api.url], env={"IACP_INTERNAL_TOKEN": INTERNAL})
     out = capsys.readouterr().out
@@ -274,4 +300,5 @@ def test_cli_warns_about_busy_and_blocked_stacks_without_failing(capsys):
     assert out.count("::warning title=TTL") == 2
     assert "::warning title=TTL skipped::teardown environments/development/payments/s1" in out
     assert "::warning title=TTL blocked::teardown environments/development/payments/s2" in out
+    assert ("POST", f"/v1/internal/ttl/{sid(2)}/teardown") not in [(m, p) for m, p, _ in api.calls], "blocked stacks are not called"
     assert "s3: skipped" in out and "::warning title=TTL skipped::teardown environments/development/payments/s3" not in out

@@ -62,10 +62,24 @@ class Reaper:
         self._dry_run = dry_run
 
     def run(self) -> RunResult:
-        actions, deferred = plan_actions(self._api.due(), self._max_teardowns)
-        result = RunResult(deferred=deferred)
-        for action in actions:
-            result.outcomes.append(self._dry(action) if self._dry_run else self._act(action))
+        """Blocked stacks are reported without a call. Teardowns run until ``max_teardowns``
+        destroy requests were actually opened: stacks that turn out busy, in backoff or already
+        pending cost a call but not a slot, so they cannot crowd out stacks that can be torn
+        down. What is left after the cap waits for the next run."""
+        due = self._api.due()
+        result = RunResult()
+        for stack in due.blocked:
+            result.outcomes.append(Outcome(Action("teardown", stack), "blocked",
+                                           "used up its TTL destroy attempts; needs a person", "ttl_blocked"))
+        created = 0
+        for action in plan_actions(due):
+            if action.kind == "teardown" and created >= self._max_teardowns:
+                result.deferred.append(action.stack)
+                continue
+            outcome = self._dry(action) if self._dry_run else self._act(action)
+            if action.kind == "teardown" and outcome.status in ("done", "dry-run"):
+                created += 1
+            result.outcomes.append(outcome)
         return result
 
     @staticmethod

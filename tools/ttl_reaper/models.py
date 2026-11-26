@@ -7,6 +7,7 @@ planned, API failures are classified and the run summary is rendered from plain 
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
@@ -19,9 +20,10 @@ DEFAULT_MAX_TEARDOWNS = 25
 #: The next hourly run decides again.
 SKIPPABLE_CODES = frozenset({"ttl_not_due", "ttl_backoff", "stack_busy", "stack_destroyed", "stack_not_found"})
 
-#: Skips worth a ::warning:: because nothing else will surface them: a stack that stays busy
-#: (a create that never finishes, an update stuck) is otherwise skipped silently every hour.
-WARN_CODES = frozenset({"stack_busy"})
+#: A stack that is busy (a create that never finishes, an update that is stuck) is skipped
+#: every hour. It is annotated with a ::warning:: only once it has been expired this long,
+#: so a create PR that is simply still open does not add noise to every run.
+BUSY_WARN_AFTER = timedelta(hours=24)
 
 #: The stack used up its TTL destroy attempts. Not a failure of the reaper, but a person has to
 #: look at the stack, so it is reported as blocked with a warning.
@@ -47,6 +49,9 @@ class DueStack:
 class DueList:
     warnings: tuple[DueStack, ...] = ()
     teardowns: tuple[DueStack, ...] = ()
+    #: Stacks that used up their TTL destroy attempts: reported, never acted on, never counted
+    #: against the per-run teardown cap.
+    blocked: tuple[DueStack, ...] = ()
 
 
 def _stack(raw: Any, where: str) -> DueStack:
@@ -70,8 +75,8 @@ def parse_due(body: Mapping[str, Any]) -> DueList:
     """Validate GET /v1/internal/ttl/due. A malformed list raises: acting on a half-understood
     answer could destroy the wrong stack. Pure."""
     lists: dict[str, tuple[DueStack, ...]] = {}
-    for key in ("warnings", "teardowns"):
-        raw = body.get(key)
+    for key in ("warnings", "teardowns", "blocked"):
+        raw = body.get(key, []) if key == "blocked" else body.get(key)
         if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
             raise DueListError(f"due answer has no {key} list")
         seen: dict[str, DueStack] = {}
@@ -80,9 +85,10 @@ def parse_due(body: Mapping[str, Any]) -> DueList:
             seen.setdefault(s.stack_id, s)  # a repeated id is acted on once
         lists[key] = tuple(seen.values())
     both = {s.stack_id for s in lists["warnings"]} & {s.stack_id for s in lists["teardowns"]}
+    teardowns = tuple(s for s in lists["teardowns"] if s.stack_id not in {b.stack_id for b in lists["blocked"]})
     # An expired stack is torn down, not warned; the backend never lists both.
     warnings = tuple(s for s in lists["warnings"] if s.stack_id not in both)
-    return DueList(warnings=warnings, teardowns=lists["teardowns"])
+    return DueList(warnings=warnings, teardowns=teardowns, blocked=lists["blocked"])
 
 
 @dataclass(frozen=True)
@@ -91,13 +97,11 @@ class Action:
     stack: DueStack
 
 
-def plan_actions(due: DueList, max_teardowns: int = DEFAULT_MAX_TEARDOWNS) -> tuple[list[Action], list[DueStack]]:
-    """The actions of one run, teardowns first, and the teardowns left for the next run
-    because of the per-run cap. Pure."""
-    cap = max(0, max_teardowns)
-    now_down, later = due.teardowns[:cap], due.teardowns[cap:]
-    actions = [Action("teardown", s) for s in now_down] + [Action("warn", s) for s in due.warnings]
-    return actions, list(later)
+def plan_actions(due: DueList) -> list[Action]:
+    """The actions of one run: teardowns first, then warnings. Blocked stacks are not
+    actions (they are only reported) and the per-run cap is not applied here: it counts the
+    destroy requests actually opened, which only the run knows. Pure."""
+    return [Action("teardown", s) for s in due.teardowns] + [Action("warn", s) for s in due.warnings]
 
 
 @dataclass(frozen=True)
@@ -120,9 +124,24 @@ def classify_failure(status: int | None, code: str) -> str:
     return "skipped" if code in SKIPPABLE_CODES else "failed"
 
 
-def needs_attention(outcome: "Outcome") -> bool:
-    """Whether the outcome deserves a ::warning:: annotation. Pure."""
-    return outcome.status == "blocked" or (outcome.status == "skipped" and outcome.code in WARN_CODES)
+def parse_time(value: str) -> datetime | None:
+    """An RFC 3339 timestamp as an aware datetime, or None when it is not one. Pure."""
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def needs_attention(outcome: "Outcome", now: datetime) -> bool:
+    """Whether the outcome deserves a ::warning:: annotation: a blocked stack, or a busy one
+    that has been expired longer than BUSY_WARN_AFTER. Pure."""
+    if outcome.status == "blocked":
+        return True
+    if outcome.status == "skipped" and outcome.code == "stack_busy":
+        expired = parse_time(outcome.action.stack.expires_at)
+        return expired is not None and now - expired > BUSY_WARN_AFTER
+    return False
 
 
 @dataclass
