@@ -10,6 +10,11 @@
 # third-party or otherwise unpinned sources. Warnings are printed but do not
 # fail.
 #
+# An example may also ship policy-context.<env>.json files (for example
+# policy-context.staging.json). Each is checked against a second plan made with
+# -var environment=<env>, so the stricter outside-development branches are
+# exercised too; the example must declare an "environment" variable.
+#
 # The plan is never applied. It needs the example's provider endpoints to
 # answer STS (aws_caller_identity), which LocalStack community does; planning
 # new resources makes no other AWS call.
@@ -39,37 +44,55 @@ else
   example="$module_dir/examples/complete"
   context="$example/policy-context.json"
   [ -f "$context" ] || { echo "no $context" >&2; exit 1; }
-
   terraform -chdir="$example" init -backend=false -input=false >/dev/null
-  terraform -chdir="$example" plan -input=false -lock=false -refresh=false -out=tfplan >/dev/null
-  terraform -chdir="$example" show -json tfplan >"$work/plan.json"
-  plan="$work/plan.json"
-  label="$example"
 fi
-
-result="$(conftest test "$plan" -p "$here/opa" --data "$context" --output json || true)"
-
-messages() { jq -r --arg kind "$1" '.[][$kind][]?.msg' <<<"$result"; }
 
 # The one accepted deny: a module call whose source is a relative "../" path.
 relative_source='^\[iacp\.forbidden\.module_source\] module\.[^:]+: source "\.\./'
 
-status=0
-while IFS= read -r msg; do
-  [ -n "$msg" ] || continue
-  if [[ "$msg" =~ $relative_source ]]; then
-    echo "  expected  $msg"
-  else
-    echo "  DENY      $msg" >&2
-    status=1
+# plan_example <out.json> [terraform plan args...]: plans the example (never applied).
+plan_example() {
+  local out="$1"
+  shift
+  terraform -chdir="$example" plan -input=false -lock=false -refresh=false -out=tfplan "$@" >/dev/null
+  terraform -chdir="$example" show -json tfplan >"$out"
+}
+
+# gate <plan.json> <context.json> <label>: 0 when the only denies are relative module sources.
+gate() {
+  local plan="$1" context="$2" label="$3" result msg status=0
+  result="$(conftest test "$plan" -p "$here/opa" --data "$context" --output json || true)"
+  while IFS= read -r msg; do
+    [ -n "$msg" ] || continue
+    if [[ "$msg" =~ $relative_source ]]; then
+      echo "  expected  $msg"
+    else
+      echo "  DENY      $msg" >&2
+      status=1
+    fi
+  done < <(jq -r '.[].failures[]?.msg' <<<"$result")
+  while IFS= read -r msg; do
+    if [ -n "$msg" ]; then echo "  warn      $msg"; fi
+  done < <(jq -r '.[].warnings[]?.msg' <<<"$result")
+  if [ "$status" -eq 0 ]; then
+    echo "conftest: $label has no denies other than relative module sources"
   fi
-done < <(messages failures)
+  return "$status"
+}
 
-while IFS= read -r msg; do
-  if [ -n "$msg" ]; then echo "  warn      $msg"; fi
-done < <(messages warnings)
+status=0
+if [ -n "$example" ]; then
+  plan_example "$work/plan.json"
+  gate "$work/plan.json" "$context" "$example" || status=1
 
-if [ "$status" -eq 0 ]; then
-  echo "conftest: $label has no denies other than relative module sources"
+  shopt -s nullglob
+  for extra in "$example"/policy-context.*.json; do
+    env="${extra##*/policy-context.}"
+    env="${env%.json}"
+    plan_example "$work/plan-$env.json" -var "environment=$env"
+    gate "$work/plan-$env.json" "$extra" "$example ($env)" || status=1
+  done
+else
+  gate "$plan" "$context" "$label" || status=1
 fi
 exit "$status"

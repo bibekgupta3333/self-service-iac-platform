@@ -7,6 +7,13 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 ## [Unreleased]
 
 ### Added
+- GitHub OAuth login, sessions and RBAC (WBS 4.4, core of 8.6):
+  - `IACP_AUTH_MODE=github`: authorization-code flow with `state` and S256 PKCE (`/v1/auth/login`, `/v1/auth/callback`), a `GitHubIdentity` port with an `httptest`-tested adapter (fixed hosts, no cross-host redirects, timeouts, size caps), org-membership gate, fail-closed config
+  - server-side sessions (`iacp_session`, hashed in the new `sessions` table, absolute and sliding idle expiry, logout and disablement revoke, fresh id on every login), per-session `X-CSRF-Token` on unsafe methods, `GET /v1/me` (also in dev mode), `POST /v1/auth/logout`
+  - team sync at login (`iacp-<team>-viewers` / `<team>` / `<team>-maintainers` / admin team), manual memberships preserved, the last platform admin never downgraded
+  - pure `rbac` permission matrix with exhaustive tests, route policies, `rbac.denied`, `auth.login`, `auth.login_denied`, `auth.logout` and `rbac.*` audit events; request creation now uses the matrix
+  - review fixes: request list and get are scoped to the caller's teams (404 outside them) with a shared `identity.Visibility` helper; routes without an access policy are refused and a `chi.Walk` test enforces coverage; sessions migration is `0009`; platform teams with colliding GitHub role slugs get no synced roles; login starts and `rbac.denied` audit volume are rate limited; a login whose audit fails revokes its session; logout works with a dead session; `__Host-` cookie names over https
+  - portal `GithubAuthProvider`, sign-in and sign-out controls, server-side cookie forwarding, a controlled `Set-Cookie` pass-through on the login routes only, and a stricter proxy CSRF check for requests that carry a cookie
 - Stacks and request kinds (WBS 4.5, prerequisites of 5.3 and 7.4):
   - `GET /v1/internal/requests/by-path?stack_path=&head_sha=` resolves the request holding a stack's lock (ids, fencing token, approved plan hash) for `apply.yml`; it fails closed (no lock, expired lease, holder not approved, merge commit mismatch). New route class `request_lookup`: `apply.yml` on main via `push` or `workflow_dispatch` only, never `pr-validate.yml`.
   - `tools.stack_pipeline lock acquire --stack-path [--head-sha]` resolves the UUIDs and the approved plan hash through it; `apply.yml` uses them for the claim, the release and the plan-hash check, which removes the "fails closed because UUIDs are unknown" gap and the `IACP_API_URL` prerequisite.
@@ -162,6 +169,14 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
     - a preview shows the exact request
   - requests list (All/Mine, team filter, cursor paging) and request detail with a status timeline, refreshed every 5 s until terminal
   - CI job `portal` (npm ci, lint, typecheck, test, build) and make targets `portal-install`, `portal-dev`, `portal-test`
+- More packages (WBS 8.1 partial, 9.3 partial), each `v1.0.0` with `module.yaml`, a LocalStack example with development and staging policy contexts, a `terraform test` suite, README and CHANGELOG:
+  - `modules/vpc`: public and private subnets per zone keyed by zone name, no public IP on launch, a stripped default security group, optional NAT (off in development by default, per zone required in production), and flow logs to a CMK-encrypted log group through a bounded `/iacp/` role, and readable errors when the region lacks the requested zones (17 runs).
+  - `modules/monitoring`: an SNS alarm topic on a CMK that CloudWatch may use, a TLS-only topic policy limited to CloudWatch, typed subscriptions (a scoped invoke permission for `lambda`; `sqs` is rejected because the queue policy belongs to the queue's stack), a dashboard from typed widgets with bounded markdown and an alarm status widget, and alarm helpers for SQS age and depth, Lambda errors and throttles, and DynamoDB throttles (21 runs).
+  - `modules/dynamodb`: a table on a CMK with PITR always on, deletion protection outside development, on-demand billing by default, typed GSIs with derived attribute definitions, optional TTL and stream, and read/write policy documents, the read one covering the stream when enabled (16 runs).
+  - Terratest `TestVPCComplete`, `TestMonitoringComplete` and `TestDynamoDBComplete` assert the platform tag values and the secure defaults through the AWS SDK. The CloudWatch client stays on v1.52.x, the last AWSQuery release, because LocalStack 4.4 cannot decode Smithy RPC v2 CBOR.
+  - OPA `iacp.encryption.sns_sse`, `iacp.encryption.sns_kms` and `iacp.encryption.dynamodb_cmk` with 17 new tests (196 in total, 99.9% coverage); the conftest fixtures and `verify.sh` cover the three new rule IDs.
+  - `policies/example-plan.sh` also checks each `policy-context.<env>.json` against a plan made with `-var environment=<env>`, so the staging contexts of these three examples run in `make example-plans` and CI.
+  - LocalStack (`docker-compose.yml` and every workflow) also starts `ec2`, `dynamodb`, `dynamodbstreams` and `kinesis`. CI discovers modules by glob, so `module-tests`, `terratest` and the release gate pick the new modules up without workflow changes.
 
 - Phase 2 modules `ecs-service`, `postgres` and `redis` v1.0.0 (WBS 8.1, partial). Each has a `module.yaml`, secure defaults, a plan-only `examples/complete` with `policy-context.json`, a README and a CHANGELOG:
   - `ecs-service`: Fargate service with a deployment circuit breaker and rollback, an ECR repository (scan on push, immutable tags, KMS, lifecycle policy), task and execution roles under `/iacp/` with the `iacp-boundary` permissions boundary, KMS-encrypted logs, ALB-only ingress, and an optional internal or public ALB with an HTTPS listener and an HTTP-to-HTTPS redirect
@@ -202,6 +217,9 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 - `tools/stack_pipeline` mints a new GitHub OIDC token for every API request, retries included, because the API now rejects a reused `jti`; the shared internal token is still reused.
 - `tools/codeowners` only counts git-tracked stack roots and rejects `platform_paths` under `/environments/<env>/`, which team rules would shadow.
 - `security-events: write` is granted only to the `code-scanning` upload jobs, which run no PR code; fork and Dependabot PRs skip the upload. Stack SARIF paths always stay inside the repository, and a run's own `automationDetails` is dropped so a PR cannot pick its category. `INFRACOST_API_KEY` is passed only to the `cost` job, which runs no PR code.
+
+### Fixed
+- The catalog index accepted the category `data`, which `module.yaml` cannot carry, and rejected `database` and `cache`, which it can. It now accepts exactly the categories in `modules/_shared/module.schema.json`, so the `dynamodb` manifest indexes.
 
 ### Changed
 - `AGENTS.md`: local-first rules, the 70/30 object-oriented and functional coding style, and the small-commit, reviewed-PR workflow.

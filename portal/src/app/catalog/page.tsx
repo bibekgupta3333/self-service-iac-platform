@@ -3,7 +3,7 @@ import Link from "next/link";
 
 import { Badge } from "@/components/Badge";
 import { ErrorPanel } from "@/components/ErrorPanel";
-import { serverApi } from "@/lib/api/factory";
+import { serverApi } from "@/lib/api/server";
 import { attempt } from "@/lib/api/result";
 import { catalogStatusTone, categoriesOf } from "@/lib/format";
 

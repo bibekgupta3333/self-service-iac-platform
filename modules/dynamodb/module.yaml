@@ -1,0 +1,177 @@
+apiVersion: iacp.dev/v1
+kind: Module
+metadata:
+  name: dynamodb
+  version: 1.0.0
+  displayName: DynamoDB Table
+  description: DynamoDB table encrypted with a customer managed key, with point-in-time recovery, deletion protection outside development, optional TTL, streams and GSIs.
+  category: database
+  maturity: beta
+  owners:
+    - "@bibekgupta3333/platform"
+  documentation: https://github.com/bibekgupta3333/self-service-iac-platform/tree/modules/dynamodb/v1.0.0/modules/dynamodb
+
+compatibility:
+  terraform: ">= 1.10, < 2.0"
+  providers:
+    hashicorp/aws: ">= 5.60, < 6.0"
+  environments: [development, staging, production]
+
+inputs:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  required: [name, hash_key]
+  additionalProperties: false
+  properties:
+    name:
+      type: string
+      pattern: "^[a-z][a-z0-9-]{2,40}$"
+      description: Logical table name. Final name is <team>-<environment>-<name>.
+      x-iacp-immutable: true
+    hash_key:
+      type: string
+      pattern: "^[A-Za-z0-9_.-]{1,255}$"
+      description: Partition key attribute name.
+      x-iacp-immutable: true
+      x-iacp-group: Keys
+    hash_key_type:
+      type: string
+      enum: [S, N, B]
+      default: S
+      description: Partition key type (S string, N number, B binary).
+      x-iacp-immutable: true
+      x-iacp-ui: select
+      x-iacp-group: Keys
+    range_key:
+      type: [string, "null"]
+      pattern: "^[A-Za-z0-9_.-]{1,255}$"
+      default: null
+      description: Optional sort key attribute name. Must differ from hash_key.
+      x-iacp-immutable: true
+      x-iacp-group: Keys
+    range_key_type:
+      type: string
+      enum: [S, N, B]
+      default: S
+      description: Sort key type. Ignored without range_key.
+      x-iacp-immutable: true
+      x-iacp-ui: select
+      x-iacp-group: Keys
+    billing_mode:
+      type: string
+      enum: [PAY_PER_REQUEST, PROVISIONED]
+      default: PAY_PER_REQUEST
+      description: On-demand (default) or provisioned capacity.
+      x-iacp-ui: select
+      x-iacp-group: Capacity
+    read_capacity:
+      type: [integer, "null"]
+      minimum: 1
+      maximum: 40000
+      default: null
+      description: Read capacity units. Required with PROVISIONED, not allowed with PAY_PER_REQUEST.
+      x-iacp-group: Capacity
+    write_capacity:
+      type: [integer, "null"]
+      minimum: 1
+      maximum: 40000
+      default: null
+      description: Write capacity units. Required with PROVISIONED, not allowed with PAY_PER_REQUEST.
+      x-iacp-group: Capacity
+    table_class:
+      type: string
+      enum: [STANDARD, STANDARD_INFREQUENT_ACCESS]
+      default: STANDARD
+      description: Storage class.
+      x-iacp-ui: select
+      x-iacp-group: Capacity
+    global_secondary_indexes:
+      type: array
+      maxItems: 20
+      default: []
+      description: Global secondary indexes. A key attribute shared with the table or another index must keep the same type.
+      x-iacp-group: Indexes
+      items:
+        type: object
+        additionalProperties: false
+        required: [name, hash_key]
+        properties:
+          name: { type: string, pattern: "^[A-Za-z0-9_.-]{3,255}$" }
+          hash_key: { type: string, pattern: "^[A-Za-z0-9_.-]{1,255}$" }
+          hash_key_type: { type: string, enum: [S, N, B], default: S }
+          range_key: { type: [string, "null"], pattern: "^[A-Za-z0-9_.-]{1,255}$" }
+          range_key_type: { type: string, enum: [S, N, B], default: S }
+          projection_type: { type: string, enum: [ALL, KEYS_ONLY, INCLUDE], default: ALL }
+          non_key_attributes:
+            type: array
+            maxItems: 100
+            items: { type: string, minLength: 1 }
+            default: []
+          read_capacity: { type: [integer, "null"], minimum: 1, maximum: 40000 }
+          write_capacity: { type: [integer, "null"], minimum: 1, maximum: 40000 }
+        allOf:
+          - if:
+              required: [projection_type]
+              properties: { projection_type: { const: INCLUDE } }
+            then:
+              required: [non_key_attributes]
+              properties: { non_key_attributes: { minItems: 1 } }
+            else:
+              properties: { non_key_attributes: { maxItems: 0 } }
+    ttl_attribute_name:
+      type: [string, "null"]
+      pattern: "^[A-Za-z0-9_.-]{1,255}$"
+      default: null
+      description: Attribute holding an expiry time in epoch seconds. Null leaves TTL disabled.
+      x-iacp-group: Data lifecycle
+    stream_view_type:
+      type: [string, "null"]
+      enum: [KEYS_ONLY, NEW_IMAGE, OLD_IMAGE, NEW_AND_OLD_IMAGES, null]
+      default: null
+      description: Enables DynamoDB Streams with this view type. Null leaves streams off.
+      x-iacp-ui: select
+      x-iacp-group: Data lifecycle
+    deletion_protection_enabled:
+      type: [boolean, "null"]
+      default: null
+      description: Null turns deletion protection on outside development. It cannot be turned off in staging or production.
+      x-iacp-ui: toggle
+      x-iacp-group: Data lifecycle
+    kms_key_arn:
+      type: [string, "null"]
+      default: null
+      pattern: "^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/.+$"
+      description: Existing KMS key ARN. If null, a dedicated key with rotation is created.
+      x-iacp-group: Encryption
+    tags:
+      type: object
+      additionalProperties: { type: string }
+      propertyNames: { not: { pattern: "^iacp:" } }
+      maxProperties: 30
+      description: Extra tags. The iacp:* prefix is reserved.
+      x-iacp-ui: key-value
+
+outputs:
+  - { name: id, description: Table name, wireable: true }
+  - { name: arn, description: Table ARN, wireable: true }
+  - { name: name, description: Computed table name, wireable: false }
+  - { name: stream_arn, description: Stream ARN (null when streams are off), wireable: true }
+  - { name: kms_key_arn, description: KMS key ARN, wireable: true }
+  - { name: read_policy_json, description: IAM policy granting read access, wireable: true }
+  - { name: write_policy_json, description: IAM policy granting write access, wireable: true }
+  - { name: iacp_metadata, description: Module name and version, wireable: false }
+
+cost:
+  baseline_monthly_usd: 1.00
+  drivers:
+    - read_request_units
+    - write_request_units
+    - storage_gb
+    - pitr_storage_gb
+    - kms_requests
+
+upgrade:
+  from: ">= 1.0.0, < 2.0.0"
+  requires_migration: false
+  notes: |
+    Initial release.

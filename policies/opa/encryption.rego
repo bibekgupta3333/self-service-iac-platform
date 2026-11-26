@@ -1,12 +1,13 @@
 # METADATA
 # title: Encryption at rest
 # description: |
-#   S3 buckets must use SSE-KMS and SQS queues must be encrypted; outside
-#   development both need a customer-managed key (not alias/aws/*). RDS
-#   storage and ElastiCache data must be encrypted at rest (with a
-#   customer-managed key outside development), ElastiCache must require TLS
-#   in transit, and ECR repositories outside development must use KMS with a
-#   customer-managed key. KMS keys must rotate.
+#   S3 buckets must use SSE-KMS, and SQS queues and SNS topics must be
+#   encrypted; outside development all three need a customer-managed key (not
+#   alias/aws/*), and so do DynamoDB tables. RDS storage and ElastiCache data
+#   must be encrypted at rest (with a customer-managed key outside
+#   development), ElastiCache must require TLS in transit, and ECR
+#   repositories outside development must use KMS with a customer-managed key.
+#   KMS keys must rotate.
 package iacp.encryption
 
 import data.lib.iacp as f
@@ -242,6 +243,80 @@ deny contains m if {
 		"iacp.encryption.ecr_kms", repo.address,
 		sprintf("repository in environment %q is not encrypted with a customer-managed KMS key", [f.environment_of(repo)]),
 		`add encryption_configuration { encryption_type = "KMS", kms_key = <customer-managed key> } (the ecs-service module does this)`,
+	)
+}
+
+# --- SNS ---------------------------------------------------------------------
+
+topic_has_key(t) if {
+	key := f.after(t).kms_master_key_id
+	is_string(key)
+	key != ""
+}
+
+topic_has_key(t) if f.after_unknown(t, "kms_master_key_id")
+
+topic_has_cmk(t) if cmk_or_unknown(object.get(f.after(t), "kms_master_key_id", null), unknown_at(t, ["kms_master_key_id"]))
+
+deny contains m if {
+	some t in f.changed_of_type("aws_sns_topic")
+	not topic_has_key(t)
+	not f.exempt("iacp.encryption.sns_sse", t.address)
+	m := f.msg(
+		"iacp.encryption.sns_sse", t.address,
+		"topic has no server-side encryption",
+		"set kms_master_key_id to a customer-managed key (alias/aws/sns is only allowed in development)",
+	)
+}
+
+deny contains m if {
+	some t in f.changed_of_type("aws_sns_topic")
+	f.environment_of(t) != "development"
+	topic_has_key(t)
+	not topic_has_cmk(t)
+	not f.exempt("iacp.encryption.sns_kms", t.address)
+	m := f.msg(
+		"iacp.encryption.sns_kms", t.address,
+		sprintf("topic in environment %q uses the AWS-managed aws/sns key", [f.environment_of(t)]),
+		"set kms_master_key_id to a customer-managed key (CloudWatch alarms cannot publish to alias/aws/sns topics)",
+	)
+}
+
+# --- DynamoDB ----------------------------------------------------------------
+
+# A table without an enabled server_side_encryption block uses the AWS owned
+# key; enabled without kms_key_arn uses the AWS-managed aws/dynamodb key. The
+# provider computes kms_key_arn in both cases, so an unknown planned key only
+# counts as a customer-managed key created in the same plan when the
+# configuration sets kms_key_arn.
+table_has_cmk(t) if {
+	some sse in object.get(f.after(t), "server_side_encryption", [])
+	sse.enabled == true
+	customer_managed_key(object.get(sse, "kms_key_arn", null))
+}
+
+table_has_cmk(t) if {
+	some i, sse in object.get(f.after(t), "server_side_encryption", [])
+	sse.enabled == true
+	unknown_at(t, ["server_side_encryption", i, "kms_key_arn"])
+	config_sets_table_key(t)
+}
+
+config_sets_table_key(t) if {
+	some block in f.config_expr(t, "server_side_encryption")
+	key := object.get(block, "kms_key_arn", {})
+	count(object.get(key, "references", [])) > 0
+}
+
+deny contains m if {
+	some t in f.changed_of_type("aws_dynamodb_table")
+	f.environment_of(t) != "development"
+	not table_has_cmk(t)
+	not f.exempt("iacp.encryption.dynamodb_cmk", t.address)
+	m := f.msg(
+		"iacp.encryption.dynamodb_cmk", t.address,
+		sprintf("table in environment %q is not encrypted with a customer-managed KMS key", [f.environment_of(t)]),
+		"add server_side_encryption { enabled = true, kms_key_arn = <customer-managed key> }",
 	)
 }
 

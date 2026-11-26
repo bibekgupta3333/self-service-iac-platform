@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 
 import { Nav } from "@/components/Nav";
 import { UserBadge } from "@/components/UserBadge";
-import { authEnv, createAuthProvider } from "@/lib/auth/provider";
+import { serverAuth } from "@/lib/api/server";
 
 import "./globals.css";
 
@@ -14,7 +14,7 @@ export const metadata: Metadata = {
 };
 
 export default async function RootLayout({ children }: { children: ReactNode }) {
-  const viewer = await createAuthProvider(authEnv()).viewer();
+  const viewer = await serverAuth().viewer();
   return (
     <html lang="en">
       <body className="min-h-screen font-sans">

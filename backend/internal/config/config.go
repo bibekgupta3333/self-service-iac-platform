@@ -39,6 +39,8 @@ type AuthMode string
 const (
 	// AuthModeDev authenticates every caller as a fixed local developer.
 	AuthModeDev AuthMode = "dev"
+	// AuthModeGitHub authenticates browser users with GitHub OAuth and server-side sessions.
+	AuthModeGitHub AuthMode = "github"
 )
 
 // Config is the fully resolved backend configuration.
@@ -65,6 +67,8 @@ type Config struct {
 	MetricsToken string
 	// OIDC configures GitHub Actions OIDC verification; disabled when Audience is empty.
 	OIDC OIDCConfig
+	// GitHub configures GitHub OAuth login and sessions (IACP_AUTH_MODE=github).
+	GitHub GitHubAuthConfig
 	// Publisher selects how generated stacks reach the repository (WBS 4.8).
 	Publisher PublisherConfig
 	// WebhookSecret verifies X-Hub-Signature-256 on POST /v1/webhooks/github. Empty means
@@ -153,6 +157,9 @@ func Load(lookup LookupFunc) (Config, error) {
 	oidc, err := loadOIDC(get)
 	errs = append(errs, err)
 	cfg.OIDC = oidc
+	gh, err := loadGitHubAuth(get, cfg.AuthMode)
+	errs = append(errs, err)
+	cfg.GitHub = gh
 	pub, err := loadPublisher(get)
 	errs = append(errs, err)
 	cfg.Publisher = pub
@@ -166,10 +173,15 @@ func Load(lookup LookupFunc) (Config, error) {
 		if cfg.AppDBPassword == "" {
 			cfg.AppDBPassword = DevAppDBPassword // matches DefaultAppDatabaseURL
 		}
+	case AuthModeGitHub:
+		// Unlike dev mode, IACP_APP_DB_PASSWORD gets no default here (it stays empty unless set),
+		// so nothing provisions the dev password on iacp_app. IACP_DATABASE_URL still defaults
+		// to the local compose URL, which embeds that dev password: a real deployment must
+		// set IACP_DATABASE_URL (and IACP_APP_DB_PASSWORD or provision the role itself).
 	case "":
-		errs = append(errs, fmt.Errorf("%sAUTH_MODE must be set explicitly (supported: dev)", Prefix))
+		errs = append(errs, fmt.Errorf("%sAUTH_MODE must be set explicitly (supported: dev, github)", Prefix))
 	default:
-		errs = append(errs, fmt.Errorf("%sAUTH_MODE: unsupported value %q (supported: dev)", Prefix, cfg.AuthMode))
+		errs = append(errs, fmt.Errorf("%sAUTH_MODE: unsupported value %q (supported: dev, github)", Prefix, cfg.AuthMode))
 	}
 	if cfg.InternalToken != "" && len(cfg.InternalToken) < MinInternalTokenLen {
 		errs = append(errs, fmt.Errorf("%sINTERNAL_TOKEN must be at least %d characters", Prefix, MinInternalTokenLen))

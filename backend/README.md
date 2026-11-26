@@ -99,7 +99,12 @@ dependencies) arrive with their features.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `IACP_AUTH_MODE` | none: **required** | `dev` (every user call is the local user). The API refuses to start without it |
+| `IACP_AUTH_MODE` | none: **required** | `dev` (every user call is the local user) or `github` (OAuth login and sessions, below). The API refuses to start without it |
+| `IACP_GITHUB_CLIENT_ID`, `IACP_GITHUB_CLIENT_SECRET`, `IACP_GITHUB_CALLBACK_URL`, `IACP_GITHUB_ORG` | unset | GitHub OAuth app, its registered callback (`https://<portal>/api/iacp/v1/auth/callback`; http only for loopback) and the organisation whose active members may sign in. All four are required together in `github` mode, and a partial set fails startup in any mode |
+| `IACP_AUTH_ADMIN_TEAM` | `iacp-admins` | GitHub team slug whose members become platform admins |
+| `IACP_AUTH_REDIRECT_ALLOWLIST` | unset | comma-separated https origins a login may return to (`return_to`); relative paths are always allowed |
+| `IACP_AUTH_DEFAULT_REDIRECT` | `/` | landing path when `return_to` is missing or not allowed |
+| `IACP_AUTH_SESSION_TTL`, `IACP_AUTH_SESSION_IDLE_TTL` | `8h`, `1h` | absolute and sliding idle session lifetimes |
 | `IACP_HTTP_ADDR` | `127.0.0.1:8080` | listen address; the container image sets `0.0.0.0:8080` |
 | `IACP_DATABASE_URL` | `postgres://iacp_app:iacp-app-local-only@localhost:5432/iacp?sslmode=disable` | runtime connection as `iacp_app` |
 | `IACP_MIGRATE_DATABASE_URL` | `postgres://iacp:iacp-local-only@localhost:5432/iacp?sslmode=disable` | schema-owner connection, used only for migrations |
@@ -199,7 +204,9 @@ Errors are RFC 9457 `application/problem+json` with `code`, `request_id` and `er
 
 Authentication goes through `httpapi.Authenticator`, and it fails closed:
 
-- User routes (`/v1/...`) use the authenticator selected by `IACP_AUTH_MODE` (only `dev` for now).
+- User routes (`/v1/...`) use the authenticator selected by `IACP_AUTH_MODE`: `dev`, or `github`
+  (`httpapi.SessionAuthenticator`: the `iacp_session` cookie plus `X-CSRF-Token` on unsafe methods).
+  See "GitHub login, sessions and RBAC" below.
 - Machine routes (`/v1/internal/*` and `POST /v1/runs`) use a separate authenticator; the dev
   user never reaches them. It accepts a GitHub Actions OIDC JWT when `IACP_OIDC_*` is set and the
   shared `IACP_INTERNAL_TOKEN` (constant-time compare) when set. With neither, every call gets 401.
@@ -240,6 +247,45 @@ Authentication goes through `httpapi.Authenticator`, and it fails closed:
 - 401 bodies are generic; the reason is only logged.
 
 GitHub OAuth sessions (WBS 4.4) plug in at the same seam without handler changes.
+
+## GitHub login, sessions and RBAC (WBS 4.4, 8.6 core)
+
+Packages: `internal/oauth` (flow, PKCE, redirect policy, `GitHubIdentity` port and the
+`GitHubClient` adapter), `internal/session` (hashed sessions, CSRF token), `internal/teamsync`
+(role mapping and the login-time sync), `internal/rbac` (the pure permission matrix),
+`httpapi` (`SessionAuthenticator`, `AuthHandler`, `PolicyTable`, denial auditing).
+
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/v1/auth/login?return_to=` | `302` to GitHub; sets `iacp_oauth_state`. `github` mode only |
+| GET | `/v1/auth/callback` | finishes the login and sets `iacp_session`; errors redirect with `?login_error=` |
+| POST | `/v1/auth/logout` | session + `X-CSRF-Token`; `204` |
+| GET | `/v1/me` | user, teams and roles, `csrf_token`; also in `dev` mode |
+
+- The GitHub adapter talks only to `github.com` and `api.github.com` (https), never builds a URL
+  from response data, refuses redirects to other hosts (and cross-host redirects of any kind),
+  has a 10 s timeout, caps responses at 1 MiB, and keeps the code, token and client secret out
+  of errors and logs. Tests run it against an `httptest` server through `WithEndpoints`.
+- The session id is 256 random bits; only its SHA-256 is stored. `iacp_session` is HttpOnly,
+  SameSite=Lax, host-only and Secure unless the callback URL is http on loopback.
+- `dev` mode is unchanged: no cookie or token, and the fixed user passes the route policies as a
+  platform admin (its request-create role still comes from `memberships`).
+- Route policies live in `httpapi.DefaultPolicies`. A user route without an entry is refused
+  with 403 and fails `TestEveryUserRouteHasAPolicy` (a `chi.Walk` over the router), so new
+  routes must add themselves (for example `GET /v1/stacks` and `GET /v1/requests/{id}/events`
+  use `ScopeAnyTeam` with `ActionRead`). Probes, the public login routes, machine routes and
+  webhooks are exempt.
+- Read scoping: request list and get are limited to the caller's teams (`identity.Visibility`,
+  `requests.Access`); other read routes should reuse `UserStore.VisibleTeams` and
+  `Visibility.SQLArgs`. A request outside the caller's teams is 404.
+- Cookies are `__Host-` prefixed over https. `POST /v1/auth/logout` is public: with a dead
+  session it clears the cookie and answers 204. Login starts are limited to 30 per minute per
+  remote address and `rbac.denied` audit events to 20 per user per minute (per process).
+- Team mapping, last-admin protection, and the OAuth app settings are in docs/07 section 7.
+  Registering the OAuth app is WBS 2.5 and needs the repository owner.
+- Not built: periodic or webhook team sync (needs an org credential, WBS 4.8; roles go stale
+  for up to the session lifetime, see docs/07), `/auth/refresh`, personal API tokens, a
+  trusted-proxy setting for per-client rate limiting behind the portal.
 
 ## Metrics
 

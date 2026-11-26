@@ -69,7 +69,7 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 | [x] 4.1 | Backend scaffold: chi, config, structured logging, health checks, migrations, Prometheus `/metrics` (route-pattern labels, pool gauges; loopback or `IACP_METRICS_TOKEN`) | 1 | 2.2 |
 | [x] 4.2 | DB migrations for all core tables (incl. hash-chained `audit_events`, `locks`) | 1.5 | 4.1 |
 | [x] 4.3 | Catalog service: `GET /v1/catalog/modules`, `/versions`, index endpoint | 1 | 4.2 |
-| [~] 4.4 | Auth: GitHub OAuth login, sessions/JWT, team sync → memberships, RBAC middleware (membership check on create done) | 2 | 4.2 |
+| [x] 4.4 | Auth: GitHub OAuth login, sessions, team sync → memberships, RBAC matrix and route policies (opaque server-side sessions instead of JWT; OAuth app registration needs 2.5; periodic sync waits for 4.8) | 2 | 4.2 |
 | [x] 4.5 | Request service + state machine + `Idempotency-Key` (create, update and destroy kinds; `upgrade`, `reconcile` and `rollback` are rejected until their own tasks; update and destroy only work end to end once 5.3's apply reports set the stack status, because nothing moves a stack out of `provisioning` yet) | 2 | 4.2 |
 | [x] 4.6 | Platform per-stack lock, fencing token, queueing (`queued_behind`) (admin force-release on `/v1/stacks/{id}/lock` lands with RBAC, 4.4) | 1 | 4.5 |
 | [x] 4.7 | Config generator: templates (main/backend/versions/providers/`iacp.stack.json`), golden tests | 2 | 4.3 |
@@ -106,7 +106,7 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 ## 7. Developer portal & destroy — M4
 | ID | Task | Est | Dep |
 |----|------|-----|-----|
-| [~] 7.1 | Next.js scaffold, GitHub login, API client, layout — scaffold, `ApiClient`, proxy, layout and `AuthProvider` with the dev-mode provider done; GitHub login waits for 4.4 | 1.5 | 4.4 |
+| [~] 7.1 | Next.js scaffold, GitHub login, API client, layout — scaffold, `ApiClient`, proxy, layout and `AuthProvider` with the dev-mode provider done; GitHub login (`GithubAuthProvider`, proxy login flow) done with 4.4, pending a registered OAuth app | 1.5 | 4.4 |
 | [~] 7.2 | Catalog list + module detail (README, versions, inputs) — list, versions, outputs and generated inputs table done; README rendering needs the README in the catalog API | 1.5 | 4.3 |
 | [~] 7.3 | Dynamic request form from JSON Schema (typed renderer, [ADR-0011](docs/adr/0011-portal-form-renderer.md)), preview diff — form, payload-bound Idempotency-Key, field-mapped errors and request preview done; generated-files diff needs `POST /v1/requests/{id}/preview` | 2 | 4.7 |
 | [ ] 7.4 | Request detail: status timeline (SSE), plan summary, cost, PR/run links (backend `GET /v1/requests/{id}/events` is ready; the portal side is open) | 1.5 | 4.9 |
@@ -119,19 +119,19 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 ## 8. Lifecycle & governance — Phase 2
 | ID | Task | Est | Dep |
 |----|------|-----|-----|
-| [~] 8.1 | Packages: `ecs-service` (+ALB, ECR), `postgres`, `redis`, `vpc`, `monitoring` — `ecs-service`, `postgres` and `redis` v1.0.0 done with offline `terraform test` suites (LocalStack community has no ECS/RDS/ElastiCache), new OPA rules and conftest-checked example plans; `vpc` and `monitoring` in a separate PR | 12 | 3.6 |
+| [~] 8.1 | Packages: `ecs-service` (+ALB, ECR), `postgres`, `redis`, `vpc`, `monitoring` — all five v1.0.0 done: `ecs-service`, `postgres` and `redis` with offline `terraform test` suites (LocalStack community has no ECS/RDS/ElastiCache), `vpc` and `monitoring` with LocalStack `terraform test` and Terratest; release tags and real-account verification remain | 12 | 3.6 |
 | [ ] 8.2 | Version upgrades: upgrade-path API + UI, major migration flow | 3 | 4.3, 7.2 |
 | [ ] 8.3 | Drift detection: `drift.yml` 02:00 UTC, `drift_reports`, reconcile/codify/ignore | 3 | 5.2 |
 | [ ] 8.4 | TTL: EventBridge Scheduler, 24 h warning, auto destroy (non-prod), extend, hourly reaper | 3 | 7.6 |
 | [ ] 8.5 | Budgets: `budget.rego`, Infracost gating, admin override, Cost Explorer actuals | 3 | 5.5, 6.2 |
-| [ ] 8.6 | RBAC: viewer/developer/maintainer/admin, production gates, matrix tests | 2 | 4.4 |
+| [~] 8.6 | RBAC: viewer/developer/maintainer/admin, production gates, matrix tests (matrix, route policies, denial audit and tests done; production gates wait for 8.8) | 2 | 4.4 |
 | [ ] 8.7 | Recovery: failure classifier, retry (max 2, backoff), rollback PR, break-glass `state-surgery` | 3 | 5.3 |
 | [ ] 8.8 | Production environment enablement | 1 | 8.6 |
 
 ## 9. Scale & ecosystem — Phase 3
 - [ ] 9.1 Dependency DAG: `stack_dependencies`, output injection, topological apply and reverse destroy
 - [ ] 9.2 Multi-account vending + multi-region state
-- [ ] 9.3 More packages: SNS, API Gateway, EventBridge, DynamoDB
+- [~] 9.3 More packages: SNS, API Gateway, EventBridge, DynamoDB — `dynamodb` v1.0.0 done (SNS alarm topics ship in `monitoring`); a standalone SNS package, API Gateway and EventBridge remain
 - [ ] 9.4 Policy exceptions self-service with expiry
 - [ ] 9.5 GitHub merge queue
 - [ ] 9.6 `iacp` CLI + Backstage plugin

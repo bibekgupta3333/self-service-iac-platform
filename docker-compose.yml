@@ -9,7 +9,7 @@ services:
     ports:
       - "127.0.0.1:4566:4566"  # LocalStack edge port (all AWS APIs), loopback only
     environment:
-      SERVICES: s3,sqs,sns,lambda,iam,sts,kms,logs,cloudwatch,secretsmanager,events
+      SERVICES: s3,sqs,sns,lambda,iam,sts,kms,logs,cloudwatch,secretsmanager,events,ec2,dynamodb,dynamodbstreams,kinesis
       AWS_DEFAULT_REGION: us-east-1
       DEBUG: "0"
     volumes:

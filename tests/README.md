@@ -6,6 +6,9 @@ Terratest (Go) integration tests that deploy module examples to LocalStack and a
 |---|---|---|
 | `TestS3Complete` | `modules/s3/examples/complete` | SSE-KMS key, public access block, versioning, TLS-only policy, access logging, required tags, encrypted object round trip |
 | `TestSQSComplete` | `modules/sqs/examples/complete` | KMS on both queues, redrive and redrive-allow policies, TLS-only policy, required tags, send/receive |
+| `TestDynamoDBComplete` | `modules/dynamodb/examples/complete` | SSE with the module key, point-in-time recovery, on-demand billing, deletion protection off in development, keys, GSI projection, TTL, stream, required tags, put/get item |
+| `TestVPCComplete` | `modules/vpc/examples/complete` | CIDR, DNS attributes, three zones of public and private subnets without public IPs, default security group without rules, per-zone NAT routing, REJECT flow log to the module's log group, required tags (with `iacp:tier`) |
+| `TestMonitoringComplete` | `modules/monitoring/examples/complete` | Topic KMS key and policy, required tags, email subscription, the four helper alarms notifying the topic, dashboard widgets including the alarm status widget |
 
 ```bash
 docker compose up -d localstack

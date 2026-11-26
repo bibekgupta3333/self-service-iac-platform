@@ -37,32 +37,59 @@ Creating a request needs a team where the dev user has the `developer` role; the
 |----------|------|---------|---------|
 | `IACP_API_URL` | server | `http://127.0.0.1:8080` | API origin for server components and the `/api/iacp` proxy |
 | `NEXT_PUBLIC_IACP_API_URL` | browser (build time) | unset | call the API directly from the browser; needs CORS on the API, which it does not send yet |
-| `NEXT_PUBLIC_IACP_AUTH_MODE` | both (build time) | `dev` | auth provider; only `dev` exists |
+| `NEXT_PUBLIC_IACP_AUTH_MODE` | both (build time) | `dev` | auth provider: `dev` or `github` (must match the backend's `IACP_AUTH_MODE`) |
 | `NEXT_PUBLIC_IACP_DEV_USER` | both (build time) | `local-dev` | display label; set it to the API's `IACP_DEV_USER` |
 | `IACP_PORTAL_ORIGIN` | server | unset | public origin of the portal behind a proxy that rewrites `Host`, accepted by the proxy's same-origin check |
 
 Do not commit `.env*` files; pass variables on the command line or through your shell.
 
-## Authentication (dev mode)
+## Authentication
 
-The backend picks its user authenticator with `IACP_AUTH_MODE`. The only mode so far is `dev`
-(`httpapi.DevAuthenticator`): the API ignores the request and treats every `/v1` call as one
-local user, upserted at startup from `IACP_DEV_USER`. There is no header, cookie or token, and
-no `GET /v1/me` yet.
+The backend picks its user authenticator with `IACP_AUTH_MODE`, and the portal's
+`NEXT_PUBLIC_IACP_AUTH_MODE` must match. Pages and `ApiClient` only see `AuthProvider`
+(`src/lib/auth/provider.ts`); `createAuthProvider` refuses unknown modes rather than falling back.
 
-The portal does exactly that through `AuthProvider` (`src/lib/auth/provider.ts`):
-`DevAuthProvider.requestHeaders()` returns nothing and `viewer()` returns the configured login
-for the header badge. `createAuthProvider` refuses any other mode rather than falling back.
-GitHub OAuth (WBS 4.4) replaces it with a provider that relies on the `iacp_session` cookie
-(`credentials: "include"`), adds `X-CSRF-Token` on mutations and reads the user from `/v1/me`.
-`ApiClient` and the pages only see the interface. The proxy already forwards `Cookie`,
-`Authorization` and `X-CSRF-Token` for that.
+**`dev`** (`httpapi.DevAuthenticator`): the API ignores the request and treats every `/v1` call
+as one local user, upserted at startup from `IACP_DEV_USER`. There is no header, cookie or
+token. `DevAuthProvider` returns no headers and labels the badge. Nothing about dev mode changed
+with OAuth.
+
+**`github`** (WBS 4.4): GitHub OAuth. `GithubAuthProvider` uses `credentials: "include"`, adds
+the per-session `X-CSRF-Token` to unsafe methods (read once from `GET /v1/me`), and reads the
+viewer from `/v1/me`. On the server, `src/lib/api/server.ts` forwards the incoming `Cookie`
+header to the API (via `next/headers`), so pages render with the signed-in user's rights.
+Without a session the header shows "Sign in with GitHub" and a 401 error panel links to it.
+"Sign out" posts to `/v1/auth/logout` with the token and reloads.
+
+**Where the cookie lives.** The login runs through the same-origin proxy, so the session cookie
+belongs to the portal's origin and the browser sends it back to the proxy, which forwards it.
+The proxy used to drop `Set-Cookie`; it now passes it through in one controlled place:
+`GET /api/iacp/v1/auth/login`, `GET .../auth/callback` and `POST .../auth/logout` only, and only
+cookies named `iacp_session` or `iacp_oauth_state` (over https the backend prefixes them with
+`__Host-`, and those names are allowed too) without a `Domain` attribute (`filterSetCookies`).
+On those paths a `Location` header is accepted only if it is exactly GitHub's authorize URL
+(`https://github.com/login/oauth/authorize?...`) or a path on the portal that does not start
+with `//`, contain a backslash or a control character (`rewriteAuthLocation`). Every other
+absolute URL is dropped, so a compromised or misconfigured backend cannot make the portal
+redirect a browser to another site, and the backend's `return_to` allow-list
+(`IACP_AUTH_REDIRECT_ALLOWLIST`) can only ever yield portal paths here. The browser would
+follow an absolute portal URL too, but the proxy drops it: configure `return_to` as a path.
+Logout is the one POST that needs no `X-CSRF-Token` at the proxy (a browser with an expired
+session has no token to send); the backend requires it whenever the session is live. Register the GitHub OAuth app's
+callback as `https://<portal>/api/iacp/v1/auth/callback` (locally
+`http://localhost:3000/api/iacp/v1/auth/callback`) and set the backend's
+`IACP_GITHUB_CALLBACK_URL` to the same value; docs/07 section 7 lists the full app settings.
+Do not point the callback at the backend origin: the cookie would then belong to the wrong
+origin and the proxy could not forward it.
+
+Local run: start the API with `IACP_AUTH_MODE=github` and the `IACP_GITHUB_*` variables, and the
+portal with `NEXT_PUBLIC_IACP_AUTH_MODE=github make portal-dev`.
 
 ## How it talks to the API
 
 - **Server components** (catalog, module, request list and detail) call the API directly with
-  `serverApi()` and `cache: "no-store"`; every page is dynamic.
-- **Client components** (the request form) use `browserApi()`, which goes through the
+  `serverApi()` (`src/lib/api/server.ts`) and `cache: "no-store"`; every page is dynamic.
+- **Client components** (the request form) use `browserApi()` (`src/lib/api/factory.ts`), which goes through the
   same-origin route `src/app/api/iacp/[...path]/route.ts` because the API sends no CORS
   headers. Its rules are pure functions in `src/lib/api/proxy.ts`:
   - **Allow-list, not deny-list.** Only the first segments the portal calls (`catalog`,
@@ -70,17 +97,20 @@ GitHub OAuth (WBS 4.4) replaces it with a provider that relies on the `iacp_sess
     has decoded once. Every segment must be unreserved URL characters other than `.` and `..`,
     so `Internal`, `RUNS`, `%69nternal`, encoded slashes and traversal are all refused (404).
     Machine routes (`/v1/internal/*`, `/v1/runs`) and any route added later stay unreachable
-    until they are added on purpose.
+    until they are added on purpose. The login flow adds `me` and exactly three `auth` paths
+    (`login`, `callback`, `logout`).
   - **Methods.** GET, and HEAD (answered from an upstream GET with no body). POST only on
-    `/v1/requests`. Anything else gets 405 with `Allow`.
+    `/v1/requests` and `/v1/auth/logout`. Anything else gets 405 with `Allow`.
   - **Bodies** over 1 MiB (the backend's own cap) get 413, by `Content-Length` or while
     streaming.
   - **CSRF.** A POST must carry `Sec-Fetch-Site: same-origin`, or, without that header, an
     `Origin` equal to the portal's (request URL, `Host`, or `IACP_PORTAL_ORIGIN`); otherwise
     403. Requests with neither header come from non-browser clients and carry no ambient
-    browser credentials.
-  - **Headers.** Request and response headers are allow-listed (`Set-Cookie` and `Server` from
-    the API are dropped). `Location: /v1/...` is rewritten to `/api/iacp/v1/...`.
+    browser credentials, so they pass only when they send no `Cookie`. A POST with a `Cookie`
+    and neither header is refused, and with a `Cookie` the `X-CSRF-Token` header must be
+    present (the backend verifies its value). Dev mode sends no cookie and is unaffected.
+  - **Headers.** Request and response headers are allow-listed (`Server` from the API is
+    dropped, and `Set-Cookie` passes only on the login-flow routes, described above). `Location: /v1/...` is rewritten to `/api/iacp/v1/...`.
 - **Errors**: non-2xx responses become `ApiError`, built by the pure `parseProblem` from the
   RFC 9457 body (`code`, `detail`, `request_id`, `errors[].pointer`). Transport failures are
   `network_error`. Pages show the request id for support.
@@ -156,7 +186,7 @@ per-request nonces in middleware is a follow-up. `next dev` additionally allows
 src/app/                  routes (App Router); api/iacp/ is the proxy
 src/components/           presentational components; request/ holds the form
 src/lib/api/              ApiClient (I/O), types, errors, config, proxy rules, factory
-src/lib/auth/             AuthProvider + DevAuthProvider
+src/lib/auth/             AuthProvider, DevAuthProvider, GithubAuthProvider
 src/lib/schema/           pure schema -> field model, form values <-> inputs, SchemaAdapter
 src/lib/request/          pure stack-field checks, payload builder, pointer -> field mapping, Idempotency-Key rules
 src/lib/format.ts         pure dates, labels, tones, categories, status timeline

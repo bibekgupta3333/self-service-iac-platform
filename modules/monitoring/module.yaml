@@ -1,0 +1,188 @@
+apiVersion: iacp.dev/v1
+kind: Module
+metadata:
+  name: monitoring
+  version: 1.0.0
+  displayName: Monitoring
+  description: KMS-encrypted SNS alarm topic with subscriptions, a CloudWatch dashboard from typed widgets, and alarm helpers for SQS, Lambda and DynamoDB.
+  category: observability
+  maturity: beta
+  owners:
+    - "@bibekgupta3333/platform"
+  documentation: https://github.com/bibekgupta3333/self-service-iac-platform/tree/modules/monitoring/v1.0.0/modules/monitoring
+
+compatibility:
+  terraform: ">= 1.10, < 2.0"
+  providers:
+    hashicorp/aws: ">= 5.60, < 6.0"
+  environments: [development, staging, production]
+
+inputs:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  required: [name]
+  additionalProperties: false
+  properties:
+    name:
+      type: string
+      pattern: "^[a-z][a-z0-9-]{2,40}$"
+      description: Logical name. The topic and dashboard are named <team>-<environment>-<name>.
+      x-iacp-immutable: true
+    kms_key_arn:
+      type: [string, "null"]
+      default: null
+      pattern: "^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/.+$"
+      description: Existing KMS key ARN whose policy lets CloudWatch use it. If null, a dedicated key with rotation is created.
+      x-iacp-group: Encryption
+    publisher_service_principals:
+      type: array
+      maxItems: 10
+      uniqueItems: true
+      items: { type: string, pattern: "^[a-z0-9-]+(\\.[a-z0-9-]+)*\\.amazonaws\\.com$" }
+      default: []
+      description: AWS services, besides CloudWatch, allowed to publish to the topic for this account.
+      x-iacp-group: Encryption
+    subscriptions:
+      type: object
+      maxProperties: 20
+      propertyNames: { pattern: "^[a-z0-9][a-z0-9-]{0,39}$" }
+      default: {}
+      description: Topic subscriptions keyed by a stable name (email, email-json, https or lambda; Lambda invoke permission is granted). Email subscriptions stay pending until confirmed.
+      x-iacp-group: Notifications
+      additionalProperties:
+        type: object
+        additionalProperties: false
+        required: [protocol, endpoint]
+        properties:
+          protocol: { type: string, enum: [email, email-json, https, lambda] }
+          endpoint: { type: string, minLength: 1 }
+          raw_message_delivery: { type: boolean, default: false }
+        allOf:
+          - if: { properties: { protocol: { enum: [email, email-json] } } }
+            then: { properties: { endpoint: { pattern: "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$" } } }
+          - if: { properties: { protocol: { const: https } } }
+            then: { properties: { endpoint: { pattern: "^https://[^\\s]+$" } } }
+          - if: { properties: { protocol: { const: lambda } } }
+            then: { properties: { endpoint: { pattern: "^arn:aws[a-z-]*:lambda:[a-z0-9-]+:[0-9]{12}:function:.+$" } } }
+          - if:
+              required: [raw_message_delivery]
+              properties: { raw_message_delivery: { const: true } }
+            then: { properties: { protocol: { const: https } } }
+    dashboard_widgets:
+      type: array
+      maxItems: 100
+      default: []
+      description: Dashboard widgets in order, each a metric graph or a markdown text panel (at most 2,000 characters each, 10,000 in total). An alarm status widget is appended automatically.
+      x-iacp-group: Dashboard
+      items:
+        type: object
+        additionalProperties: false
+        required: [title]
+        properties:
+          title: { type: string, minLength: 1, maxLength: 256 }
+          metrics:
+            type: array
+            maxItems: 50
+            default: []
+            items:
+              type: object
+              additionalProperties: false
+              required: [namespace, metric_name]
+              properties:
+                namespace: { type: string, pattern: "^[A-Za-z0-9/_.#:-]{1,255}$" }
+                metric_name: { type: string, minLength: 1, maxLength: 255 }
+                dimensions:
+                  type: object
+                  maxProperties: 30
+                  additionalProperties: { type: string }
+                  default: {}
+                stat: { type: string, pattern: "^(SampleCount|Average|Sum|Minimum|Maximum|p[0-9]{1,2}(\\.[0-9]{1,2})?|p100)$", default: Average }
+                label: { type: [string, "null"] }
+          markdown: { type: [string, "null"], maxLength: 2000 }
+          view: { type: string, enum: [timeSeries, singleValue, bar, pie], default: timeSeries }
+          stacked: { type: boolean, default: false }
+          period: { type: integer, minimum: 60, multipleOf: 60, default: 300 }
+          width: { type: integer, minimum: 1, maximum: 24, default: 12 }
+          height: { type: integer, minimum: 1, maximum: 24, default: 6 }
+        oneOf:
+          - required: [markdown]
+            properties: { markdown: { type: string }, metrics: { maxItems: 0 } }
+          - required: [metrics]
+            properties: { metrics: { minItems: 1 }, markdown: { type: "null" } }
+    sqs_queue_alarms:
+      type: object
+      maxProperties: 25
+      propertyNames: { pattern: "^[a-z0-9][a-z0-9-]{0,39}$" }
+      default: {}
+      description: SQS queues to alarm on (age of the oldest message, optional queue depth).
+      x-iacp-group: Alarms
+      additionalProperties:
+        type: object
+        additionalProperties: false
+        required: [queue_name]
+        properties:
+          queue_name: { type: string, pattern: "^[A-Za-z0-9_-]{1,80}(\\.fifo)?$", x-iacp-ui: stack-output }
+          oldest_message_age_seconds: { type: integer, minimum: 60, default: 900 }
+          visible_messages_threshold: { type: [integer, "null"], minimum: 0 }
+    lambda_function_alarms:
+      type: object
+      maxProperties: 25
+      propertyNames: { pattern: "^[a-z0-9][a-z0-9-]{0,39}$" }
+      default: {}
+      description: Lambda functions to alarm on (errors and throttles).
+      x-iacp-group: Alarms
+      additionalProperties:
+        type: object
+        additionalProperties: false
+        required: [function_name]
+        properties:
+          function_name: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$", x-iacp-ui: stack-output }
+          errors_threshold: { type: integer, minimum: 1, default: 1 }
+          throttles_threshold: { type: integer, minimum: 1, default: 1 }
+    dynamodb_table_alarms:
+      type: object
+      maxProperties: 25
+      propertyNames: { pattern: "^[a-z0-9][a-z0-9-]{0,39}$" }
+      default: {}
+      description: DynamoDB tables to alarm on (read and write throttle events).
+      x-iacp-group: Alarms
+      additionalProperties:
+        type: object
+        additionalProperties: false
+        required: [table_name]
+        properties:
+          table_name: { type: string, pattern: "^[A-Za-z0-9_.-]{3,255}$", x-iacp-ui: stack-output }
+          throttle_events_threshold: { type: integer, minimum: 1, default: 1 }
+    tags:
+      type: object
+      additionalProperties: { type: string }
+      propertyNames: { not: { pattern: "^iacp:" } }
+      maxProperties: 30
+      description: Extra tags. The iacp:* prefix is reserved.
+      x-iacp-ui: key-value
+
+outputs:
+  - { name: id, description: Alarm topic ARN, wireable: true }
+  - { name: arn, description: Alarm topic ARN, wireable: true }
+  - { name: name, description: Alarm topic name, wireable: false }
+  - { name: sns_topic_arn, description: Alarm topic ARN for other modules' alarm_actions, wireable: true }
+  - { name: dashboard_name, description: CloudWatch dashboard name (null without widgets or alarms), wireable: false }
+  - { name: dashboard_url, description: Console URL of the dashboard, wireable: false }
+  - { name: alarm_arns, description: "Alarm ARNs keyed by kind, key and metric", wireable: false }
+  - { name: kms_key_arn, description: KMS key ARN, wireable: true }
+  - { name: publisher_policy_json, description: IAM policy granting publish on the topic, wireable: true }
+  - { name: iacp_metadata, description: Module name and version, wireable: false }
+
+cost:
+  baseline_monthly_usd: 4.00
+  drivers:
+    - alarms
+    - dashboards
+    - sns_notifications
+    - kms_requests
+
+upgrade:
+  from: ">= 1.0.0, < 2.0.0"
+  requires_migration: false
+  notes: |
+    Initial release.

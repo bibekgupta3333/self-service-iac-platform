@@ -18,6 +18,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/locks"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/outbox"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/rbac"
 )
 
 // Team is the subset of a team the request service needs.
@@ -126,8 +127,12 @@ type ListFilter struct {
 	Status    Status
 	Kind      Kind
 	CreatedBy *uuid.UUID
-	Limit     int
-	After     *Cursor
+	// AllTeams and TeamIDs scope the list to the caller's visible teams (identity.Visibility).
+	// The zero value matches no team, so a caller that forgets to set them sees nothing.
+	AllTeams bool
+	TeamIDs  []uuid.UUID
+	Limit    int
+	After    *Cursor
 }
 
 // Repository is the persistence port of the request service.
@@ -320,12 +325,12 @@ func (s *Service) precheckExisting(ctx context.Context, by identity.Principal, i
 }
 
 // authorizeKind is the one decision whether a caller with role in team may create a request
-// of kind against environment env (docs/03 §6.4; see RequiredRole). Create, update and
-// destroy all go through it, so swapping in another policy matrix is a change to this
-// function only. Pure.
+// of kind against environment env. It is the rbac matrix (docs/07; ActionFor maps the kind),
+// so create, update and destroy all follow it, including "an unknown environment counts as
+// production". Pure.
 func authorizeKind(role Role, kind Kind, env, team string) error {
-	if need := RequiredRole(kind, env); !role.AtLeast(need) {
-		return apperr.Forbidden(fmt.Sprintf("creating a %s request for team %s needs the %s role or higher", kind, team, need))
+	if d := rbac.Decide(role, ActionFor(kind), rbac.Resource{Environment: env}); !d.Allowed {
+		return apperr.Forbidden(fmt.Sprintf("creating a %s request for team %s needs the %s role or higher", kind, team, d.Need))
 	}
 	return nil
 }

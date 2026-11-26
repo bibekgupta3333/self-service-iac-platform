@@ -7,8 +7,10 @@ import {
   FORWARD_REQUEST_HEADERS,
   FORWARD_RESPONSE_HEADERS,
   MAX_BODY_BYTES,
+  filterSetCookies,
   pickHeaders,
   portalOrigins,
+  rewriteAuthLocation,
   rewriteLocation,
 } from "@/lib/api/proxy";
 
@@ -73,6 +75,8 @@ async function forward(req: Request, ctx: Context): Promise<Response> {
       contentLength: req.headers.get("content-length"),
       origin: req.headers.get("origin"),
       secFetchSite: req.headers.get("sec-fetch-site"),
+      hasCookie: (req.headers.get("cookie") ?? "") !== "",
+      csrfToken: req.headers.get("x-csrf-token"),
       allowedOrigins,
     },
   );
@@ -102,9 +106,15 @@ async function forward(req: Request, ctx: Context): Promise<Response> {
   }
 
   const headers = pickHeaders(upstream.headers, FORWARD_RESPONSE_HEADERS);
-  const location = rewriteLocation(headers.get("location"), PROXY_PREFIX);
+  const rawLocation = headers.get("location");
+  const location = decision.authFlow ? rewriteAuthLocation(rawLocation) : rewriteLocation(rawLocation, PROXY_PREFIX);
   headers.delete("location");
   if (location !== null) headers.set("location", location);
+  if (decision.authFlow) {
+    // The one controlled Set-Cookie pass-through: only the login-flow routes, only the
+    // session and login-state cookies, so the browser holds them for the portal's origin.
+    for (const cookie of filterSetCookies(upstream.headers.getSetCookie())) headers.append("set-cookie", cookie);
+  }
   if (decision.head) {
     // Drain (API responses are small) rather than cancel: cancelling the upstream stream
     // stalled the HEAD response under next start.

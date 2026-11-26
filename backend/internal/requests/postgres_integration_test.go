@@ -124,15 +124,15 @@ func TestPostgresRequestFlow(t *testing.T) {
 	if _, err := svc.Create(ctx, user, createCmd(second, "third-key-1234")); err != nil {
 		t.Fatal(err)
 	}
-	page, next, err := svc.List(ctx, ListFilter{Limit: 1, Team: "payments"})
+	page, next, err := svc.List(ctx, ListFilter{AllTeams: true, Limit: 1, Team: "payments"})
 	if err != nil || len(page) != 1 || next == nil || page[0].Stack.Path != "environments/development/payments/order-api" {
 		t.Fatalf("page1 = %+v %v %v", page, next, err)
 	}
-	page, next, err = svc.List(ctx, ListFilter{Limit: 1, After: next, CreatedBy: &userID})
+	page, next, err = svc.List(ctx, ListFilter{AllTeams: true, Limit: 1, After: next, CreatedBy: &userID})
 	if err != nil || len(page) != 1 || next != nil || page[0].ID != req.ID {
 		t.Fatalf("page2 = %+v %v %v", page, next, err)
 	}
-	if page, _, _ := svc.List(ctx, ListFilter{Team: "checkout"}); len(page) != 0 {
+	if page, _, _ := svc.List(ctx, ListFilter{AllTeams: true, Team: "checkout"}); len(page) != 0 {
 		t.Fatalf("team filter returned %d rows", len(page))
 	}
 
