@@ -144,6 +144,13 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
     - a preview shows the exact request
   - requests list (All/Mine, team filter, cursor paging) and request detail with a status timeline, refreshed every 5 s until terminal
   - CI job `portal` (npm ci, lint, typecheck, test, build) and make targets `portal-install`, `portal-dev`, `portal-test`
+- More packages (WBS 8.1 partial, 9.3 partial), each `v1.0.0` with `module.yaml`, a LocalStack example with `policy-context.json`, a `terraform test` suite, README and CHANGELOG:
+  - `modules/vpc`: public and private subnets per zone keyed by zone name, no public IP on launch, a stripped default security group, optional NAT (off in development by default, per zone required in production), and flow logs to a CMK-encrypted log group through a bounded `/iacp/` role (14 runs).
+  - `modules/monitoring`: an SNS alarm topic on a CMK that CloudWatch may use, a TLS-only topic policy limited to CloudWatch, typed subscriptions, a dashboard from typed widgets with an alarm status widget, and alarm helpers for SQS age and depth, Lambda errors and throttles, and DynamoDB throttles (17 runs).
+  - `modules/dynamodb`: a table on a CMK with PITR always on, deletion protection outside development, on-demand billing by default, typed GSIs with derived attribute definitions, optional TTL and stream, and read/write policy documents (16 runs).
+  - Terratest `TestVPCComplete`, `TestMonitoringComplete` and `TestDynamoDBComplete` assert the platform tag values and the secure defaults through the AWS SDK. The CloudWatch client stays on v1.52.x, the last AWSQuery release, because LocalStack 4.4 cannot decode Smithy RPC v2 CBOR.
+  - OPA `iacp.encryption.sns_sse`, `iacp.encryption.sns_kms` and `iacp.encryption.dynamodb_cmk` with 17 new tests (196 in total, 99.9% coverage); the conftest fixtures and `verify.sh` cover the three new rule IDs.
+  - LocalStack (`docker-compose.yml` and every workflow) also starts `ec2`, `dynamodb`, `dynamodbstreams` and `kinesis`. CI discovers modules by glob, so `module-tests`, `terratest` and the release gate pick the new modules up without workflow changes.
 
 ### Security
 - The backend fails closed: it binds to loopback by default, refuses to start without `IACP_AUTH_MODE`, keeps internal endpoints behind a constant-time token check, and enforces team membership on request creation.
@@ -160,6 +167,9 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 - Pull-request tokens can now also read the budget context, which is read-only, for any team's stack path (an accepted exposure, documented in docs/07). They still cannot take locks or index the catalog.
 - `tools/stack_pipeline` mints a new GitHub OIDC token for every API request, retries included, because the API now rejects a reused `jti`; the shared internal token is still reused.
 - `tools/codeowners` only counts git-tracked stack roots and rejects `platform_paths` under `/environments/<env>/`, which team rules would shadow.
+
+### Fixed
+- The catalog index accepted the category `data`, which `module.yaml` cannot carry, and rejected `database` and `cache`, which it can. It now accepts exactly the categories in `modules/_shared/module.schema.json`, so the `dynamodb` manifest indexes.
 
 ### Changed
 - `AGENTS.md`: local-first rules, the 70/30 object-oriented and functional coding style, and the small-commit, reviewed-PR workflow.
