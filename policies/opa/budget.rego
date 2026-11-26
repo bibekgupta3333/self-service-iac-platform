@@ -6,7 +6,8 @@
 #
 #     budget                      the month's budget from GET /v1/internal/budget-context
 #                                 (limit_usd, spent_usd, actual_usd, hard_block, month,
-#                                 single_change_cap_usd). No budget means nothing to enforce.
+#                                 optional single_change_cap_usd). No budget means nothing to
+#                                 enforce.
 #     current_committed_usd       the committed monthly cost of the team's other active
 #                                 stacks in the budget's scope (this stack excluded), summed
 #                                 by the API.
@@ -29,11 +30,13 @@
 #     unknown environment   that cannot be read must never read as "free", and an override
 #                           cannot waive it (its bound cannot be checked).
 #
-#   A single stack costing more per month than single_change_cap_usd (default 5000) is
-#   denied whatever the headroom.
+#   A single stack costing more per month than single_change_cap_usd is denied whatever the
+#   headroom. There is no default cap (opt-in per budget): the estimate is the whole stack, not
+#   the change, so a default would block updates of existing stacks above it.
 #
 #   The override waives a hard limit, or the cap, in development and staging only, and only
-#   for a stack whose estimate is at most the override's max_delta_usd. It never waives one
+#   while the overrun it allows (projected - limit, or estimate - cap) is at most the
+#   override's max_delta_usd. It never waives one
 #   in production, and an unknown environment is treated as production. Budget rules are
 #   not waivable through policy exceptions.
 #
@@ -43,8 +46,6 @@ package iacp.budget
 import data.lib.iacp as f
 
 default_warn_pct := 80
-
-default_single_change_cap := 5000
 
 # --- Context ---------------------------------------------------------------------
 
@@ -88,10 +89,10 @@ committed := num_or_zero(f.ctx_value("current_committed_usd", 0))
 # used: what the month has already consumed.
 used := max([spent, actual, committed])
 
-# cap: the most one stack may cost per month, whatever the headroom.
+# cap: the most one stack may cost per month, whatever the headroom. Undefined (no cap) unless the
+# budget sets one: the estimate is the stack's whole cost, not the change, so a default would block
+# every update of an existing stack above it.
 cap := budget.single_change_cap_usd if is_number(budget.single_change_cap_usd)
-
-cap := default_single_change_cap if not is_number(object.get(budget, "single_change_cap_usd", null))
 
 warn_pct := object.get(budget, "warn_pct", default_warn_pct)
 
@@ -151,27 +152,60 @@ override_active if {
 	time.parse_rfc3339_ns(o.expires_at) > f.now_ns
 }
 
-# The override waives a limit only outside production, and only for a stack whose estimate it
-# covers: max_delta_usd bounds it, and without an estimate there is nothing to compare.
-override_effective if {
+# The override waives a limit only outside production, and only up to its bound: max_delta_usd caps
+# how far past the limit (or the cap) it lets this change go, so several stacks under one override
+# cannot overrun by more than that each. Without an estimate there is nothing to compare, so a
+# missing estimate is never covered; a missing or unreadable bound is 0.
+override_usable if {
 	override_active
 	env in {"development", "staging"}
 	has_estimate
-	estimate <= num_or_zero(f.ctx.budget_override.max_delta_usd)
 }
 
-default override_ignored_note := ""
+max_delta := num_or_zero(f.ctx.budget_override.max_delta_usd)
 
-override_ignored_note := "; an admin override does not apply in production" if {
+# covers_limit: the overrun this change causes (projected - limit) is within the bound.
+covers_limit if {
+	override_usable
+	projected - limit <= max_delta
+}
+
+# covers_cap: how far this stack is over the cap is within the bound.
+covers_cap if {
+	override_usable
+	estimate - cap <= max_delta
+}
+
+production_note := "; an admin override does not apply in production"
+
+default limit_note := ""
+
+limit_note := production_note if {
 	override_active
 	not env in {"development", "staging"}
 }
 
-override_ignored_note := sprintf("; the admin override covers at most %s USD/month", [money(f.ctx.budget_override.max_delta_usd)]) if {
+limit_note := sprintf(
+	"; the admin override covers an overrun of at most %s USD and this change overruns the limit by %s USD",
+	[money(max_delta), money(projected - limit)],
+) if {
+	override_usable
+	not covers_limit
+}
+
+default cap_note := ""
+
+cap_note := production_note if {
 	override_active
-	env in {"development", "staging"}
-	has_estimate
-	not override_effective
+	not env in {"development", "staging"}
+}
+
+cap_note := sprintf(
+	"; the admin override covers an excess of at most %s USD over the cap and this stack exceeds it by %s USD",
+	[money(max_delta), money(estimate - cap)],
+) if {
+	override_usable
+	not covers_cap
 }
 
 default missing_override_note := ""
@@ -180,7 +214,7 @@ missing_override_note := "; an admin override cannot waive a missing estimate" i
 
 blocked if {
 	hard
-	not override_effective
+	not covers_limit
 }
 
 # --- Exceeding the budget ----------------------------------------------------------------
@@ -192,7 +226,7 @@ deny contains m if {
 		"iacp.budget.exceeded", address,
 		sprintf(
 			"estimated cost %s USD/month would raise %s's spend for %s to %s USD, over its %s USD budget (%s used already)%s",
-			[money(estimate), team, month, money(projected), money(limit), money(used), override_ignored_note],
+			[money(estimate), team, month, money(projected), money(limit), money(used), limit_note],
 		),
 		sprintf(
 			"reduce the stack's cost or destroy unused stacks, or ask a team admin to raise the budget (PUT /v1/teams/%s/budgets/%s) or, outside production, to grant an override that covers it",
@@ -216,9 +250,9 @@ warn contains m if {
 
 waived_because := "the budget is advisory (hard_block is off)" if not hard
 
-waived_because := sprintf("an admin override granted by %s (up to %s USD/month) is in effect", [f.ctx.budget_override.granted_by, money(f.ctx.budget_override.max_delta_usd)]) if {
+waived_because := sprintf("an admin override granted by %s (covering an overrun of up to %s USD) is in effect", [f.ctx.budget_override.granted_by, money(max_delta)]) if {
 	hard
-	override_effective
+	covers_limit
 }
 
 # --- The single-change cap ----------------------------------------------------------------
@@ -231,12 +265,12 @@ over_cap if {
 
 deny contains m if {
 	over_cap
-	not override_effective
+	not covers_cap
 	m := f.msg(
 		"iacp.budget.single_change_cap", address,
 		sprintf(
 			"estimated cost %s USD/month is above the %s USD single-change cap of %s's budget, whatever its headroom%s",
-			[money(estimate), money(cap), team, override_ignored_note],
+			[money(estimate), money(cap), team, cap_note],
 		),
 		sprintf(
 			"reduce the stack's cost, or ask a team admin to raise single_change_cap_usd (PUT /v1/teams/%s/budgets/%s) or, outside production, to grant an override that covers it",
@@ -247,12 +281,12 @@ deny contains m if {
 
 warn contains m if {
 	over_cap
-	override_effective
+	covers_cap
 	m := f.msg(
 		"iacp.budget.single_change_cap_waived", address,
 		sprintf(
-			"estimated cost %s USD/month is above the %s USD single-change cap of %s's budget; not blocked because an admin override granted by %s (up to %s USD/month) is in effect",
-			[money(estimate), money(cap), team, f.ctx.budget_override.granted_by, money(f.ctx.budget_override.max_delta_usd)],
+			"estimated cost %s USD/month is above the %s USD single-change cap of %s's budget; not blocked because an admin override granted by %s (covering an excess of up to %s USD) is in effect",
+			[money(estimate), money(cap), team, f.ctx.budget_override.granted_by, money(max_delta)],
 		),
 		"review the spend with the team admin",
 	)
@@ -292,8 +326,8 @@ no_estimate_reason := "no cost estimate is available (Infracost did not run or r
 	object.get(f.ctx, "estimated_monthly_cost_usd", null) == null
 }
 
-# An override needs an estimate to be bounded, so it never makes a missing one acceptable: blocked is
-# just hard here.
+# An override needs an estimate to be bounded, so it never makes a missing one acceptable: covers_limit
+# is false without one, so blocked is just hard here.
 no_estimate_denied if {
 	missing
 	env != "development"

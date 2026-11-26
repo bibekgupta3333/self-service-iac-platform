@@ -130,7 +130,7 @@ budget_case() {
 }
 
 override='{granted_by: "ada", reason: "launch week capacity", expires_at: "2200-01-01T00:00:00Z", max_delta_usd: 1000}'
-small_override='{granted_by: "ada", reason: "launch week capacity", expires_at: "2200-01-01T00:00:00Z", max_delta_usd: 500}'
+small_override='{granted_by: "ada", reason: "launch week capacity", expires_at: "2200-01-01T00:00:00Z", max_delta_usd: 50}'
 cap_override='{granted_by: "ada", reason: "launch week capacity", expires_at: "2200-01-01T00:00:00Z", max_delta_usd: 6000}'
 expired='{granted_by: "ada", reason: "launch week capacity", expires_at: "2026-11-01T00:00:00Z", max_delta_usd: 1000}'
 
@@ -140,7 +140,7 @@ budget_case "100 is near the limit (80 percent)" '.estimated_monthly_cost_usd = 
 budget_case "50 is comfortably within it" '.estimated_monthly_cost_usd = 50' - -
 budget_case "a soft budget only warns" '.budget.hard_block = false' - iacp.budget.exceeded_waived
 budget_case "an override waives it in staging" ".budget_override = $override" - iacp.budget.exceeded_waived
-budget_case "an override smaller than the estimate does not" ".budget_override = $small_override" iacp.budget.exceeded -
+budget_case "an override smaller than the overrun does not" ".budget_override = $small_override" iacp.budget.exceeded -
 budget_case "an expired override does not" ".budget_override = $expired" iacp.budget.exceeded -
 budget_case "production ignores the override" ".environment = \"production\" | .budget_override = $override" iacp.budget.exceeded -
 budget_case "no estimate is denied in staging" 'del(.estimated_monthly_cost_usd)' iacp.budget.no_estimate -

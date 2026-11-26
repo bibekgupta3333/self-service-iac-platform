@@ -116,7 +116,7 @@ test_override_waives_the_hard_limit_outside_production if {
 		ms := budget.warn with input as create_plan with data.iacp.context as ctx
 		ids(ms) == {"[iacp.budget.exceeded_waived]"}
 		some m in ms
-		contains(m, "an admin override granted by ada (up to 1000.00 USD/month) is in effect")
+		contains(m, "an admin override granted by ada (covering an overrun of up to 1000.00 USD) is in effect")
 	}
 }
 
@@ -280,13 +280,27 @@ test_budget_denies_reach_the_main_namespace if {
 
 # --- the override is bounded --------------------------------------------------------------------
 
-test_override_covers_an_estimate_up_to_its_bound if {
-	# the estimate is 600: a bound of exactly 600 covers it, 599.99 does not
-	count(budget.deny) == 0 with input as create_plan with data.iacp.context as with_bounded_override(with_estimate(base("staging"), 600), future, 600)
-	ms := budget.deny with input as create_plan with data.iacp.context as with_bounded_override(with_estimate(base("staging"), 600), future, 599.99)
+test_override_covers_an_overrun_up_to_its_bound if {
+	# used 1500 + estimate 600 overruns the 2000 limit by 100: a bound of exactly 100 covers it, 99.99 does not
+	count(budget.deny) == 0 with input as create_plan with data.iacp.context as with_bounded_override(with_estimate(base("staging"), 600), future, 100)
+	ms := budget.deny with input as create_plan with data.iacp.context as with_bounded_override(with_estimate(base("staging"), 600), future, 99.99)
 	ids(ms) == {"[iacp.budget.exceeded]"}
 	some m in ms
-	contains(m, "the admin override covers at most 599.99 USD/month")
+	contains(m, "the admin override covers an overrun of at most 99.99 USD and this change overruns the limit by 100.00 USD")
+}
+
+test_a_large_estimate_with_a_small_overrun_is_covered if {
+	# the bound is on the overrun, not on the stack: a 600 estimate under a 100 bound passes when it only overruns by 100
+	ctx := with_bounded_override(with_estimate(with_budget(base("staging"), {"spent_usd": 1500}), 600), future, 100)
+	count(budget.deny) == 0 with input as create_plan with data.iacp.context as ctx
+}
+
+test_several_stacks_under_one_override_cannot_overrun_by_more_than_the_bound if {
+	# each stack is small, but the committed cost of the others keeps pushing the total over: the overrun, not the
+	# estimate, is compared with the bound
+	ctx := with_bounded_override(with_estimate(base("staging"), 700), future, 400)
+	count(budget.deny) == 0 with input as create_plan with data.iacp.context as object.union(ctx, {"current_committed_usd": 1700})
+	ids(budget.deny) == {"[iacp.budget.exceeded]"} with input as create_plan with data.iacp.context as object.union(ctx, {"current_committed_usd": 1701})
 }
 
 test_override_without_a_bound_covers_nothing if {
@@ -326,7 +340,7 @@ test_splitting_spend_over_stacks_does_not_evade_the_limit if {
 
 # --- the single-change cap --------------------------------------------------------------------------
 
-big := with_budget(base("staging"), {"limit_usd": 100000, "spent_usd": 0})
+big := with_budget(base("staging"), {"limit_usd": 100000, "spent_usd": 0, "single_change_cap_usd": 5000})
 
 test_a_stack_above_the_cap_is_denied_whatever_the_headroom if {
 	ms := budget.deny with input as create_plan with data.iacp.context as with_estimate(big, 5000.01)
@@ -344,8 +358,15 @@ test_the_cap_is_configurable_per_budget if {
 	# a cap of zero denies any cost
 	ids(budget.deny) == {"[iacp.budget.single_change_cap]"} with input as create_plan with data.iacp.context as with_estimate(with_budget(big, {"single_change_cap_usd": 0}), 0.01)
 
-	# an unreadable cap falls back to the default
-	ids(budget.deny) == {"[iacp.budget.single_change_cap]"} with input as create_plan with data.iacp.context as with_estimate(with_budget(big, {"single_change_cap_usd": "lots"}), 6000)
+	# an unreadable cap is no cap (there is no default: opt-in per budget)
+	count(budget.deny) == 0 with input as create_plan with data.iacp.context as with_estimate(with_budget(big, {"single_change_cap_usd": "lots"}), 60000)
+}
+
+test_there_is_no_default_cap if {
+	no_cap := object.union(object.remove(base("staging"), ["budget"]), {"budget": {"limit_usd": 100000, "spent_usd": 0, "hard_block": true}})
+	count(budget.deny) == 0 with input as create_plan with data.iacp.context as with_estimate(no_cap, 60000)
+	null_cap := with_budget(base("staging"), {"limit_usd": 100000, "spent_usd": 0, "single_change_cap_usd": null})
+	count(budget.deny) == 0 with input as create_plan with data.iacp.context as with_estimate(null_cap, 60000)
 }
 
 test_the_cap_applies_to_soft_budgets_too if {
@@ -354,17 +375,20 @@ test_the_cap_applies_to_soft_budgets_too if {
 }
 
 test_an_override_covering_the_estimate_waives_the_cap_outside_production if {
-	ctx := with_bounded_override(with_estimate(big, 6000), future, 6000)
+	ctx := with_bounded_override(with_estimate(big, 6000), future, 1000)
 	count(budget.deny) == 0 with input as create_plan with data.iacp.context as ctx
 	ids(budget.warn) == {"[iacp.budget.single_change_cap_waived]"} with input as create_plan with data.iacp.context as ctx
 
-	# an override too small for the stack does not
-	small := with_bounded_override(with_estimate(big, 6000), future, 5500)
-	ids(budget.deny) == {"[iacp.budget.single_change_cap]"} with input as create_plan with data.iacp.context as small
+	# the stack is 1000 over the cap: an override that covers 999.99 does not
+	small := with_bounded_override(with_estimate(big, 6000), future, 999.99)
+	ms := budget.deny with input as create_plan with data.iacp.context as small
+	ids(ms) == {"[iacp.budget.single_change_cap]"}
+	some m in ms
+	contains(m, "covers an excess of at most 999.99 USD over the cap and this stack exceeds it by 1000.00 USD")
 }
 
 test_no_override_waives_the_cap_in_production if {
-	prod := with_budget(base("production"), {"limit_usd": 100000, "spent_usd": 0})
+	prod := with_budget(base("production"), {"limit_usd": 100000, "spent_usd": 0, "single_change_cap_usd": 5000})
 	ms := budget.deny with input as create_plan with data.iacp.context as with_override(with_estimate(prod, 6000), future)
 	ids(ms) == {"[iacp.budget.single_change_cap]"}
 	some m in ms
