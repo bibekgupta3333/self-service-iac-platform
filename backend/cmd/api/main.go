@@ -77,7 +77,9 @@ func run() error {
 	lockSvc := locks.NewService(locks.NewPostgresRepository(pool, auditWriter), clock, locks.DefaultLease)
 	requestSvc := requests.NewService(requestRepo, catalogSvc, requestRepo, lockSvc, clock, ids)
 
-	internalAuth, err := newMachineAuthenticator(cfg, clock, newReplayStore(cfg.OIDC, pool, clock))
+	replayStore := newReplayStore(cfg.OIDC, pool, clock)
+	startReplaySweeper(ctx, replayStore, cfg.OIDC.Enabled(), logger)
+	internalAuth, err := newMachineAuthenticator(cfg, clock, replayStore)
 	if err != nil {
 		return err
 	}
@@ -209,6 +211,14 @@ func newReplayStore(o config.OIDCConfig, pool *pgxpool.Pool, clock platform.Cloc
 		return auth.NewMemoryReplayCache(auth.DefaultReplayCapacity, clock)
 	}
 	return auth.NewPostgresReplayStore(pool, clock)
+}
+
+// startReplaySweeper purges expired oidc_jti rows in the background when the shared
+// store is in use; claims only remove an expired row for their own jti.
+func startReplaySweeper(ctx context.Context, store auth.ReplayStore, enabled bool, logger *slog.Logger) {
+	if pg, ok := store.(*auth.PostgresReplayStore); ok && enabled {
+		go auth.RunReplaySweeper(ctx, pg, 5*time.Minute, logger)
+	}
 }
 
 // serve runs srv until ctx is cancelled, then drains in-flight requests.

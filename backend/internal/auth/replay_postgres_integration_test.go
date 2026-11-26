@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -27,18 +29,73 @@ func TestPostgresReplayStore(t *testing.T) {
 		t.Fatalf("replay: err = %v", err)
 	}
 
-	// After expiry the row is purged and the id can be claimed again.
+	// Claiming another id leaves unrelated expired rows to the sweeper (no global purge
+	// on the hot path); the expired id itself can be claimed again.
 	later := auth.NewPostgresReplayStore(pool, platform.FixedClock{T: t0.Add(6 * time.Minute)})
 	if err := later.Claim(ctx, "jti-b", t0.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	var n int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM oidc_jti WHERE jti = 'jti-a'`).Scan(&n); err != nil || n != 0 {
-		t.Fatalf("expired row not purged: n=%d err=%v", n, err)
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM oidc_jti WHERE jti = 'jti-a'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("an unrelated claim must not purge jti-a: n=%d err=%v", n, err)
 	}
 	if err := later.Claim(ctx, "jti-a", t0.Add(time.Hour)); err != nil {
 		t.Fatalf("expired id must be claimable again: %v", err)
 	}
+}
+
+func TestPostgresReplayStorePurgeIsBounded(t *testing.T) {
+	pool := dbtest.NewDatabase(t)
+	ctx := context.Background()
+	t0 := time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC)
+	s := auth.NewPostgresReplayStore(pool, platform.FixedClock{T: t0})
+	for i := range 5 {
+		if err := s.Claim(ctx, fmt.Sprintf("old-%d", i), t0.Add(time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Claim(ctx, "live", t0.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	sweeper := auth.NewPostgresReplayStore(pool, platform.FixedClock{T: t0.Add(2 * time.Minute)})
+	for _, want := range []int64{2, 2, 1, 0} {
+		got, err := sweeper.PurgeExpired(ctx, 2)
+		if err != nil || got != want {
+			t.Fatalf("PurgeExpired = %d, %v; want %d", got, err, want)
+		}
+	}
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM oidc_jti`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("live row must survive: n=%d err=%v", n, err)
+	}
+}
+
+func TestRunReplaySweeperStopsWithContext(t *testing.T) {
+	pool := dbtest.NewDatabase(t)
+	t0 := time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC)
+	s := auth.NewPostgresReplayStore(pool, platform.FixedClock{T: t0})
+	if err := s.Claim(context.Background(), "old", t0.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		auth.RunReplaySweeper(ctx, s, 10*time.Millisecond, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		close(done)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var n int
+		if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM oidc_jti`).Scan(&n); err == nil && n == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("sweeper did not purge the expired row")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
 }
 
 func TestPostgresReplayStoreConcurrentReplicas(t *testing.T) {
