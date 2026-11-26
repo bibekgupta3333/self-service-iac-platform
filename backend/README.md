@@ -346,7 +346,7 @@ environment-specific row wins over a team-wide one; `null` when no budget is set
 - **Services** (`ttl.Service`, ports `Repository`/`Store`, PostgreSQL adapter): `Extend` (role check in
   the stack's team, cap, audit `ttl.extended`, clears the warning), `Due`, `Warn` (audit `ttl.warned`,
   `ttl_warned_at`, `ttl.warning` outbox job when comments are enabled), `Teardown`.
-- **Backoff** (`ttl.Policy.Backoff`, pure): `OpenTTLDestroy` and the due list skip a stack whose last TTL destroy ended unsuccessfully within the backoff window (`409 ttl_backoff`) and block it after the attempt limit (`409 ttl_blocked`, audit `ttl.blocked` once per expiry).
+- **Backoff** (`ttl.Policy.Backoff`, pure): `OpenTTLDestroy` and the due list skip a stack whose last TTL destroy ended unsuccessfully within the backoff window (`409 ttl_backoff`) and block it after the attempt limit (`409 ttl_blocked`, audit `ttl.blocked` once per expiry). Blocked stacks are returned in a separate `blocked` list by `GET /v1/internal/ttl/due`, never among the teardowns, and candidates are paged (200 per page, 5000 scanned at most) before the filter, so neither the tool's per-run cap nor the row limit can be used up by stacks that cannot be torn down.
 - **Teardown** calls `requests.Service.OpenTTLDestroy` as the `iacp-bot` system user. In one transaction,
   under the stack row lock, it re-checks ephemeral, not production and past `expires_at`, skips a stack with a
   destroy already open, refuses a busy stack, then records the destroy request (justification `ttl expired`,
