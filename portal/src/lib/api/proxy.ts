@@ -207,7 +207,9 @@ export function decideProxy(apiBase: string, req: ProxyRequestInfo): ProxyDecisi
   }
   // With a session cookie the backend also demands a valid per-session token; requiring its
   // presence here rejects cookie-bearing forged posts before they reach the API.
-  if (req.hasCookie && !req.csrfToken) {
+  // Logout is the exception: a browser whose session expired has no token to send and must
+  // still clear its cookie. The backend demands the token whenever the session is live.
+  if (req.hasCookie && !req.csrfToken && req.segments.join("/") !== "v1/auth/logout") {
     return reject(403, "csrf_token_missing", "the X-CSRF-Token header is required on requests with a session");
   }
   if (req.contentLength !== null) {

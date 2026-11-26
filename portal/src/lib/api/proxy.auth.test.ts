@@ -83,6 +83,13 @@ describe("CSRF with a session cookie", () => {
     expect(decideProxy(base, post({ hasCookie: true, origin: "https://portal.test", csrfToken: "t" })).kind).toBe("forward");
   });
 
+  it("lets logout through without a token so an expired session can clear its cookie", () => {
+    const logout = post({ segments: ["v1", "auth", "logout"], hasCookie: true, secFetchSite: "same-origin", csrfToken: null });
+    expect(decideProxy(base, logout)).toMatchObject({ kind: "forward", authFlow: true });
+    // ...but never cross-site.
+    expect(decideProxy(base, { ...logout, secFetchSite: "cross-site" })).toMatchObject({ code: "cross_site_request" });
+  });
+
   it("keeps rejecting cross-site posts first, token or not", () => {
     expect(decideProxy(base, post({ hasCookie: true, csrfToken: "t", secFetchSite: "cross-site" }))).toMatchObject({
       code: "cross_site_request",
