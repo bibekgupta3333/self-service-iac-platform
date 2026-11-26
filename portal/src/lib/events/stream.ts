@@ -7,7 +7,7 @@
 
 import { isApiError } from "@/lib/api/errors";
 
-import { parseSse } from "./sse";
+import { SseParser } from "./sse";
 import { decodeFrame, type StreamEvent } from "./status";
 
 export type StreamState =
@@ -163,7 +163,7 @@ export class StatusStream {
   private async read(body: ReadableStream<Uint8Array>): Promise<"ended" | "delivered" | "empty"> {
     const reader = body.getReader();
     const decoder = new TextDecoder();
-    let buffer = "";
+    const parser = new SseParser();
     let delivered = false;
     // close() must release a read that is waiting for data, whether or not the transport
     // reacts to the abort signal itself.
@@ -173,8 +173,7 @@ export class StatusStream {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
-        const parsed = parseSse(buffer + decoder.decode(value, { stream: true }));
-        buffer = parsed.rest;
+        const parsed = parser.push(decoder.decode(value, { stream: true }));
         for (const frame of parsed.frames) {
           if (frame.id !== undefined) this.lastEventId = frame.id;
           const event = decodeFrame(frame);
