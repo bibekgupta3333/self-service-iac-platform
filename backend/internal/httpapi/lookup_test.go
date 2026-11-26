@@ -24,7 +24,7 @@ func (f *fakeLookup) ApplyTargetByPath(_ context.Context, path, head string) (re
 }
 
 func lookupRouter(svc RequestLookupService) http.Handler {
-	return NewRouter(Deps{Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DevAuthenticator{Principal: devPrincipal},
+	return NewRouter(Deps{Policies: testPolicies(), Roles: noRoles{}, Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DevAuthenticator{Principal: devPrincipal},
 		Internal:         AnyAuthenticator{NewOIDCAuthenticator(fakeTokenVerifier{}), NewTokenAuthenticator(testInternalToken, releaseBot)},
 		Ready:            okPinger{},
 		InternalHandlers: []RouteRegistrar{NewRequestLookupHandler(svc)},

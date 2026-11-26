@@ -35,6 +35,7 @@ type memState struct {
 	status   map[uuid.UUID]StackStatus // stack status; a stack not listed is provisioning
 	// environmentOf overrides the environment name of a stack (default development).
 	environmentOf map[uuid.UUID]string
+	applied       []StackApplied // stack writes of apply reports, in order
 }
 
 type memKey struct {
@@ -93,7 +94,7 @@ func (s memState) clone() memState {
 		status[k] = v
 	}
 	return memState{keys: keys, stacks: slices.Clone(s.stacks), requests: slices.Clone(s.requests), events: slices.Clone(s.events),
-		jobs: slices.Clone(s.jobs), status: status, environmentOf: cloneStrMap(s.environmentOf)}
+		jobs: slices.Clone(s.jobs), status: status, applied: slices.Clone(s.applied), environmentOf: cloneStrMap(s.environmentOf)}
 }
 
 func (m *memRepo) InTx(_ context.Context, fn func(Store) error) error {
@@ -306,6 +307,15 @@ func (m *memStore) LockRequest(ctx context.Context, id uuid.UUID) (*Request, err
 }
 
 func (m *memStore) UpdateRequest(_ context.Context, r *Request, _ Status) error { return nil }
+
+func (m *memStore) UpdateStackApplied(_ context.Context, w StackApplied) error {
+	if cur, ok := m.s.status[w.ID]; ok && cur != w.From {
+		return apperr.Conflict("concurrent_update", "stack moved")
+	}
+	m.s.status[w.ID] = w.To
+	m.s.applied = append(m.s.applied, w)
+	return nil
+}
 
 func (m *memStore) Enqueue(_ context.Context, msg outbox.Message) (bool, error) {
 	if slices.ContainsFunc(m.s.jobs, func(j outbox.Message) bool { return msg.DedupeKey != "" && j.DedupeKey == msg.DedupeKey }) {

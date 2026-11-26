@@ -82,7 +82,7 @@ func (m *memStore) Request(_ context.Context, id uuid.UUID) (RequestInfo, error)
 		return RequestInfo{}, apperr.NotFound("request %s not found", id)
 	}
 	info := r.info
-	info.QueuedBehind = r.queuedBehind
+	info.QueuedBehind, info.FencingToken = r.queuedBehind, r.token
 	return info, nil
 }
 

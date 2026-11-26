@@ -107,3 +107,32 @@ func (s *pgStore) TTLBlockedSince(ctx context.Context, stackID uuid.UUID, since 
 		AND subject_type = 'stack' AND subject_id = $1 AND occurred_at >= $2)`, stackID.String(), since).Scan(&found)
 	return found, err
 }
+
+// UpdateStackApplied implements Store. The stacks row is locked by the caller, so the
+// status guard only catches a caller that skipped the lock.
+func (s *pgStore) UpdateStackApplied(ctx context.Context, w StackApplied) error {
+	var outputs, lastReq any
+	if w.Outputs != nil {
+		outputs = []byte(w.Outputs)
+	}
+	if w.Applied {
+		lastReq = w.RequestID
+	}
+	tag, err := s.tx.Exec(ctx, `UPDATE stacks SET
+			status = $3::stack_status,
+			health = coalesce(nullif($4, ''), health),
+			outputs = coalesce($5::jsonb, outputs),
+			last_applied_sha = coalesce(nullif($6, ''), last_applied_sha),
+			last_applied_request_id = coalesce($7::uuid, last_applied_request_id),
+			destroyed_at = CASE WHEN $3::text = 'destroyed' THEN $8 ELSE destroyed_at END,
+			updated_at = $8
+		WHERE id = $1 AND status = $2::stack_status`,
+		w.ID, string(w.From), string(w.To), string(w.Health), outputs, w.CommitSHA, lastReq, w.At)
+	if err != nil {
+		return fmt.Errorf("update stack: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return apperr.Conflict("concurrent_update", fmt.Sprintf("stack %s is no longer %s", w.ID, w.From))
+	}
+	return nil
+}

@@ -25,7 +25,7 @@ func (idRoutes) Routes(r chi.Router) {
 const metricsToken = "metrics-token-0123456789abcdef-0123"
 
 func metricsRouter(m *observability.Metrics) http.Handler {
-	return NewRouter(Deps{
+	return NewRouter(Deps{Policies: testPolicies(), Roles: noRoles{},
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DevAuthenticator{Principal: devPrincipal},
 		Ready: okPinger{}, Catalog: NewCatalogHandler(&fakeCatalog{versions: []catalog.ModuleVersion{sqsVersion()}}),
 		Public:  []RouteRegistrar{idRoutes{}},
@@ -167,7 +167,7 @@ func TestMetricsTokenDisabledWhenEmpty(t *testing.T) {
 }
 
 func TestNoMetricsRouteWithoutMetrics(t *testing.T) {
-	h := NewRouter(Deps{Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	h := NewRouter(Deps{Policies: testPolicies(), Roles: noRoles{}, Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		Auth: DevAuthenticator{Principal: devPrincipal}, Ready: okPinger{}})
 	req := httptest.NewRequest("GET", "/metrics", nil)
 	req.RemoteAddr = "127.0.0.1:1"
