@@ -7,6 +7,10 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 ## [Unreleased]
 
 ### Added
+- Platform observability (WBS 7.7, partial):
+  - Stack `environments/development/platform/observability/`, rendered by the generator from `modules/monitoring` pinned to `modules/monitoring/v1.0.0` (`4537d67`): a CloudWatch dashboard (request lead time, failure rate, requests finished, apply duration, lock queue depth, stacks by status, queue backlog, API from `/metrics`), a KMS-encrypted SNS topic, and six alarms on `iacp-events`, `iacp-events-dlq` and `iacp-github-outbound`. It passes the pr-validate gate, the apply/destroy round trip and the post-apply smoke test on LocalStack.
+  - `docs/09-observability.md`: what each panel and alarm means, thresholds and why, what to do when each fires, the Prometheus to CloudWatch naming rule, and the gaps (no exporter; only HTTP and DB pool metrics exist in the backend; `monitoring` v1.0.0 cannot alarm on custom metrics, so the failure-rate and stuck-lock alarms are specified but not deployed).
+  - docs/02 §8, docs/08 and WBS 7.7 aligned (metric namespace `IACP/Platform`, the added queue alarms).
 - Portal lifecycle: live request status, stacks, update and destroy (WBS 7.4, 7.5, 7.6):
   - the request page follows `GET /v1/requests/{id}/events` through the existing proxy path with `StatusStream`, a fetch-based reader (so a 401, 404 or 429 `too_many_streams` is seen as such, which `EventSource` hides): `Last-Event-ID` resume (the first connection sends `0` to replay the whole history), exponential backoff with equal jitter, a stop on `end`, cleanup on unmount, and a polling fallback when the stream is not an event stream or keeps failing. Pure SSE parser and events-to-timeline reducer, unit tested; the history list, pull request link and a polite live region come from them. The 5-second `AutoRefresh` is removed.
   - `/stacks` (filters team, environment and status in a plain GET form; keyset paging with the API cursor) and `/stacks/{id}` (status, health wording, outputs exactly as returned, latest request with link, details), a Stacks nav entry and a home card.
@@ -226,6 +230,7 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 - `security-events: write` is granted only to the `code-scanning` upload jobs, which run no PR code; fork and Dependabot PRs skip the upload. Stack SARIF paths always stay inside the repository, and a run's own `automationDetails` is dropped so a PR cannot pick its category. `INFRACOST_API_KEY` is passed only to the `cost` job, which runs no PR code.
 
 ### Fixed
+- The post-apply smoke test no longer fails stacks with CloudWatch alarms on LocalStack, which drops the tags passed to `PutMetricAlarm`: `aws_cloudwatch_metric_alarm` is left out of the tag checks (`EMULATOR_UNTAGGED`) and named in the report. For the same reason the pr-validate apply round trip checks the re-plan with `tools.stack_pipeline converged` instead of `-detailed-exitcode`: it still fails on any leftover change except a tag-only update of an alarm.
 - Portal request form: focus moved to the error summary in a microtask that could run before the first error's summary existed, so the first failed submit left focus on the button. It now moves in an effect.
 - The catalog index accepted the category `data`, which `module.yaml` cannot carry, and rejected `database` and `cache`, which it can. It now accepts exactly the categories in `modules/_shared/module.schema.json`, so the `dynamodb` manifest indexes.
 

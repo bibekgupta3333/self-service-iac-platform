@@ -112,7 +112,7 @@ Durations assume one engineer; adjust linearly.
 | Next.js portal: GitHub login, catalog list + module detail (README, versions, inputs), dynamic form from JSON Schema (typed renderer, [ADR-0011](adr/0011-portal-form-renderer.md)), request detail with status timeline, plan summary, links to PR and run; stack list per team |
 | `destroy` request: `desired_state: absent` → `plan -destroy` → apply → cleanup PR → stack `destroyed` |
 | Infracost in PR comment (informational only in MVP) |
-| Basic observability: structured logs, `/metrics`, CloudWatch dashboard for lead time and failure rate |
+| Basic observability: structured logs, `/metrics`, CloudWatch dashboard for lead time and failure rate (the `development/platform/observability` stack and its runbook, [09-observability.md](09-observability.md); the lead-time and failure-rate series need the backend metrics listed there) |
 
 **Acceptance:**
 - A developer who has never used Terraform can create an SQS queue with DLQ and a Lambda consuming it (same stack) from the portal in under 5 minutes of interaction.
