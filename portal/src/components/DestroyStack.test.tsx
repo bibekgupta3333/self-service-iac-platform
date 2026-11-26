@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -156,6 +156,58 @@ describe("DestroyStack", () => {
     await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Destroy" })).toHaveFocus();
+  });
+
+  it("clears the typed name and justification when cancelled, so reopening starts empty", async () => {
+    const { user } = setup(ok);
+    let dialog = await openDialog(user);
+    await user.type(within(dialog).getByLabelText(/Type orders to confirm/), "orders");
+    await user.type(within(dialog).getByLabelText(/^Justification/), "retired");
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    dialog = await openDialog(user);
+    expect(within(dialog).getByLabelText(/Type orders to confirm/)).toHaveValue("");
+    expect(within(dialog).getByLabelText(/^Justification/)).toHaveValue("");
+    expect(within(dialog).getByRole("button", { name: "Open destroy request" })).toBeDisabled();
+  });
+
+  it("clears the fields when the dialog closes with Escape", async () => {
+    const { user } = setup(ok);
+    const dialog = await openDialog(user);
+    await user.type(within(dialog).getByLabelText(/Type orders to confirm/), "orders");
+    // A browser fires `cancel`, then closes the dialog and fires `close`.
+    const cancel = new Event("cancel", { cancelable: true });
+    fireEvent(dialog, cancel);
+    expect(cancel.defaultPrevented).toBe(false);
+    fireEvent(dialog, new Event("close"));
+    expect(within(dialog).getByLabelText(/Type orders to confirm/)).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Destroy" })).toHaveFocus();
+  });
+
+  it("sends one request for a double submit and stays open on Escape while it is in flight", async () => {
+    let finish: (r: CreateRequestResult) => void = () => undefined;
+    const { client, onCreated, user } = setup(() => new Promise<CreateRequestResult>((r) => (finish = r)));
+    const dialog = await openDialog(user);
+    await user.type(within(dialog).getByLabelText(/Type orders to confirm/), "orders");
+    await user.type(within(dialog).getByLabelText(/^Justification/), "retired");
+    const form = dialog.querySelector("form") as HTMLFormElement;
+    act(() => {
+      fireEvent.submit(form);
+      fireEvent.submit(form);
+    });
+    expect(client.createRequest).toHaveBeenCalledTimes(1);
+    const cancel = new Event("cancel", { cancelable: true });
+    fireEvent(dialog, cancel);
+    expect(cancel.defaultPrevented).toBe(true);
+    expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeDisabled();
+    // A browser can still close it on a second Escape; the fields are kept while in flight.
+    fireEvent(dialog, new Event("close"));
+    expect(within(dialog).getByLabelText(/Type orders to confirm/)).toHaveValue("orders");
+    expect(within(dialog).getByLabelText(/^Justification/)).toHaveValue("retired");
+    await act(async () => finish({ request: created, replayed: false }));
+    expect(onCreated).toHaveBeenCalledTimes(1);
+    const after = new Event("cancel", { cancelable: true });
+    fireEvent(dialog, after);
+    expect(after.defaultPrevented).toBe(false);
   });
 
   it("is aria-disabled with the reason when the action is not available, and never opens", async () => {

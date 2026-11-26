@@ -71,7 +71,7 @@ describe("RequestForm in update mode", () => {
 
   it("tells the user when the API gave no spec and the form starts from defaults", () => {
     setup(ctx({ initialInputs: null, resources: [{ ...queue, inputs: {} }] }), ok);
-    expect(screen.getByRole("note")).toHaveTextContent(/did not return this stack's current settings/);
+    expect(screen.getByRole("note")).toHaveTextContent(/the resources it really contains are unknown/);
     expect(screen.getByLabelText(/^visibility_timeout_seconds/)).toHaveValue(30);
   });
 
