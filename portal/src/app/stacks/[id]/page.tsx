@@ -6,6 +6,7 @@ import type { ReactNode } from "react";
 import { Badge } from "@/components/Badge";
 import { ErrorPanel } from "@/components/ErrorPanel";
 import { StatusBadge } from "@/components/StatusTimeline";
+import { DestroyStack } from "@/components/DestroyStack";
 import { StackActionLink } from "@/components/StackActionLink";
 import { serverApi, serverAuth } from "@/lib/api/server";
 import { attempt, isNotFound } from "@/lib/api/result";
@@ -58,6 +59,10 @@ export default async function StackPage({ params }: Props) {
             label="Update"
             state={actions.update}
             describedBy="update-reason"
+          />
+          <DestroyStack
+            stack={{ id: s.id, name: s.name, path: s.path, team: s.team, environment: s.environment }}
+            state={actions.destroy}
           />
         </div>
         {!actions.update.enabled && (

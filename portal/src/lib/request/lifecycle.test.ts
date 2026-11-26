@@ -8,6 +8,7 @@ import {
   carriesCurrentSpec,
   currentSpecRequest,
   explainLifecycleError,
+  mapDestroyFieldErrors,
   nameMatches,
   removedResourceNames,
   validateDestroy,
@@ -70,6 +71,22 @@ describe("destroy confirmation", () => {
     expect(validateDestroy("orders", { confirmName: "orders", justification: "   " }).justification).toBe("A justification is required.");
     expect(validateDestroy("orders", { confirmName: "order", justification: "x" }).confirmName).toBe("Type orders exactly to confirm.");
     expect(validateDestroy("orders", { confirmName: "orders", justification: "x".repeat(2001) }).justification).toContain("at most 2000");
+  });
+});
+
+describe("mapDestroyFieldErrors", () => {
+  it("attaches the two destroy fields and keeps the rest general", () => {
+    expect(
+      mapDestroyFieldErrors([
+        { pointer: "/confirm_stack_name", code: "mismatch", message: 'must be "orders"' },
+        { pointer: "/justification", code: "required", message: "a destroy request needs a justification" },
+        { pointer: "/stack_id", code: "required", message: "is required" },
+        { pointer: "", code: "x", message: "odd" },
+      ]),
+    ).toEqual({
+      fields: { confirmName: 'must be "orders"', justification: "a destroy request needs a justification" },
+      general: ["/stack_id: is required", "odd"],
+    });
   });
 });
 

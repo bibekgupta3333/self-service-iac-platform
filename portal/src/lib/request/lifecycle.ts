@@ -3,7 +3,7 @@
 // checks, picking the stack's current spec, and plain-language explanations of the API's
 // conflict errors.
 
-import type { ApiError } from "@/lib/api/errors";
+import type { ApiError, FieldError } from "@/lib/api/errors";
 import type {
   DestroyRequestInput,
   RequestStatus,
@@ -61,6 +61,21 @@ export function validateDestroy(stackName: string, f: DestroyFields): DestroyErr
   if (why === "") errors.justification = "A justification is required.";
   else if (f.justification.length > MAX_JUSTIFICATION) errors.justification = `Must be at most ${MAX_JUSTIFICATION} characters.`;
   return errors;
+}
+
+/**
+ * mapDestroyFieldErrors puts the API's field errors for a destroy (pointers /confirm_stack_name
+ * and /justification) next to the matching control; the rest go to a general list. Pure.
+ */
+export function mapDestroyFieldErrors(errors: readonly FieldError[]): { fields: DestroyErrors; general: string[] } {
+  const fields: DestroyErrors = {};
+  const general: string[] = [];
+  for (const e of errors) {
+    if (e.pointer === "/confirm_stack_name") fields.confirmName = e.message;
+    else if (e.pointer === "/justification") fields.justification = e.message;
+    else general.push(e.pointer ? `${e.pointer}: ${e.message}` : e.message);
+  }
+  return { fields, general };
 }
 
 /** nameMatches reports whether the typed text is exactly the stack's name; it enables the button. Pure. */
