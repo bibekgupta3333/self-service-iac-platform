@@ -13,6 +13,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/audit"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/outbox"
 )
 
 // memRepo is an in-memory Repository. InTx works on a copy and commits it on success.
@@ -147,6 +148,8 @@ func (m *memStore) AppendAudit(_ context.Context, e audit.Event) error {
 	m.s.events = append(m.s.events, e)
 	return nil
 }
+
+func (m *memStore) Enqueue(context.Context, outbox.Message) (bool, error) { return true, nil }
 
 type stepClock struct{ t time.Time }
 

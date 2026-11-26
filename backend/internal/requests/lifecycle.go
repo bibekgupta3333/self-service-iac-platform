@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/locks"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/outbox"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
 )
 
 // PublishPayload is the body of a request.publish outbox job.
@@ -24,32 +26,22 @@ type PublishPayload struct {
 // PublishDedupeKey keeps one pending publish job per request. Pure.
 func PublishDedupeKey(id uuid.UUID) string { return "publish:" + id.String() }
 
-// enqueuePublish adds the request.publish job (when publishing is enabled) and audits it.
-func (s *Service) enqueuePublish(ctx context.Context, st Store, id uuid.UUID, shortID string, by identity.Principal, correlationID string) error {
-	if !s.publishing {
-		return nil
-	}
+// PublishMessage is the request.publish outbox job for a request. Pure.
+func PublishMessage(id uuid.UUID, at time.Time) (outbox.Message, error) {
 	payload, err := json.Marshal(PublishPayload{RequestID: id})
 	if err != nil {
-		return fmt.Errorf("encode publish job: %w", err)
+		return outbox.Message{}, fmt.Errorf("encode publish job: %w", err)
 	}
-	queued, err := st.Enqueue(ctx, outbox.Message{Topic: outbox.TopicRequestPublish, AggregateID: &id,
-		DedupeKey: PublishDedupeKey(id), Payload: payload, AvailableAt: s.clock.Now()})
-	if err != nil {
-		return fmt.Errorf("enqueue publish: %w", err)
-	}
-	if !queued {
-		return nil // a publish job for this request is already pending
-	}
-	return s.audit(ctx, st, by, "request.publish_enqueued", id, correlationID, map[string]any{"short_id": shortID})
+	return outbox.Message{Topic: outbox.TopicRequestPublish, AggregateID: &id, DedupeKey: PublishDedupeKey(id),
+		Payload: payload, AvailableAt: at}, nil
 }
 
-// audit appends one request-scoped audit event.
-func (s *Service) audit(ctx context.Context, st Store, by identity.Principal, action string, requestID uuid.UUID,
-	correlationID string, payload map[string]any) error {
+// requestEvent builds a request-scoped audit event. Pure.
+func requestEvent(at time.Time, by identity.Principal, action string, requestID uuid.UUID, correlationID string,
+	payload map[string]any) (audit.Event, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("encode audit payload: %w", err)
+		return audit.Event{}, fmt.Errorf("encode audit payload: %w", err)
 	}
 	actorType, actorID := string(by.Type), by.AuditActorID()
 	if actorType == "" {
@@ -58,9 +50,69 @@ func (s *Service) audit(ctx context.Context, st Store, by identity.Principal, ac
 	if actorID == "" {
 		actorID = "iacp"
 	}
-	if err := st.AppendAudit(ctx, audit.Event{OccurredAt: s.clock.Now(), ActorType: actorType, ActorID: actorID,
-		Action: action, SubjectType: "request", SubjectID: requestID.String(), CorrelationID: correlationID,
-		Payload: body}); err != nil {
+	return audit.Event{OccurredAt: at, ActorType: actorType, ActorID: actorID, Action: action, SubjectType: "request",
+		SubjectID: requestID.String(), CorrelationID: correlationID, Payload: body}, nil
+}
+
+// jobQueue is the transactional surface both requests.Store and locks.Store offer.
+type jobQueue interface {
+	Enqueue(ctx context.Context, m outbox.Message) (bool, error)
+	AppendAudit(ctx context.Context, e audit.Event) error
+}
+
+// schedulePublish enqueues the publish job for a lock holder and audits it; a job already
+// pending for the request is left alone. It is the one path for both new lock holders
+// (Create) and promoted waiters (PublishOnPromote).
+func schedulePublish(ctx context.Context, q jobQueue, at time.Time, id uuid.UUID, shortID string, by identity.Principal,
+	correlationID string) error {
+	m, err := PublishMessage(id, at)
+	if err != nil {
+		return err
+	}
+	queued, err := q.Enqueue(ctx, m)
+	if err != nil {
+		return fmt.Errorf("enqueue publish: %w", err)
+	}
+	if !queued {
+		return nil
+	}
+	e, err := requestEvent(at, by, "request.publish_enqueued", id, correlationID, map[string]any{"short_id": shortID})
+	if err != nil {
+		return err
+	}
+	if err := q.AppendAudit(ctx, e); err != nil {
+		return fmt.Errorf("audit request.publish_enqueued: %w", err)
+	}
+	return nil
+}
+
+// PublishOnPromote is the locks.PromotionHook that schedules publishing for a request
+// promoted to lock holder, whether by release (DELETE …/lock, a terminal transition) or
+// by an expired lease handed to the head of the queue. Register it with
+// locks.Service.OnPromote when a publisher is configured.
+func PublishOnPromote(clock platform.Clock) locks.PromotionHook {
+	return func(ctx context.Context, st locks.Store, req locks.RequestInfo, _ locks.Lock, by identity.Principal, correlationID string) error {
+		return schedulePublish(ctx, st, clock.Now(), req.ID, req.ShortID, by, correlationID)
+	}
+}
+
+// enqueuePublish schedules publishing for a request that just took the lock, when
+// publishing is enabled.
+func (s *Service) enqueuePublish(ctx context.Context, st Store, id uuid.UUID, shortID string, by identity.Principal, correlationID string) error {
+	if !s.publishing {
+		return nil
+	}
+	return schedulePublish(ctx, st, s.clock.Now(), id, shortID, by, correlationID)
+}
+
+// audit appends one request-scoped audit event.
+func (s *Service) audit(ctx context.Context, st Store, by identity.Principal, action string, requestID uuid.UUID,
+	correlationID string, payload map[string]any) error {
+	e, err := requestEvent(s.clock.Now(), by, action, requestID, correlationID, payload)
+	if err != nil {
+		return err
+	}
+	if err := st.AppendAudit(ctx, e); err != nil {
 		return fmt.Errorf("audit %s: %w", action, err)
 	}
 	return nil
@@ -81,8 +133,8 @@ func (s *Service) lockForTransition(ctx context.Context, st Store, id uuid.UUID)
 }
 
 // commit persists a transition of r from status from, audits it as request.transitioned,
-// and when r became terminal releases its stack lock (promoting the next waiter, whose
-// publish job is enqueued).
+// and when r became terminal releases its stack lock (promoting the next waiter; the
+// lock service's promotion hook schedules its publish job).
 func (s *Service) commit(ctx context.Context, st Store, r *Request, from Status, event Event, by identity.Principal,
 	correlationID string, extra map[string]any) error {
 	if err := st.UpdateRequest(ctx, r, from); err != nil {
@@ -98,20 +150,13 @@ func (s *Service) commit(ctx context.Context, st Store, r *Request, from Status,
 	if !r.Status.IsTerminal() || r.FencingToken == nil {
 		return nil
 	}
-	res, err := s.locker.ReleaseIn(ctx, st.Locks(), locks.TokenCommand{StackID: r.Stack.ID, RequestID: r.ID,
+	_, err := s.locker.ReleaseIn(ctx, st.Locks(), locks.TokenCommand{StackID: r.Stack.ID, RequestID: r.ID,
 		FencingToken: *r.FencingToken, By: by, CorrelationID: correlationID})
 	if apperr.IsKind(err, apperr.KindConflict) {
 		return nil // the lease was already released or taken over: nothing of ours to free
 	}
 	if err != nil {
 		return fmt.Errorf("release stack lock: %w", err)
-	}
-	if res.Promoted != nil {
-		promoted, err := st.GetRequest(ctx, res.Promoted.RequestID)
-		if err != nil {
-			return fmt.Errorf("load promoted request: %w", err)
-		}
-		return s.enqueuePublish(ctx, st, promoted.ID, promoted.ShortID, by, correlationID)
 	}
 	return nil
 }

@@ -62,7 +62,8 @@ func newLifecycleFixture(t *testing.T) lifecycleFixture {
 		}
 	}
 	repo := NewPostgresRepository(pool, writer)
-	lockSvc := locks.NewService(locks.NewPostgresRepository(pool, writer), platform.SystemClock{}, 0)
+	lockSvc := locks.NewService(locks.NewPostgresRepository(pool, writer), platform.SystemClock{}, 0).
+		OnPromote(PublishOnPromote(platform.SystemClock{}))
 	svc := NewService(repo, cat, repo, lockSvc, platform.SystemClock{}, platform.RandomIDs{}).EnablePublishing()
 	return lifecycleFixture{pool: pool, svc: svc, repo: repo, locks: lockSvc,
 		user: identity.Principal{UserID: userID, Login: "priya-s", Type: identity.ActorUser}}
@@ -235,6 +236,56 @@ func TestRecordPublishedRequiresTheCurrentLease(t *testing.T) {
 				t.Fatalf("request must stay draft without a PR: %+v", got)
 			}
 		})
+	}
+}
+
+// TestEveryPromotionSchedulesPublishing covers the two promotion paths outside request
+// transitions: DELETE …/lock (Release) and an expired lease handed to the head of the
+// queue by a newcomer's Acquire.
+func TestEveryPromotionSchedulesPublishing(t *testing.T) {
+	f := newLifecycleFixture(t)
+	ctx := context.Background()
+	res, err := f.svc.Create(ctx, f.user, createCmd(validInput(), "promote-paths-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := res.Request
+	newRequest := func(short string) uuid.UUID {
+		var id uuid.UUID
+		if err := f.pool.QueryRow(ctx, `INSERT INTO requests (short_id, stack_id, kind, spec, created_by)
+			VALUES ($1, $2, 'update', '{}', $3) RETURNING id`, short, first.Stack.ID, f.user.UserID).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	second, third := newRequest("req-second002"), newRequest("req-third0003")
+	for _, id := range []uuid.UUID{second, third} {
+		if r, err := f.locks.Acquire(ctx, locks.AcquireCommand{StackID: first.Stack.ID, RequestID: id, By: f.user}); err != nil || r.Outcome != locks.OutcomeQueued {
+			t.Fatalf("queue %s: %+v, %v", id, r, err)
+		}
+	}
+
+	// Path 1: DELETE /v1/internal/stacks/{id}/lock → Release promotes the second request.
+	if _, err := f.locks.Release(ctx, locks.TokenCommand{StackID: first.Stack.ID, RequestID: first.ID,
+		FencingToken: *first.FencingToken, By: f.user}); err != nil {
+		t.Fatal(err)
+	}
+	if f.pendingPublishJobs(t, second) != 1 || f.pendingPublishJobs(t, third) != 0 {
+		t.Fatal("release must schedule publishing for the promoted request only")
+	}
+
+	// Path 2: the second request's lease expires; a newcomer's Acquire hands it to the head
+	// of the queue (the third request) and queues the newcomer.
+	newcomer := newRequest("req-newcomer01")
+	later := platform.FixedClock{T: time.Now().UTC().Add(8 * 24 * time.Hour)}
+	lateLocks := locks.NewService(locks.NewPostgresRepository(f.pool, audit.NewWriter(later, platform.RandomIDs{})), later, 0).
+		OnPromote(PublishOnPromote(later))
+	r, err := lateLocks.Acquire(ctx, locks.AcquireCommand{StackID: first.Stack.ID, RequestID: newcomer, By: f.user})
+	if err != nil || r.Outcome != locks.OutcomeQueued || r.Lock.RequestID != third {
+		t.Fatalf("expired handoff: %+v, %v", r, err)
+	}
+	if f.pendingPublishJobs(t, third) != 1 || f.pendingPublishJobs(t, newcomer) != 0 {
+		t.Fatal("an expired lease handed to the queue head must schedule its publish job")
 	}
 }
 

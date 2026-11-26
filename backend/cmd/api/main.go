@@ -88,6 +88,7 @@ func run() error {
 	}
 	if pub != nil {
 		requestSvc.EnablePublishing()
+		lockSvc.OnPromote(requests.PublishOnPromote(clock))
 		render := generator.New(cfg.ModuleRepoURL, generator.LocalBackend{}, generator.LocalStackProvider{Endpoint: cfg.LocalStackEndpoint})
 		handlers[outbox.TopicRequestPublish] = prflow.NewService(requestSvc, catalogSvc, requestRepo, render, pub,
 			prflow.Options{PortalURL: cfg.PortalURL})
