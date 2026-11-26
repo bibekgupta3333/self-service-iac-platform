@@ -256,8 +256,12 @@ func TestPostgresDriftLifecycle(t *testing.T) {
 	if res, err := svc.Record(ctx, driftBot(907), report(907, drift.ResultDrifted)); err != nil || !res.Suppressed {
 		t.Fatalf("same difference after ignore = %+v, %v", res, err)
 	}
-	if n := countReports(t, owner); n != before {
-		t.Fatalf("reports %d -> %d: an ignored finding must not reopen", before, n)
+	var openN int
+	if err := owner.QueryRow(ctx, `SELECT count(*) FROM drift_reports WHERE status = 'open'`).Scan(&openN); err != nil || openN != 0 {
+		t.Fatalf("open reports = %d, %v: an ignored finding must not reopen", openN, err)
+	}
+	if n := countReports(t, owner); n != before+1 {
+		t.Fatalf("reports %d -> %d: the suppressed scan is stored as one ignored copy", before, n)
 	}
 
 	// A clean scan clears drifted only: it leaves a degraded stack degraded, and an

@@ -78,11 +78,24 @@ type NewReport struct {
 	Report        Report
 	Changed       json.RawMessage
 	At            time.Time
+	// Ignored, when set, stores the report as ignored with the earlier resolution copied:
+	// the same difference as an ignored finding stays accepted (and visible in the history).
+	Ignored *Resolved2
 }
 
-// Resolution is the new state of an open report and its open siblings on the same stack.
+// Resolved2 is the resolution copied onto a suppressed report.
+type Resolved2 struct {
+	By     *uuid.UUID
+	Reason string
+	At     time.Time
+}
+
+// Resolution is the new state of an open report and the open siblings that were locked with
+// it. IDs are exactly the rows to update: a report recorded after the lock stays open for
+// its own decision.
 type Resolution struct {
 	ReportID  uuid.UUID
+	IDs       []uuid.UUID
 	StackID   uuid.UUID
 	Status    Status
 	By        *uuid.UUID // nil when a clean scan closes the reports
@@ -102,16 +115,19 @@ type Store interface {
 	// InsertReport inserts the report; inserted is false when the run already has one.
 	InsertReport(ctx context.Context, r NewReport) (inserted bool, err error)
 	ReportByRun(ctx context.Context, runID uuid.UUID) (Entry, error)
-	// LockReport loads a report FOR UPDATE. It locks the report row only: opening a reconcile
-	// request needs the stack row, which a scan holds while it waits for report rows
-	// (CloseOpen skips locked rows, so the two cannot wait on each other).
-	LockReport(ctx context.Context, id uuid.UUID) (Entry, error)
+	// LockReports locks the target report and the stack's currently open reports FOR UPDATE
+	// in id order, and returns the target and the ids it locked. It never locks the stack
+	// row: opening a reconcile request needs it, and a scan holds it while it waits for
+	// report rows (CloseOpen skips locked ones, so the two cannot wait on each other). The
+	// fixed order makes two resolutions of one stack's reports serialize instead of
+	// deadlocking.
+	LockReports(ctx context.Context, id uuid.UUID) (target Entry, locked []uuid.UUID, err error)
 	// NewerRunExists reports whether the stack already has a drift report from a workflow run
 	// with a higher run id than runID, so a report arriving now is stale.
 	NewerRunExists(ctx context.Context, stackID uuid.UUID, runID int64) (bool, error)
-	// NewestDrifted returns the stack's newest report with result drifted; ok is false when
-	// it has none.
-	NewestDrifted(ctx context.Context, stackID uuid.UUID) (e Entry, ok bool, err error)
+	// NewestReport returns the stack's newest report of any result; ok is false when it has
+	// none.
+	NewestReport(ctx context.Context, stackID uuid.UUID) (e Entry, ok bool, err error)
 	// SetStackCheck records a finished check: health, and last_drift_check_at unless the
 	// check failed (checkedAt is nil then).
 	SetStackCheck(ctx context.Context, stackID uuid.UUID, health requests.StackHealth, checkedAt *time.Time) error
@@ -209,7 +225,9 @@ func (s *Service) Record(ctx context.Context, by identity.Principal, r Report) (
 		return Recorded{}, err
 	}
 	// terraform's own text can echo values; keep one redacted summary line (never in the audit log).
-	r.Error = SummarizeError(r.Error)
+	if r.Result == ResultError {
+		r.Error = SummarizeError(r.Error)
+	}
 	changed, err := json.Marshal(nonNil(r.Changed))
 	if err != nil {
 		return Recorded{}, fmt.Errorf("encode changed resources: %w", err)
@@ -233,19 +251,16 @@ func (s *Service) Record(ctx context.Context, by identity.Principal, r Report) (
 		if err != nil {
 			return fmt.Errorf("check for newer reports: %w", err)
 		}
+		var ignored *Resolved2
 		if r.Result == ResultDrifted && !stale {
-			newest, ok, err := st.NewestDrifted(ctx, stack.ID)
+			// Against the newest report of any result: ignore X, a clean night, then X again
+			// is a new finding, because the clean report is the newest.
+			newest, ok, err := st.NewestReport(ctx, stack.ID)
 			if err != nil {
-				return fmt.Errorf("load the newest drifted report: %w", err)
+				return fmt.Errorf("load the newest report: %w", err)
 			}
 			if ok && Suppresses(newest, r.PlanHash) {
-				// The ignored finding is still there, unchanged: it stays accepted.
-				checked := now
-				if err := st.SetStackCheck(ctx, stack.ID, NextHealth(stack.Health, r.Result), &checked); err != nil {
-					return fmt.Errorf("update stack health: %w", err)
-				}
-				out = Recorded{Entry: newest, Replayed: true, Suppressed: true}
-				return nil
+				ignored = &Resolved2{By: newest.ResolvedBy, Reason: newest.ResolutionNote, At: now}
 			}
 		}
 		runID, err := st.UpsertRun(ctx, RunRow{StackID: stack.ID, Failed: r.Result == ResultError, GitHub: r.GitHub,
@@ -254,7 +269,7 @@ func (s *Service) Record(ctx context.Context, by identity.Principal, r Report) (
 			return fmt.Errorf("record drift run: %w", err)
 		}
 		inserted, err := st.InsertReport(ctx, NewReport{ID: s.ids.NewID(), StackID: stack.ID, PipelineRunID: runID,
-			Report: r, Changed: changed, At: now})
+			Report: r, Changed: changed, At: now, Ignored: ignored})
 		if err != nil {
 			return fmt.Errorf("insert drift report: %w", err)
 		}
@@ -262,7 +277,7 @@ func (s *Service) Record(ctx context.Context, by identity.Principal, r Report) (
 		if err != nil {
 			return fmt.Errorf("load drift report: %w", err)
 		}
-		out = Recorded{Entry: entry, Replayed: !inserted}
+		out = Recorded{Entry: entry, Replayed: !inserted, Suppressed: ignored != nil}
 		if !inserted {
 			return nil
 		}
@@ -407,7 +422,7 @@ func (s *Service) Resolve(ctx context.Context, by identity.Principal, id uuid.UU
 		// The report row is locked before anything is opened, so of two concurrent
 		// resolutions (two users, or reconcile against ignore) one wins and the other sees
 		// the result; the loser never opens a request.
-		locked, err := st.LockReport(ctx, id)
+		locked, lockedIDs, err := st.LockReports(ctx, id)
 		if err != nil {
 			return err
 		}
@@ -431,7 +446,7 @@ func (s *Service) Resolve(ctx context.Context, by identity.Principal, id uuid.UU
 			req = &r
 		}
 		now := s.clock.Now()
-		res := Resolution{ReportID: id, StackID: locked.StackID, Status: next, By: &by.UserID, Reason: in.Reason, At: now}
+		res := Resolution{ReportID: id, IDs: lockedIDs, StackID: locked.StackID, Status: next, By: &by.UserID, Reason: in.Reason, At: now}
 		if req != nil {
 			res.RequestID = &req.RequestID
 		}
@@ -467,7 +482,7 @@ func (s *Service) Resolve(ctx context.Context, by identity.Principal, id uuid.UU
 // the same plan hash as a new scan: the difference is unchanged, so it stays accepted and
 // no new report is opened. A different hash is a different difference. Pure.
 func Suppresses(e Entry, planHash string) bool {
-	return e.Status != nil && *e.Status == StatusIgnored && planHash != "" && e.PlanHash == planHash
+	return e.Result == ResultDrifted && e.Status != nil && *e.Status == StatusIgnored && planHash != "" && e.PlanHash == planHash
 }
 
 // statusOf is the resolution status of an entry; a report that is not drifted has none to

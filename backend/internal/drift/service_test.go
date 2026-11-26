@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -94,6 +95,10 @@ func (m *memRepo) InsertReport(_ context.Context, n NewReport) (bool, error) {
 	if n.Report.Result == ResultDrifted {
 		open := StatusOpen
 		e.Status = &open
+		if n.Ignored != nil {
+			ign := StatusIgnored
+			e.Status, e.ResolvedBy, e.ResolutionNote, e.ResolvedAt = &ign, n.Ignored.By, n.Ignored.Reason, &n.Ignored.At
+		}
 	}
 	m.reports = append(m.reports, e)
 	return true, nil
@@ -108,8 +113,18 @@ func (m *memRepo) ReportByRun(_ context.Context, runID uuid.UUID) (Entry, error)
 	return Entry{}, errors.New("no report")
 }
 
-func (m *memRepo) LockReport(ctx context.Context, id uuid.UUID) (Entry, error) {
-	return m.Get(ctx, identity.Visibility{All: true}, id)
+func (m *memRepo) LockReports(ctx context.Context, id uuid.UUID) (Entry, []uuid.UUID, error) {
+	target, err := m.Get(ctx, identity.Visibility{All: true}, id)
+	if err != nil {
+		return Entry{}, nil, err
+	}
+	ids := []uuid.UUID{}
+	for _, r := range m.reports {
+		if r.ID == id || (r.Status != nil && *r.Status == StatusOpen) {
+			ids = append(ids, r.ID)
+		}
+	}
+	return target, ids, nil
 }
 
 func (m *memRepo) NewerRunExists(_ context.Context, _ uuid.UUID, runID int64) (bool, error) {
@@ -121,13 +136,11 @@ func (m *memRepo) NewerRunExists(_ context.Context, _ uuid.UUID, runID int64) (b
 	return false, nil
 }
 
-func (m *memRepo) NewestDrifted(_ context.Context, _ uuid.UUID) (Entry, bool, error) {
-	for i := len(m.reports) - 1; i >= 0; i-- {
-		if m.reports[i].Result == ResultDrifted {
-			return *m.reports[i], true, nil
-		}
+func (m *memRepo) NewestReport(_ context.Context, _ uuid.UUID) (Entry, bool, error) {
+	if len(m.reports) == 0 {
+		return Entry{}, false, nil
 	}
-	return Entry{}, false, nil
+	return *m.reports[len(m.reports)-1], true, nil
 }
 
 func (m *memRepo) SetStackCheck(_ context.Context, _ uuid.UUID, h requests.StackHealth, at *time.Time) error {
@@ -153,7 +166,7 @@ func (m *memRepo) CloseOpen(_ context.Context, _ uuid.UUID, at time.Time) (int, 
 func (m *memRepo) Resolve(_ context.Context, res Resolution) (int, error) {
 	n := 0
 	for _, r := range m.reports {
-		if r.Status != nil && *r.Status == StatusOpen {
+		if r.Status != nil && *r.Status == StatusOpen && slices.Contains(res.IDs, r.ID) {
 			st := res.Status
 			r.Status, r.ResolvedBy, r.ResolvedAt, r.ResolutionNote = &st, res.By, &res.At, res.Reason
 			if r.ID == res.ReportID {

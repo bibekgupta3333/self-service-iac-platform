@@ -191,13 +191,22 @@ func (s *pgStore) UpsertRun(ctx context.Context, r RunRow) (uuid.UUID, error) {
 
 func (s *pgStore) InsertReport(ctx context.Context, n NewReport) (bool, error) {
 	r := n.Report
+	// An ignored copy carries the earlier resolution; otherwise a drifted report opens.
+	var by *uuid.UUID
+	var reason string
+	var resolvedAt *time.Time
+	status := "open"
+	if n.Ignored != nil {
+		status, by, reason, resolvedAt = "ignored", n.Ignored.By, n.Ignored.Reason, &n.Ignored.At
+	}
 	tag, err := s.tx.Exec(ctx, `INSERT INTO drift_reports (id, stack_id, pipeline_run_id, result, terraform_exit_code,
-			resources_drifted, resources_updated, resources_deleted, changed, plan_hash, log_url, error_message, status, detected_at)
+			resources_drifted, resources_updated, resources_deleted, changed, plan_hash, log_url, error_message, status, detected_at,
+			resolved_by, resolved_at, resolution_reason)
 		VALUES ($1, $2, $3, $4::drift_result, $5, $6, $7, $8, $9::jsonb, nullif($10, ''), nullif($11, ''), nullif($12, ''),
-		        CASE WHEN $4 = 'drifted' THEN 'open'::drift_status END, $13)
+		        CASE WHEN $4 = 'drifted' THEN $14::drift_status END, $13, $15, $16, nullif($17, ''))
 		ON CONFLICT (pipeline_run_id) DO NOTHING`,
 		n.ID, n.StackID, n.PipelineRunID, string(r.Result), r.TerraformExitCode, r.Summary.Drifted, r.Summary.Updated,
-		r.Summary.Deleted, []byte(n.Changed), r.PlanHash, r.LogURL, r.Error, n.At)
+		r.Summary.Deleted, []byte(n.Changed), r.PlanHash, r.LogURL, r.Error, n.At, status, by, resolvedAt, reason)
 	if err != nil {
 		return false, err
 	}
@@ -208,19 +217,34 @@ func (s *pgStore) ReportByRun(ctx context.Context, runID uuid.UUID) (Entry, erro
 	return scanEntry(s.tx.QueryRow(ctx, entrySelect+` WHERE d.pipeline_run_id = $1`, runID))
 }
 
-// LockReport locks the report row only. Resolve may open a reconcile request while holding
-// it, and that request locks the stack row; locking the stack here would make the two
-// wait on each other. A scan holds the stack row and waits for report rows only through
-// CloseOpen, which skips locked ones.
-func (s *pgStore) LockReport(ctx context.Context, id uuid.UUID) (Entry, error) {
-	e, err := scanEntry(s.tx.QueryRow(ctx, entrySelect+` WHERE d.id = $1 FOR UPDATE OF d`, id))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Entry{}, reportNotFound(id)
-	}
+// LockReports locks the target report and the stack's currently open reports in id order.
+// It does not lock the stack row: Resolve may open a reconcile request while holding these
+// rows, and that request locks the stack row. A scan holds the stack row and waits for
+// report rows only through CloseOpen, which skips locked ones. Two resolutions of one
+// stack's reports take the same rows in the same order, so they serialize.
+func (s *pgStore) LockReports(ctx context.Context, id uuid.UUID) (Entry, []uuid.UUID, error) {
+	rows, err := s.tx.Query(ctx, entrySelect+` WHERE d.id = $1
+		   OR (d.stack_id = (SELECT stack_id FROM drift_reports WHERE id = $1) AND d.status = 'open')
+		ORDER BY d.id FOR UPDATE OF d`, id)
 	if err != nil {
-		return Entry{}, fmt.Errorf("lock drift report: %w", err)
+		return Entry{}, nil, fmt.Errorf("lock drift reports: %w", err)
 	}
-	return e, nil
+	entries, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Entry, error) { return scanEntry(row) })
+	if err != nil {
+		return Entry{}, nil, fmt.Errorf("scan locked drift reports: %w", err)
+	}
+	ids := make([]uuid.UUID, 0, len(entries))
+	var target *Entry
+	for i := range entries {
+		ids = append(ids, entries[i].ID)
+		if entries[i].ID == id {
+			target = &entries[i]
+		}
+	}
+	if target == nil {
+		return Entry{}, nil, reportNotFound(id)
+	}
+	return *target, ids, nil
 }
 
 func (s *pgStore) NewerRunExists(ctx context.Context, stackID uuid.UUID, runID int64) (bool, error) {
@@ -230,8 +254,8 @@ func (s *pgStore) NewerRunExists(ctx context.Context, stackID uuid.UUID, runID i
 	return newer, err
 }
 
-func (s *pgStore) NewestDrifted(ctx context.Context, stackID uuid.UUID) (Entry, bool, error) {
-	e, err := scanEntry(s.tx.QueryRow(ctx, entrySelect+` WHERE d.stack_id = $1 AND d.result = 'drifted'
+func (s *pgStore) NewestReport(ctx context.Context, stackID uuid.UUID) (Entry, bool, error) {
+	e, err := scanEntry(s.tx.QueryRow(ctx, entrySelect+` WHERE d.stack_id = $1
 		ORDER BY d.detected_at DESC, d.id DESC LIMIT 1`, stackID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Entry{}, false, nil
@@ -261,8 +285,8 @@ func (s *pgStore) Resolve(ctx context.Context, r Resolution) (int, error) {
 	tag, err := s.tx.Exec(ctx, `UPDATE drift_reports
 		   SET status = $3::drift_status, resolved_by = $4, resolved_at = $5, resolution_reason = nullif($6, ''),
 		       resolution_request_id = CASE WHEN id = $1 THEN $7::uuid END
-		 WHERE stack_id = $2 AND status = 'open'`,
-		r.ReportID, r.StackID, string(r.Status), r.By, r.At, r.Reason, r.RequestID)
+		 WHERE id = ANY($2::uuid[]) AND status = 'open'`,
+		r.ReportID, r.IDs, string(r.Status), r.By, r.At, r.Reason, r.RequestID)
 	if err != nil {
 		return 0, err
 	}
