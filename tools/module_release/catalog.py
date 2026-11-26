@@ -17,6 +17,7 @@ from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 
 from .models import SemVer
+from .notes import upgrade_notes
 from .versioning import git_tag
 
 INDEX_PATH = "/v1/internal/catalog/index"
@@ -39,7 +40,12 @@ def build_index_payload(
     released_by: str,
     changelog: str | None = None,
 ) -> dict[str, Any]:
-    """Build the IndexCommand JSON body from a parsed module.yaml. Pure."""
+    """Build the IndexCommand JSON body from a parsed module.yaml. Pure.
+
+    ``changelog`` is the version's CHANGELOG section. ``upgrade_notes`` is its
+    ``### Migration`` (or ``### Upgrade notes``) subsection, else module.yaml
+    ``upgrade.notes``; the backend shows it on the upgrade path.
+    """
     metadata = manifest.get("metadata") or {}
     compatibility = manifest.get("compatibility") or {}
     name = str(metadata.get("name", ""))
@@ -67,6 +73,9 @@ def build_index_payload(
         payload["cost_hints"] = manifest["cost"]
     if changelog:
         payload["changelog_md"] = changelog
+    notes = upgrade_notes(changelog, manifest)
+    if notes:
+        payload["upgrade_notes"] = notes
     return payload
 
 

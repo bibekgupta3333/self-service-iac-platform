@@ -24,7 +24,7 @@ TOKEN = "test-internal-token-0123456789abcdef"
 INDEX_COMMAND_FIELDS = {
     "module", "version", "git_tag", "commit_sha", "display_name", "description", "category", "owners",
     "inputs_schema", "outputs", "cost_hints", "tf_version_range", "aws_provider_range", "changelog_md",
-    "released_by",
+    "upgrade_notes", "released_by",
 }
 OUTPUT_FIELDS = {"name", "description", "sensitive"}
 
@@ -46,8 +46,17 @@ class TestPayload:
     def test_optional_fields_omitted(self):
         m = manifest()
         del m["cost"]
+        m.pop("upgrade", None)
         payload = build_index_payload(m, SHA, "bot")
-        assert "cost_hints" not in payload and "changelog_md" not in payload
+        assert "cost_hints" not in payload and "changelog_md" not in payload and "upgrade_notes" not in payload
+
+    def test_upgrade_notes_prefer_the_migration_subsection(self):
+        m = manifest("2.0.0", "sqs")
+        m["upgrade"] = {"from": ">= 1.0.0, < 2.0.0", "notes": "From module.yaml.\n"}
+        section = "### Changed\n- breaking\n\n### Migration\nRename `a` to `b`.\n\n### Fixed\n- z"
+        assert build_index_payload(m, SHA, "bot", section)["upgrade_notes"] == "Rename `a` to `b`."
+        assert build_index_payload(m, SHA, "bot", "### Added\n- x")["upgrade_notes"] == "From module.yaml."
+        assert build_index_payload(m, SHA, "bot")["upgrade_notes"] == "From module.yaml."
 
     def test_rejects_invalid_version(self):
         m = manifest()
@@ -224,6 +233,15 @@ class TestIndexCommand:
         body = fake.requests[0]["body"]
         assert body["module"] == "s3" and body["commit_sha"] == SHA and body["released_by"] == "ci"
         assert body["changelog_md"].startswith("### Added")
+        assert body["upgrade_notes"]  # module.yaml upgrade.notes when the section has no Migration
+
+    def test_sends_the_upgrade_notes_subsection(self, catalog):
+        fake, base = catalog
+        env = {"IACP_API_URL": base, "IACP_INTERNAL_TOKEN": TOKEN}
+        assert main(["--repo", str(REPO_ROOT), "index", "lambda", "--commit-sha", SHA], env=env) == 0
+        body = fake.requests[0]["body"]
+        assert body["version"] == "2.0.0" and body["upgrade_notes"].startswith("- No resource changes")
+        assert "### Upgrade notes" in body["changelog_md"]
 
     def test_reports_rejection(self, catalog, capsys):
         fake, base = catalog
