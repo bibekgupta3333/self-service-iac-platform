@@ -333,17 +333,31 @@ jobs:
 
       # What is applied is what was approved. The approved hash comes from the
       # approval record (GET /v1/internal/requests/by-path, not implemented yet)
-      # or a workflow_dispatch input; without one the check is pending, not skipped
-      # silently. In the hermetic CI both plans start from an empty LocalStack, so
-      # the PR plan and this re-plan hash the same when nothing else changed.
+      # or a workflow_dispatch input. Once the API is configured a missing hash
+      # fails the job; only the local-first mode (no API) applies with a notice.
+      # In the hermetic CI both plans start from an empty LocalStack, so the PR
+      # plan and this re-plan hash the same when nothing else changed.
       - id: planhash
         name: Verify the plan hash against the approved plan
         env:
           APPROVED_PLAN_HASH: ${{ inputs.approved_plan_hash }}
         run: |
+          hex64='^[0-9a-f]{64}$'
           actual="$(jq -r '.plan_hash // empty' "$RUNNER_TEMP/summary/summary.json")"
+          if ! [[ "$actual" =~ $hex64 ]]; then
+            echo "::error title=Plan hash::the re-plan produced no plan hash"
+            exit 1
+          fi
+          if [ -n "$APPROVED_PLAN_HASH" ] && ! [[ "$APPROVED_PLAN_HASH" =~ $hex64 ]]; then
+            echo "::error title=Plan hash::approved_plan_hash must be 64 lowercase hex characters"
+            exit 1
+          fi
           if [ -z "$APPROVED_PLAN_HASH" ]; then
-            echo "::notice title=Plan hash check pending::no approved plan hash for $STACK_PATH (needs GET /v1/internal/requests/by-path); re-plan hash $actual"
+            if [ -n "$IACP_API_URL" ]; then
+              echo "::error title=Plan hash missing::no approved plan hash for $STACK_PATH; the API is configured, so the re-plan cannot be applied unverified (dispatch with approved_plan_hash until GET /v1/internal/requests/by-path exists)"
+              exit 1
+            fi
+            echo "::notice title=Plan hash check skipped (local-first)::no API and no approved plan hash for $STACK_PATH; re-plan hash $actual"
             exit 0
           fi
           if [ "$actual" != "$APPROVED_PLAN_HASH" ]; then
