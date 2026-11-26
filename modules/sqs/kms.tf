@@ -34,4 +34,28 @@ data "aws_iam_policy_document" "kms" {
       identifiers = ["arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:root"]
     }
   }
+
+  # Optional AWS services (var.key_service_principals), such as SNS or
+  # EventBridge delivering to the queue, acting on behalf of this account only.
+  dynamic "statement" {
+    for_each = length(var.key_service_principals) > 0 ? [var.key_service_principals] : []
+
+    content {
+      sid       = "ServicePrincipalsForThisAccount"
+      effect    = "Allow"
+      actions   = ["kms:GenerateDataKey*", "kms:Decrypt"]
+      resources = ["*"]
+
+      principals {
+        type        = "Service"
+        identifiers = statement.value
+      }
+
+      condition {
+        test     = "StringEquals"
+        variable = "aws:SourceAccount"
+        values   = [data.aws_caller_identity.current.account_id]
+      }
+    }
+  }
 }

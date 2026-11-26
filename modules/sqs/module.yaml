@@ -94,9 +94,17 @@ inputs:
       default: 3600
       description: Alarm threshold for the age of the oldest message.
       x-iacp-group: Alarms
+    key_service_principals:
+      type: array
+      items: { type: string, pattern: "^[a-z0-9-]+(\\.[a-z0-9-]+)*\\.amazonaws\\.com$" }
+      uniqueItems: true
+      default: []
+      description: AWS service principals allowed to use the module-created key for this account.
+      x-iacp-group: Encryption
     tags:
       type: object
       additionalProperties: { type: string }
+      propertyNames: { not: { pattern: "^iacp:" } }
       maxProperties: 30
       description: Extra tags. The iacp:* prefix is reserved.
       x-iacp-ui: key-value

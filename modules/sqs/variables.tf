@@ -142,6 +142,17 @@ variable "kms_key_arn" {
   }
 }
 
+variable "key_service_principals" {
+  description = "AWS service principals (for example sns.amazonaws.com or events.amazonaws.com) allowed to use the module-created KMS key on behalf of this account, so they can deliver to the queue. Ignored when kms_key_arn is set."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for p in var.key_service_principals : can(regex("^[a-z0-9-]+(\\.[a-z0-9-]+)*\\.amazonaws\\.com$", p))])
+    error_message = "key_service_principals must be AWS service principals such as sns.amazonaws.com."
+  }
+}
+
 variable "kms_data_key_reuse_period_seconds" {
   description = "Seconds SQS reuses a data key before calling KMS again."
   type        = number
