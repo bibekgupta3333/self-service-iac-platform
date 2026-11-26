@@ -126,6 +126,24 @@ func (s *pgStore) LockRun(ctx context.Context, stackID uuid.UUID, gh GitHubRun) 
 	return r, nil
 }
 
+func (s *pgStore) FindRun(ctx context.Context, stackID uuid.UUID, gh GitHubRun) (*StoredRun, error) {
+	var (
+		r      StoredRun
+		stages []json.RawMessage
+	)
+	err := s.tx.QueryRow(ctx, `SELECT id, request_id, kind::text, status::text, stages FROM pipeline_runs
+		WHERE github_run_id = $1 AND github_run_attempt = $2 AND stack_id = $3`,
+		gh.RunID, gh.RunAttempt, stackID).Scan(&r.ID, &r.RequestID, &r.Kind, &r.Status, &stages)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find run: %w", err)
+	}
+	r.Stages = stages
+	return &r, nil
+}
+
 func (s *pgStore) UpdateRun(ctx context.Context, u RunUpdate) error {
 	stages, err := json.Marshal(u.Stages)
 	if err != nil {

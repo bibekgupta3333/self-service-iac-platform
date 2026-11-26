@@ -6,6 +6,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
 )
 
 func TestAlreadyReleased(t *testing.T) {
@@ -75,5 +78,34 @@ func TestReleaseIsIdempotentForATerminalRequest(t *testing.T) {
 	}
 	if _, err := svc.Release(ctx, TokenCommand{StackID: stackA, RequestID: reqB, FencingToken: token}); !hasCode(err, "stale_fencing_token") {
 		t.Fatalf("a request that never held the lease: %v", err)
+	}
+}
+
+// A failure after ReleaseIn started writing (the promotion hook) must roll everything back,
+// even for a terminal request that still holds its own lease: the idempotent fallback is
+// decided before any write and never papers over partial work.
+func TestReleaseDoesNotFallBackAfterPartialWork(t *testing.T) {
+	repo := newMemRepo()
+	clock := &stepClock{t: time.Date(2026, 11, 26, 9, 0, 0, 0, time.UTC)}
+	boom := apperr.Conflict("stale_fencing_token", "hook conflict")
+	svc := NewService(repo, clock, time.Hour).OnPromote(func(context.Context, Store, RequestInfo, Lock, identity.Principal, string) error {
+		return boom
+	})
+	repo.addRequest(reqA, "req-aaaaaaaaaa", clock.t)
+	repo.addRequest(reqB, "req-bbbbbbbbbb", clock.t.Add(time.Second))
+	token := acquire(t, svc, reqA).Lock.FencingToken
+	if res := acquire(t, svc, reqB); res.Outcome != OutcomeQueued {
+		t.Fatalf("b must queue: %+v", res)
+	}
+	r := repo.s.requests[reqA]
+	r.info.Completed = true // terminal but still holding the lease
+	repo.s.requests[reqA] = r
+
+	res, err := svc.Release(context.Background(), TokenCommand{StackID: stackA, RequestID: reqA, FencingToken: token})
+	if err == nil || res.AlreadyReleased {
+		t.Fatalf("a failing promotion must fail the release: %+v %v", res, err)
+	}
+	if l, ok := repo.s.locks[stackA]; !ok || l.RequestID != reqA {
+		t.Fatal("partial work was committed: the lease moved")
 	}
 }

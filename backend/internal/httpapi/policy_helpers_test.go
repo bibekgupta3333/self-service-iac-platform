@@ -1,7 +1,10 @@
 package httpapi
 
 import (
+	"context"
 	"testing"
+
+	"github.com/google/uuid"
 
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/rbac"
 )
@@ -16,12 +19,20 @@ func testPolicies() PolicyTable {
 	return t
 }
 
+// noRoles is a RoleLookup for tests whose callers are platform admins and never need it.
+type noRoles struct{}
+
+func (noRoles) HighestRole(context.Context, uuid.UUID) (rbac.Role, error) { return rbac.RoleNone, nil }
+
 func TestRouterRefusesToStartWithoutAPolicyTable(t *testing.T) {
 	if err := (Deps{}).Validate(); err == nil {
 		t.Fatal("Validate accepted Deps without a policy table")
 	}
-	if err := (Deps{Policies: DefaultPolicies()}).Validate(); err != nil {
-		t.Fatalf("Validate rejected Deps with a policy table: %v", err)
+	if err := (Deps{Policies: DefaultPolicies()}).Validate(); err == nil {
+		t.Fatal("Validate accepted Deps without a role lookup")
+	}
+	if err := (Deps{Policies: DefaultPolicies(), Roles: noRoles{}}).Validate(); err != nil {
+		t.Fatalf("Validate rejected complete Deps: %v", err)
 	}
 	defer func() {
 		if recover() == nil {

@@ -37,7 +37,7 @@ func (jtiVerifier) Verify(ctx context.Context, raw string) (auth.Claims, error) 
 }
 
 func replayRouter(store auth.ReplayStore) http.Handler {
-	return NewRouter(Deps{Policies: testPolicies(), Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	return NewRouter(Deps{Policies: testPolicies(), Roles: noRoles{}, Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		Auth: DevAuthenticator{Principal: devPrincipal},
 		Internal: AnyAuthenticator{NewOIDCAuthenticator(auth.NewReplayGuard(jtiVerifier{}, store, 0)),
 			NewTokenAuthenticator(testInternalToken, releaseBot)},

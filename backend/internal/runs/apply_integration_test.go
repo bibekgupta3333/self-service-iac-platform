@@ -127,6 +127,7 @@ type applyRun struct {
 	short   string
 	token   int64
 	runID   int64
+	attempt int // 0 means 1
 	sha     string
 	bot     identity.Principal
 	outputs json.RawMessage
@@ -143,9 +144,10 @@ func workflowPrincipal(jobWorkflowRef, ref, event string, runID int64, sha strin
 }
 
 func (a *applyRun) report(stage string, status runs.StageStatus) runs.Report {
+	a.bot.Workflow.RunAttempt = a.attemptOrOne()
 	tok := a.token
 	r := runs.Report{Pipeline: runs.KindApply, StackPath: a.path, RequestShortID: a.short, FencingToken: &tok, Stage: stage, Status: status,
-		GitHub: runs.GitHubRun{RunID: a.runID, RunAttempt: 1, JobID: 5000 + a.runID, HeadSHA: a.sha}}
+		GitHub: runs.GitHubRun{RunID: a.runID, RunAttempt: a.attemptOrOne(), JobID: 5000 + a.runID, HeadSHA: a.sha}}
 	if stage == "summary" && len(a.outputs) > 0 {
 		r.Outputs = a.outputs
 	}
@@ -304,6 +306,28 @@ func TestApplyReportsDriveACreateToActive(t *testing.T) {
 	late, err := run.send("apply", runs.StageFailed)
 	if err != nil || *late.RequestStatus != "applied" {
 		t.Fatalf("late apply failure: %+v %v", late, err)
+	}
+	if _, stages := e.runStages(first.RunID); stages["apply"] != "passed" || stages["summary"] != "passed" || len(stages) != 4 {
+		t.Fatalf("a late report was merged into the finished run's history: %v", stages)
+	}
+	// A new run id or attempt carrying the released token is stale: only the run that
+	// reported for this request may keep reporting.
+	for name, mk := range map[string]func() *applyRun{
+		"new run id": func() *applyRun { return e.run(path, short, run.token, 1002) },
+		"new attempt": func() *applyRun {
+			a := e.run(path, short, run.token, 1001)
+			a.attempt = 2
+			return a
+		},
+	} {
+		_, err := mk().send("summary", runs.StagePassed)
+		if err == nil {
+			t.Fatalf("%s: a released token opened a new run", name)
+		}
+		wantCode(t, err, "stale_fencing_token")
+	}
+	if n := e.runs(stackID); n != 1 {
+		t.Fatalf("pipeline_runs rows = %d, want 1", n)
 	}
 	if st, _, _ := e.requestRow(reqID); st != "applied" || e.stackRow(stackID).Status != "active" || e.audits("request.transitioned", reqID) != 2 {
 		t.Fatalf("a late report changed state: request %s stack %+v", st, e.stackRow(stackID))
@@ -610,6 +634,13 @@ func TestRejectedApplyReportsChangeNothing(t *testing.T) {
 	if res, err := good.send("plan", runs.StagePassed); err != nil || *res.RequestStatus != "applying" {
 		t.Fatalf("the genuine report: %+v %v", res, err)
 	}
+}
+
+func (a *applyRun) attemptOrOne() int {
+	if a.attempt == 0 {
+		return 1
+	}
+	return a.attempt
 }
 
 func (a *applyRun) principal() identity.Principal { return a.bot }
