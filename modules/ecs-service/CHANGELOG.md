@@ -32,5 +32,7 @@ as git tags `modules/ecs-service/vX.Y.Z`.
 - Outputs `service_name`, `cluster_arn`, `alb_dns_name`, `service_url`,
   `ecr_repository_url`, `security_group_id`, role ARNs.
 - Mandatory `iacp:*` tags on every taggable resource, propagated to tasks.
+- `team` and `name` reject trailing and consecutive hyphens, which would make
+  `<team>-<environment>-<name>` an invalid identifier.
 - Offline `terraform test` suite (real provider for plans, `mock_provider`
   for applies), because LocalStack community has no ECS, ECR or ELBv2.

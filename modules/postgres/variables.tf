@@ -23,6 +23,13 @@ variable "team" {
     condition     = can(regex("^[a-z][a-z0-9-]{1,30}$", var.team))
     error_message = "team must be 2-31 characters of lowercase letters, digits and hyphens, starting with a letter."
   }
+
+  # team feeds the identifier <team>-<environment>-<name>, and RDS rejects
+  # consecutive or trailing hyphens.
+  validation {
+    condition     = !endswith(var.team, "-") && !strcontains(var.team, "--")
+    error_message = "team must not end with a hyphen or contain consecutive hyphens."
+  }
 }
 
 variable "environment" {

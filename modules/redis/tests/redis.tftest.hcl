@@ -397,3 +397,37 @@ run "rejects_unsupported_engine_version" {
 
   expect_failures = [var.engine_version]
 }
+
+# "payments-" would produce payments--development-..., which ElastiCache rejects.
+run "rejects_trailing_hyphen_team" {
+  command = plan
+
+  variables {
+    team = "payments-"
+  }
+
+  expect_failures = [var.team]
+}
+
+run "rejects_double_hyphen_team" {
+  command = plan
+
+  variables {
+    team = "pay--ments"
+  }
+
+  expect_failures = [var.team]
+}
+
+run "accepts_single_hyphen_team" {
+  command = plan
+
+  variables {
+    team = "pay-ments"
+  }
+
+  assert {
+    condition     = aws_elasticache_replication_group.this.replication_group_id == "pay-ments-development-tftest-cache"
+    error_message = "Teams with single inner hyphens are valid."
+  }
+}

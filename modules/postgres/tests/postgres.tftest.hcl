@@ -470,3 +470,37 @@ run "rejects_storage_ceiling_below_size" {
 
   expect_failures = [var.max_allocated_storage_gb]
 }
+
+# "payments-" would produce payments--development-..., which RDS rejects.
+run "rejects_trailing_hyphen_team" {
+  command = plan
+
+  variables {
+    team = "payments-"
+  }
+
+  expect_failures = [var.team]
+}
+
+run "rejects_double_hyphen_team" {
+  command = plan
+
+  variables {
+    team = "pay--ments"
+  }
+
+  expect_failures = [var.team]
+}
+
+run "accepts_single_hyphen_team" {
+  command = plan
+
+  variables {
+    team = "pay-ments"
+  }
+
+  assert {
+    condition     = aws_db_instance.this.identifier == "pay-ments-development-tftest-db"
+    error_message = "Teams with single inner hyphens are valid."
+  }
+}

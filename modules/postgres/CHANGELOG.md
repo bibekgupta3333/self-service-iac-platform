@@ -30,5 +30,7 @@ as git tags `modules/postgres/vX.Y.Z`.
   KMS.
 - Outputs `endpoint`, `port`, `secret_arn`, `connection`, `security_group_id`.
 - Mandatory `iacp:*` tags on every taggable resource.
+- `team` and `name` reject trailing and consecutive hyphens, which would make
+  `<team>-<environment>-<name>` an invalid identifier.
 - Offline `terraform test` suite (real provider for plans, `mock_provider`
   for applies), because LocalStack community has no RDS.

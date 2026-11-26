@@ -675,3 +675,23 @@ run "rejects_invalid_boundary" {
 
   expect_failures = [var.permissions_boundary_arn]
 }
+
+run "rejects_trailing_hyphen_team" {
+  command = plan
+
+  variables {
+    team = "payments-"
+  }
+
+  expect_failures = [var.team]
+}
+
+run "rejects_double_hyphen_team" {
+  command = plan
+
+  variables {
+    team = "pay--ments"
+  }
+
+  expect_failures = [var.team]
+}

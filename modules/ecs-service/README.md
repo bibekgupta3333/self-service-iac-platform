@@ -75,7 +75,7 @@ group.
 | Name | Description | Type | Default | Required |
 |---|---|---|---|:---:|
 | `name` | Logical name. Resources are named `<team>-<environment>-<name>` (at most 50 characters, no consecutive hyphens); the load balancer and target group use a hashed 32-character form when longer. | `string` | n/a | yes |
-| `team` | Owning team slug. Injected by the platform. | `string` | n/a | yes |
+| `team` | Owning team slug, without trailing or consecutive hyphens. Injected by the platform. | `string` | n/a | yes |
 | `environment` | `development`, `staging` or `production`. Injected by the platform. | `string` | n/a | yes |
 | `stack` | Owning stack name, used for the `iacp:stack` tag. Injected by the platform. | `string` | n/a | yes |
 | `tags` | Additional tags. Keys starting with `iacp:` are reserved. At most 30. | `map(string)` | `{}` | no |

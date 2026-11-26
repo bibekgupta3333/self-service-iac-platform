@@ -23,6 +23,14 @@ variable "team" {
     condition     = can(regex("^[a-z][a-z0-9-]{1,30}$", var.team))
     error_message = "team must be 2-31 characters of lowercase letters, digits and hyphens, starting with a letter."
   }
+
+  # team feeds <team>-<environment>-<name>, used for the ECR repository, roles,
+  # cluster and load balancer; keep it free of consecutive or trailing hyphens
+  # so every derived name is valid and matches the data-store modules.
+  validation {
+    condition     = !endswith(var.team, "-") && !strcontains(var.team, "--")
+    error_message = "team must not end with a hyphen or contain consecutive hyphens."
+  }
 }
 
 variable "environment" {

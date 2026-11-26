@@ -60,7 +60,7 @@ alarms are planned for a later minor release.
 | Name | Description | Type | Default | Required |
 |---|---|---|---|:---:|
 | `name` | Logical name. The instance identifier is `<team>-<environment>-<name>` (at most 63 characters, no consecutive hyphens). | `string` | n/a | yes |
-| `team` | Owning team slug. Injected by the platform. | `string` | n/a | yes |
+| `team` | Owning team slug, without trailing or consecutive hyphens. Injected by the platform. | `string` | n/a | yes |
 | `environment` | `development`, `staging` or `production`. Injected by the platform. | `string` | n/a | yes |
 | `stack` | Owning stack name, used for the `iacp:stack` tag. Injected by the platform. | `string` | n/a | yes |
 | `tags` | Additional tags. Keys starting with `iacp:` are reserved. At most 30. | `map(string)` | `{}` | no |
