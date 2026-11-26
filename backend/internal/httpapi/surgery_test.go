@@ -37,7 +37,7 @@ func TestStateSurgeryRoute(t *testing.T) {
 	svc := &fakeSurgery{}
 	h := NewRouter(Deps{Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DevAuthenticator{Principal: devPrincipal},
 		Internal: AnyAuthenticator{NewOIDCAuthenticator(fakeTokenVerifier{}), NewTokenAuthenticator(testInternalToken, releaseBot)},
-		Ready:    okPinger{}, InternalHandlers: []RouteRegistrar{NewSurgeryHandler(svc)}})
+		Ready:    okPinger{}, InternalHandlers: []RouteRegistrar{NewSurgeryHandler(svc)}, Policies: DefaultPolicies(), Roles: noRoles{}})
 	cases := []struct {
 		name, auth, body string
 		want             int

@@ -99,8 +99,13 @@ func run() error {
 		heads = pub
 	}
 	handlers := map[string]outbox.Handler{outbox.TopicGitHubEvent: webhooks.NewApplier(requestSvc, heads)}
-	recoveryRepo := recovery.NewPostgresRepository(pool, auditWriter)
+	// Apply reports drive the request lifecycle; a failed apply first asks the recovery
+	// retrier (docs/06 §5), and recovery fails a request whose retry cannot run through the
+	// same lifecycle.
+	applyDriver := requests.NewApplyDriver(requestSvc, auditWriter)
+	recoveryRepo := recovery.NewPostgresRepository(pool, auditWriter).WithLifecycle(applyDriver.ForTx)
 	retrier := recovery.NewRetrier(recoveryRepo, clock, ids)
+	applyDriver.WithRetry(retrier.Policy(recoveryRepo))
 	if pub != nil {
 		// Transient apply failures are retried by dispatching apply.yml again (docs/06 §5).
 		handlers[recovery.TopicApplyRetry] = recovery.NewDispatcher(recoveryRepo, pub, lockSvc, clock, cfg.Publisher.BaseBranch)
@@ -186,11 +191,10 @@ func run() error {
 			httpapi.NewBudgetContextHandler(budgets.NewService(budgets.NewPostgresRepository(pool), clock)),
 			httpapi.NewSurgeryHandler(recovery.NewSurgeryRecorder(recoveryRepo, clock)),
 		},
-		Webhooks: []httpapi.RouteRegistrar{webhookHandler},
-		PipelineHandlers: []httpapi.RouteRegistrar{httpapi.NewRunHandler(runs.NewService(runs.NewPostgresRepository(pool,
-			requests.NewApplyDriver(requestSvc, auditWriter)), clock)).WithObserver(recovery.NewReportObserver(retrier))},
-		Metrics:       newMetrics(pool),
-		MetricsAccess: httpapi.NewMetricsAccess(cfg.MetricsToken),
+		Webhooks:         []httpapi.RouteRegistrar{webhookHandler},
+		PipelineHandlers: []httpapi.RouteRegistrar{httpapi.NewRunHandler(runs.NewService(runs.NewPostgresRepository(pool, applyDriver), clock))},
+		Metrics:          newMetrics(pool),
+		MetricsAccess:    httpapi.NewMetricsAccess(cfg.MetricsToken),
 	}
 	if err := deps.Validate(); err != nil {
 		return err

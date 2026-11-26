@@ -32,11 +32,14 @@ func (f *fakeRollback) Rollback(_ context.Context, _ identity.Principal, cmd rec
 		ShortID: "req-rollbk1", Kind: requests.KindUpdate, Status: requests.StatusDraft}}, nil
 }
 
+// teamMember is a user whose team role comes from the role lookup (not a platform admin).
+var teamMember = identity.Principal{UserID: devPrincipal.UserID, Login: "priya-s", Type: identity.ActorUser}
+
 func TestRollbackRoute(t *testing.T) {
 	stack := "7d1e2f3a-4b5c-4d6e-8f70-8192a3b4c5d6"
 	path := "/v1/stacks/" + stack + "/rollback"
 	newRouter := func(role rbac.Role, svc *fakeRollback) func(method, path, body string, headers ...string) (int, string, map[string]string) {
-		h := NewRouter(Deps{Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DevAuthenticator{Principal: devPrincipal},
+		h := NewRouter(Deps{Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DevAuthenticator{Principal: teamMember},
 			Ready: okPinger{}, Public: []RouteRegistrar{NewRollbackHandler(svc)}, Policies: DefaultPolicies(), Roles: flowRoles{role: role}})
 		return func(method, path, body string, headers ...string) (int, string, map[string]string) {
 			rec := do(t, h, method, path, body, headers...)
