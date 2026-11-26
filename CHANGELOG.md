@@ -224,7 +224,7 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 - `security-events: write` is granted only to the `code-scanning` upload jobs, which run no PR code; fork and Dependabot PRs skip the upload. Stack SARIF paths always stay inside the repository, and a run's own `automationDetails` is dropped so a PR cannot pick its category. `INFRACOST_API_KEY` is passed only to the `cost` job, which runs no PR code.
 
 ### Fixed
-- The post-apply smoke test no longer fails stacks with CloudWatch alarms on LocalStack, which drops the tags passed to `PutMetricAlarm`: `aws_cloudwatch_metric_alarm` is left out of the tag checks (`EMULATOR_UNTAGGED`) and named in the report.
+- The post-apply smoke test no longer fails stacks with CloudWatch alarms on LocalStack, which drops the tags passed to `PutMetricAlarm`: `aws_cloudwatch_metric_alarm` is left out of the tag checks (`EMULATOR_UNTAGGED`) and named in the report. For the same reason the pr-validate apply round trip checks the re-plan with `tools.stack_pipeline converged` instead of `-detailed-exitcode`: it still fails on any leftover change except a tag-only update of an alarm.
 - The catalog index accepted the category `data`, which `module.yaml` cannot carry, and rejected `database` and `cache`, which it can. It now accepts exactly the categories in `modules/_shared/module.schema.json`, so the `dynamodb` manifest indexes.
 
 ### Changed

@@ -137,7 +137,7 @@ make stack-clean STACK=$STACK
 
 LocalStack 4.4 drops the tags passed to `PutMetricAlarm`. Two consequences, neither a stack defect:
 
-- a second `terraform plan` after the apply proposes an in-place tag update on the six alarms;
+- a second `terraform plan` after the apply proposes an in-place tag update on the six alarms; the pr-validate round trip accepts exactly that difference (`tools.stack_pipeline converged`) and nothing else;
 - the post-apply smoke test (`tools.stack_pipeline smoke`) does not check tags on `aws_cloudwatch_metric_alarm`, and its report names the type as not checked. Tags on the topic and the key are still verified, in state and on the live resource.
 
 Real AWS keeps the tags, so both effects disappear when the stacks leave LocalStack.
