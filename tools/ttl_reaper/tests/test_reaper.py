@@ -21,6 +21,7 @@ from tools.ttl_reaper.models import (
     Outcome,
     RunResult,
     classify_failure,
+    needs_attention,
     parse_due,
     plan_actions,
     render_summary,
@@ -83,10 +84,19 @@ def test_plan_puts_teardowns_first_and_caps_them():
     assert [a.kind for a in actions] == ["warn"] and len(deferred) == 3
 
 
-@pytest.mark.parametrize("code,want", [("ttl_not_due", "skipped"), ("stack_busy", "skipped"), ("stack_not_found", "skipped"),
+@pytest.mark.parametrize("code,want", [("ttl_not_due", "skipped"), ("ttl_backoff", "skipped"), ("ttl_blocked", "blocked"), ("stack_busy", "skipped"), ("stack_not_found", "skipped"),
                                         ("production_not_ephemeral", "failed"), ("", "failed"), ("internal", "failed")])
 def test_classify_failure(code, want):
     assert classify_failure(409, code) == want
+
+
+def test_needs_attention_flags_busy_skips_and_blocked_stacks():
+    a = Action("teardown", stack(1))
+    assert needs_attention(Outcome(a, "skipped", "busy", "stack_busy"))
+    assert needs_attention(Outcome(a, "blocked", "no attempts left", "ttl_blocked"))
+    assert not needs_attention(Outcome(a, "skipped", "extended", "ttl_not_due"))
+    assert not needs_attention(Outcome(a, "skipped", "backing off", "ttl_backoff"))
+    assert not needs_attention(Outcome(a, "done"))
 
 
 def test_summary_escapes_table_cells():
@@ -250,3 +260,18 @@ def test_cli_refuses_a_malformed_list_and_a_missing_credential(capsys):
 def test_plain_http_to_a_remote_host_is_refused(capsys):
     assert main(["--api-url", "http://api.example.com"], env={"IACP_INTERNAL_TOKEN": INTERNAL}) == 1
     assert "https" in capsys.readouterr().out
+
+
+def test_cli_warns_about_busy_and_blocked_stacks_without_failing(capsys):
+    with Server() as api:
+        api.routes[("GET", "/v1/internal/ttl/due")] = (200, {"warnings": [], "teardowns": [item(1), item(2), item(3)]})
+        api.routes[("POST", f"/v1/internal/ttl/{sid(1)}/teardown")] = (409, {"code": "stack_busy", "title": "an apply is in flight"})
+        api.routes[("POST", f"/v1/internal/ttl/{sid(2)}/teardown")] = (409, {"code": "ttl_blocked", "title": "no attempts left"})
+        api.routes[("POST", f"/v1/internal/ttl/{sid(3)}/teardown")] = (409, {"code": "ttl_backoff", "title": "later"})
+        code = main(["--api-url", api.url], env={"IACP_INTERNAL_TOKEN": INTERNAL})
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert out.count("::warning title=TTL") == 2
+    assert "::warning title=TTL skipped::teardown environments/development/payments/s1" in out
+    assert "::warning title=TTL blocked::teardown environments/development/payments/s2" in out
+    assert "s3: skipped" in out and "::warning title=TTL skipped::teardown environments/development/payments/s3" not in out

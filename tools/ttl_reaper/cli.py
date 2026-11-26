@@ -11,7 +11,7 @@ from typing import Mapping, Sequence
 from tools.stack_pipeline.api_client import ApiError, FreshCredentials, TokenSource
 from tools.stack_pipeline.report import ReportError
 
-from .models import DEFAULT_MAX_TEARDOWNS, DueListError, escape, render_summary
+from .models import DEFAULT_MAX_TEARDOWNS, DueListError, escape, needs_attention, render_summary
 from .reaper import Reaper, TtlApiClient
 
 API_URL_ENV = "IACP_API_URL"
@@ -53,6 +53,8 @@ def run(args: argparse.Namespace, env: Mapping[str, str]) -> int:
         line = f"{o.action.kind} {o.action.stack.path}: {o.status}: {o.detail}"
         if o.failed:
             print(f"::error title=TTL {o.action.kind} failed::{escape(line)}")
+        elif needs_attention(o):
+            print(f"::warning title=TTL {o.status}::{escape(line)}")
         else:
             print(line)
     if result.deferred:

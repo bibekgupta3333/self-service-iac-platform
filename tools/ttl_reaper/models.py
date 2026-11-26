@@ -17,7 +17,15 @@ DEFAULT_MAX_TEARDOWNS = 25
 #: Error codes (problem+json ``code``) after which a teardown is skipped, not failed: the
 #: stack is busy with another request, was extended or vanished since the due list was read.
 #: The next hourly run decides again.
-SKIPPABLE_CODES = frozenset({"ttl_not_due", "stack_busy", "stack_destroyed", "stack_not_found"})
+SKIPPABLE_CODES = frozenset({"ttl_not_due", "ttl_backoff", "stack_busy", "stack_destroyed", "stack_not_found"})
+
+#: Skips worth a ::warning:: because nothing else will surface them: a stack that stays busy
+#: (a create that never finishes, an update stuck) is otherwise skipped silently every hour.
+WARN_CODES = frozenset({"stack_busy"})
+
+#: The stack used up its TTL destroy attempts. Not a failure of the reaper, but a person has to
+#: look at the stack, so it is reported as blocked with a warning.
+BLOCKED_CODE = "ttl_blocked"
 
 
 class DueListError(ValueError):
@@ -95,8 +103,9 @@ def plan_actions(due: DueList, max_teardowns: int = DEFAULT_MAX_TEARDOWNS) -> tu
 @dataclass(frozen=True)
 class Outcome:
     action: Action
-    status: str  # done | already | skipped | failed | dry-run
+    status: str  # done | already | skipped | blocked | failed | dry-run
     detail: str = ""
+    code: str = ""  # the API's error code for skipped, blocked and failed outcomes
 
     @property
     def failed(self) -> bool:
@@ -104,8 +113,16 @@ class Outcome:
 
 
 def classify_failure(status: int | None, code: str) -> str:
-    """``skipped`` for the answers that only mean "not now", ``failed`` for the rest. Pure."""
+    """``skipped`` for the answers that only mean "not now", ``blocked`` when the stack ran out
+    of destroy attempts, ``failed`` for the rest. Pure."""
+    if code == BLOCKED_CODE:
+        return "blocked"
     return "skipped" if code in SKIPPABLE_CODES else "failed"
+
+
+def needs_attention(outcome: "Outcome") -> bool:
+    """Whether the outcome deserves a ::warning:: annotation. Pure."""
+    return outcome.status == "blocked" or (outcome.status == "skipped" and outcome.code in WARN_CODES)
 
 
 @dataclass

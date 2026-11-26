@@ -79,7 +79,7 @@ class Reaper:
             return self._warn(action)
         except ApiError as exc:
             status = classify_failure(exc.status, exc.code)
-            return Outcome(action, status, str(exc))
+            return Outcome(action, status, str(exc), exc.code)
 
     def _teardown(self, action: Action) -> Outcome:
         status, body = self._api.teardown(action.stack.stack_id)
