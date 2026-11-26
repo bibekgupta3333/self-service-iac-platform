@@ -29,6 +29,9 @@ const (
 	// apply is verified against, and a pull-request token comes from a workflow file the
 	// PR author controls. pr-validate.yml reads its request id and token from iacp.stack.json.
 	RouteRequestLookup RouteClass = "request_lookup"
+	// RouteStateSurgery: POST /v1/internal/state-surgery. Only the break-glass
+	// state-surgery.yml, dispatched by hand on main; it records what the surgery did.
+	RouteStateSurgery RouteClass = "state_surgery"
 )
 
 // RoutePolicy is what an OIDC caller must be to use a route class.
@@ -64,6 +67,11 @@ var RoutePolicies = map[RouteClass]RoutePolicy{
 		Workflows: []string{"apply.yml"},
 		MainOnly:  true,
 		Events:    []string{"push", "workflow_dispatch"},
+	},
+	RouteStateSurgery: {
+		Workflows: []string{"state-surgery.yml"},
+		MainOnly:  true,
+		Events:    []string{"workflow_dispatch"},
 	},
 }
 
