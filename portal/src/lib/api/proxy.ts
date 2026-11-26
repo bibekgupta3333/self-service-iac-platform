@@ -61,3 +61,55 @@ export function pickHeaders(src: Headers, names: readonly string[]): Headers {
   }
   return out;
 }
+
+/** The backend caps request bodies at 1 MiB (backend/internal/httpapi/respond.go). */
+export const MAX_BODY_BYTES = 1 << 20;
+
+/** Methods the proxy serves. HEAD is answered from an upstream GET without a body. */
+export const PROXY_METHODS = ["GET", "HEAD", "POST"] as const;
+
+/** Paths (segments joined by "/") that accept POST; everything else is read-only. */
+const POST_PATHS: ReadonlySet<string> = new Set(["v1/requests"]);
+
+export interface ProxyRequestInfo {
+  method: string;
+  segments: readonly string[];
+  search: string;
+  contentLength: string | null;
+}
+
+export type ProxyDecision =
+  | { kind: "forward"; url: string; upstreamMethod: "GET" | "POST"; head: boolean }
+  | { kind: "reject"; status: number; code: string; detail: string; allow?: string };
+
+const reject = (status: number, code: string, detail: string, allow?: string): ProxyDecision => ({
+  kind: "reject",
+  status,
+  code,
+  detail,
+  ...(allow ? { allow } : {}),
+});
+
+/** decideProxy decides whether and how to forward one request. Pure. */
+export function decideProxy(apiBase: string, req: ProxyRequestInfo): ProxyDecision {
+  const method = req.method.toUpperCase();
+  if (!(PROXY_METHODS as readonly string[]).includes(method)) {
+    return reject(405, "method_not_allowed", `${method} is not supported by the portal proxy`, PROXY_METHODS.join(", "));
+  }
+  const url = proxyTarget(apiBase, req.segments, req.search);
+  if (url === null) return reject(404, "not_found", "this path is not available through the portal proxy");
+
+  if (method !== "POST") return { kind: "forward", url, upstreamMethod: "GET", head: method === "HEAD" };
+
+  if (!POST_PATHS.has(req.segments.join("/"))) {
+    return reject(405, "method_not_allowed", "POST is not supported on this path", "GET, HEAD");
+  }
+  if (req.contentLength !== null) {
+    const n = Number(req.contentLength);
+    if (!/^\d+$/.test(req.contentLength) || !Number.isSafeInteger(n)) {
+      return reject(400, "bad_request", "invalid Content-Length");
+    }
+    if (n > MAX_BODY_BYTES) return reject(413, "payload_too_large", `request body exceeds ${MAX_BODY_BYTES} bytes`);
+  }
+  return { kind: "forward", url, upstreamMethod: "POST", head: false };
+}

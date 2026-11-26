@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isSafeSegment, pickHeaders, proxyTarget } from "./proxy";
+import { decideProxy, isSafeSegment, MAX_BODY_BYTES, pickHeaders, type ProxyRequestInfo, proxyTarget } from "./proxy";
 
 describe("proxyTarget", () => {
   const base = "http://127.0.0.1:8080/";
@@ -57,6 +57,68 @@ describe("isSafeSegment", () => {
     ["a%2Fb", false],
     ["a:b", false],
   ])("%s -> %s", (s, want) => expect(isSafeSegment(s)).toBe(want));
+});
+
+describe("decideProxy", () => {
+  const base = "http://api.test";
+  const info = (over: Partial<ProxyRequestInfo>): ProxyRequestInfo => ({
+    method: "GET",
+    segments: ["v1", "requests"],
+    search: "",
+    contentLength: null,
+    ...over,
+  });
+
+  it("forwards GET and HEAD as upstream GET", () => {
+    expect(decideProxy(base, info({}))).toEqual({
+      kind: "forward",
+      url: "http://api.test/v1/requests",
+      upstreamMethod: "GET",
+      head: false,
+    });
+    expect(decideProxy(base, info({ method: "HEAD" }))).toMatchObject({ kind: "forward", upstreamMethod: "GET", head: true });
+  });
+
+  it("forwards POST only to /v1/requests", () => {
+    expect(decideProxy(base, info({ method: "POST", contentLength: "120" }))).toMatchObject({
+      kind: "forward",
+      upstreamMethod: "POST",
+    });
+    expect(decideProxy(base, info({ method: "POST", segments: ["v1", "catalog", "modules"] }))).toMatchObject({
+      kind: "reject",
+      status: 405,
+      allow: "GET, HEAD",
+    });
+    expect(decideProxy(base, info({ method: "POST", segments: ["v1", "requests", "x", "cancel"] }))).toMatchObject({
+      status: 405,
+    });
+  });
+
+  it.each([["PUT"], ["DELETE"], ["PATCH"], ["OPTIONS"]])("refuses %s with 405 and Allow", (method) => {
+    expect(decideProxy(base, info({ method }))).toEqual({
+      kind: "reject",
+      status: 405,
+      code: "method_not_allowed",
+      detail: `${method} is not supported by the portal proxy`,
+      allow: "GET, HEAD, POST",
+    });
+  });
+
+  it("refuses paths outside the allow-list with 404", () => {
+    expect(decideProxy(base, info({ method: "POST", segments: ["v1", "RUNS"] }))).toMatchObject({ status: 404 });
+  });
+
+  it.each([
+    [String(MAX_BODY_BYTES), "forward"],
+    [String(MAX_BODY_BYTES + 1), 413],
+    ["abc", 400],
+    ["-1", 400],
+    ["1e3", 400],
+  ])("Content-Length %s -> %s", (contentLength, want) => {
+    const d = decideProxy(base, info({ method: "POST", contentLength }));
+    if (want === "forward") expect(d.kind).toBe("forward");
+    else expect(d).toMatchObject({ kind: "reject", status: want });
+  });
 });
 
 describe("pickHeaders", () => {
