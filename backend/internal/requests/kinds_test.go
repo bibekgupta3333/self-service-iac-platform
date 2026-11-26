@@ -376,25 +376,26 @@ func TestUpdateQueuesBehindTheLockHolder(t *testing.T) {
 }
 
 func TestUpdateAndDestroyChecks(t *testing.T) {
-	t.Run("unknown stack", func(t *testing.T) {
-		_, svc, _ := existingStackFixture(t, StackActive)
-		_, err := svc.Create(context.Background(), dev, createCmd(stackInput(updateInput(), uuid.New()), "key-check-00001"))
-		if !hasCode(err, "validation_failed") || !apperr.IsKind(err, apperr.KindInvalid) {
-			t.Fatalf("err = %v", err)
-		}
-		if e, _ := apperr.As(err); e.Fields[0].Pointer != "/stack_id" {
-			t.Fatalf("fields = %+v", e.Fields)
+	t.Run("unknown and hidden stacks look the same", func(t *testing.T) {
+		repo, _, created := existingStackFixture(t, StackActive)
+		svc := newSvcWithMembers(repo, fakeVersions{}, fakeMembers{dev.UserID: RoleNone})
+		_, err1 := svc.Create(context.Background(), dev, createCmd(stackInput(updateInput(), uuid.New()), "key-check-00001"))
+		_, hidden := svc.Create(context.Background(), dev, createCmd(stackInput(updateInput(), created.Stack.ID), "key-check-00002"))
+		_, hiddenDestroy := svc.Create(context.Background(), dev, createCmd(stackInput(destroyInput(), created.Stack.ID), "key-check-00003"))
+		for name, err := range map[string]error{"unknown": err1, "hidden update": hidden, "hidden destroy": hiddenDestroy} {
+			e, ok := apperr.As(err)
+			if !ok || e.Kind != apperr.KindNotFound || e.Code != "stack_not_found" || strings.Contains(e.Message, "payments") {
+				t.Errorf("%s: err = %v, want a 404 stack_not_found that names no team", name, err)
+			}
 		}
 	})
-	t.Run("role", func(t *testing.T) {
-		for _, role := range []Role{RoleNone, RoleViewer} {
-			repo, _, created := existingStackFixture(t, StackActive)
-			svc := newSvcWithMembers(repo, fakeVersions{}, fakeMembers{dev.UserID: role})
-			for _, in := range []CreateInput{updateInput(), destroyInput()} {
-				_, err := svc.Create(context.Background(), dev, createCmd(stackInput(in, created.Stack.ID), "key-role-000001"))
-				if !apperr.IsKind(err, apperr.KindForbidden) {
-					t.Fatalf("role %q, %s: err = %v", role, in.Kind, err)
-				}
+	t.Run("members below the needed role are refused", func(t *testing.T) {
+		repo, _, created := existingStackFixture(t, StackActive)
+		svc := newSvcWithMembers(repo, fakeVersions{}, fakeMembers{dev.UserID: RoleViewer})
+		for _, in := range []CreateInput{updateInput(), destroyInput()} {
+			_, err := svc.Create(context.Background(), dev, createCmd(stackInput(in, created.Stack.ID), "key-role-000001"))
+			if !apperr.IsKind(err, apperr.KindForbidden) {
+				t.Fatalf("viewer, %s: err = %v", in.Kind, err)
 			}
 		}
 	})

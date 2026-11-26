@@ -68,7 +68,7 @@ func TestUpdateAndDestroyAgainstPostgres(t *testing.T) {
 	if acts := f.actions(t, down.Request.ID); len(acts) == 0 || acts[0] != "request.created" {
 		t.Fatalf("audit = %v", acts)
 	}
-	if _, err := f.svc.Create(ctx, f.user, createCmd(stackInput(updateInput(), uuid.New()), "kinds-unknown-01")); !hasCode(err, "validation_failed") {
+	if _, err := f.svc.Create(ctx, f.user, createCmd(stackInput(updateInput(), uuid.New()), "kinds-unknown-01")); !hasCode(err, "stack_not_found") {
 		t.Fatalf("unknown stack: %v", err)
 	}
 }

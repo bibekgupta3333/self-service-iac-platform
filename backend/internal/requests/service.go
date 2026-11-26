@@ -275,8 +275,8 @@ func (s *Service) precheck(ctx context.Context, by identity.Principal, in Create
 	if err != nil {
 		return fieldLookupError(err, "/team", fmt.Sprintf("unknown team %q", in.Team))
 	}
-	if need := RequiredRole(in.Kind, in.Environment); !role.AtLeast(need) {
-		return forbiddenRole(in.Kind, in.Team, need)
+	if err := authorizeKind(role, in.Kind, in.Environment, in.Team); err != nil {
+		return err
 	}
 	return s.checkResources(ctx, in.Resources)
 }
@@ -288,14 +288,18 @@ func (s *Service) precheck(ctx context.Context, by identity.Principal, in Create
 func (s *Service) precheckExisting(ctx context.Context, by identity.Principal, in CreateInput) error {
 	t, err := s.repo.StackTarget(ctx, *in.StackID)
 	if err != nil {
-		return fieldLookupError(err, "/stack_id", fmt.Sprintf("unknown stack %s", in.StackID))
+		return stackLookupError(err, *in.StackID)
 	}
 	role, err := s.members.RoleInTeam(ctx, t.TeamSlug, by.UserID)
 	if err != nil {
 		return fmt.Errorf("lookup membership of team %s: %w", t.TeamSlug, err)
 	}
-	if need := RequiredRole(in.Kind, t.Environment); !role.AtLeast(need) {
-		return forbiddenRole(in.Kind, t.TeamSlug, need)
+	if role == RoleNone {
+		// No role in the team: the stack is hidden, exactly as if it did not exist.
+		return stackNotFound(*in.StackID)
+	}
+	if err := authorizeKind(role, in.Kind, t.Environment, t.TeamSlug); err != nil {
+		return err
 	}
 	if err := CheckStackAllowsKind(in.Kind, t.Status, nil); err != nil {
 		return err
@@ -311,8 +315,28 @@ func (s *Service) precheckExisting(ctx context.Context, by identity.Principal, i
 	return s.checkResources(ctx, in.Resources)
 }
 
-func forbiddenRole(kind Kind, team string, need Role) error {
-	return apperr.Forbidden(fmt.Sprintf("creating a %s request for team %s needs the %s role or higher", kind, team, need))
+// authorizeKind is the one decision whether a caller with role in team may create a request
+// of kind against environment env (docs/03 §6.4; see RequiredRole). Create, update and
+// destroy all go through it, so swapping in another policy matrix is a change to this
+// function only. Pure.
+func authorizeKind(role Role, kind Kind, env, team string) error {
+	if need := RequiredRole(kind, env); !role.AtLeast(need) {
+		return apperr.Forbidden(fmt.Sprintf("creating a %s request for team %s needs the %s role or higher", kind, team, need))
+	}
+	return nil
+}
+
+func stackNotFound(id uuid.UUID) error {
+	return &apperr.Error{Kind: apperr.KindNotFound, Code: "stack_not_found", Message: fmt.Sprintf("stack %s not found", id)}
+}
+
+// stackLookupError maps a failed stack lookup: a missing stack is the same not-found as a
+// hidden one.
+func stackLookupError(err error, id uuid.UUID) error {
+	if apperr.IsKind(err, apperr.KindNotFound) {
+		return stackNotFound(id)
+	}
+	return fmt.Errorf("lookup stack %s: %w", id, err)
 }
 
 // checkResources resolves the pinned module versions and validates every resource's inputs.
@@ -380,7 +404,7 @@ func (s *Service) createForStack(ctx context.Context, st Store, by identity.Prin
 	in := cmd.Input
 	t, err := st.LockStackTarget(ctx, *in.StackID)
 	if err != nil {
-		return nil, fieldLookupError(err, "/stack_id", fmt.Sprintf("unknown stack %s", in.StackID))
+		return nil, stackLookupError(err, *in.StackID)
 	}
 	open, err := st.OpenRequestKinds(ctx, t.ID)
 	if err != nil {
