@@ -28,6 +28,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/outbox"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/prflow"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/recovery"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/publish"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/publish/githubapp"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/publish/localgit"
@@ -96,6 +97,14 @@ func run() error {
 		heads = pub
 	}
 	handlers := map[string]outbox.Handler{outbox.TopicGitHubEvent: webhooks.NewApplier(requestSvc, heads)}
+	recoveryRepo := recovery.NewPostgresRepository(pool, auditWriter)
+	retrier := recovery.NewRetrier(recoveryRepo, clock, ids)
+	if pub != nil {
+		// Transient apply failures are retried by dispatching apply.yml again (docs/06 §5).
+		handlers[recovery.TopicApplyRetry] = recovery.NewDispatcher(recoveryRepo, pub, clock, cfg.Publisher.BaseBranch)
+	} else {
+		retrier.DisableRetries() // nothing could dispatch a retry: classify and record only
+	}
 	if pub != nil {
 		requestSvc.EnablePublishing()
 		lockSvc.OnPromote(requests.PublishOnPromote(clock))
@@ -149,7 +158,8 @@ func run() error {
 			httpapi.NewBudgetContextHandler(budgets.NewService(budgets.NewPostgresRepository(pool), clock)),
 		},
 		Webhooks:         []httpapi.RouteRegistrar{webhookHandler},
-		PipelineHandlers: []httpapi.RouteRegistrar{httpapi.NewRunHandler(runs.NewService(runs.NewPostgresRepository(pool), clock))},
+		PipelineHandlers: []httpapi.RouteRegistrar{httpapi.NewRunHandler(runs.NewService(runs.NewPostgresRepository(pool), clock)).
+			WithObserver(recovery.NewReportObserver(retrier))},
 		Metrics:          newMetrics(pool),
 		MetricsAccess:    httpapi.NewMetricsAccess(cfg.MetricsToken),
 	})
