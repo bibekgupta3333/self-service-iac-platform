@@ -10,8 +10,8 @@ needs paths relative to the repository root, so ``rebase_sarif`` rewrites every
 - a file of a downloaded module (``<download dir>/.../modules/<name>/vX.Y.Z/<path>``)
   becomes ``<path>``, the module's file in this repository (at its pinned tag, so
   line numbers can differ from the default branch), and must stay under ``modules/``;
-- anything else, such as an absolute path or one that leaves the repository, the
-  stack root or ``modules/``, points at the stack's ``main.tf``, where the module
+- anything else, such as an absolute path, one with ``%``, ``\\`` or a drive letter, or one
+  that leaves the repository, the stack root or ``modules/``, points at the stack's ``main.tf``, where the module
   calls are.
 
 Everything here is pure.
@@ -30,6 +30,10 @@ RUN_KEYS_SET_BY_UPLOAD = ("automationDetails", "versionControlProvenance")
 # The pinned tag is part of the download path; the repository path follows it.
 _MODULE_FILE_RE = re.compile(r"(?:^|/)modules/[a-z0-9_-]+/v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]*)?/(.+)$")
 _SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
+# A stack-relative path is plain POSIX text. Percent-escapes (``%2e%2e``), backslashes
+# and a drive letter (``C:``) mean something else to a consumer that decodes or
+# normalises the uri, so such a path is never kept as literal text.
+_NOT_PLAIN_POSIX_RE = re.compile(r"[%\\]|^[a-zA-Z]:")
 
 
 class SarifError(ValueError):
@@ -65,7 +69,7 @@ def rebase_uri(uri: str, stack_path: str, external_dirs: Iterable[str] = (), rep
         rest = _inside(path, repo_root)
         if rest is not None:
             return _contained(rest, fallback)
-    if path.startswith("/"):
+    if path.startswith("/") or _NOT_PLAIN_POSIX_RE.search(path):
         return fallback
     return _contained(posixpath.join(stack_path, path), fallback, under=stack_path)
 
