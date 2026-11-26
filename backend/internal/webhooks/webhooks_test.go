@@ -148,11 +148,53 @@ func TestIngestDedupesAndFiltersRepository(t *testing.T) {
 type fakeEvents struct {
 	events []requests.GitHubEvent
 	hints  []requests.WorkflowHint
+	known  string // when set, pushes not starting here are stale
 }
 
 func (f *fakeEvents) ApplyGitHubEvent(_ context.Context, e requests.GitHubEvent) (requests.EventOutcome, error) {
 	f.events = append(f.events, e)
-	return requests.EventOutcome{Applied: true}, nil
+	if f.known != "" && e.Event == requests.EventNewCommit && e.BeforeSHA != f.known {
+		return requests.EventOutcome{Reason: "stale_head", KnownHead: f.known}, nil
+	}
+	return requests.EventOutcome{Applied: true, KnownHead: f.known}, nil
+}
+
+type fixedHead string
+
+func (h fixedHead) PullRequestHead(context.Context, int) (string, error) { return string(h), nil }
+
+func TestApplierResyncsAStalePush(t *testing.T) {
+	ctx := context.Background()
+	push, _ := json.Marshal(Command{Kind: KindTransition, RequestShortID: "req-7k3p9x", PRNumber: 812,
+		RequestEvent: requests.EventNewCommit, BeforeSHA: "b", HeadSHA: "c", DeliveryID: "d"})
+	tests := []struct {
+		name       string
+		head       PRHeads
+		wantEvents int
+		wantLast   requests.GitHubEvent
+	}{
+		{name: "real head moved: one push from the known head", head: fixedHead("c"), wantEvents: 2,
+			wantLast: requests.GitHubEvent{BeforeSHA: "a", HeadSHA: "c"}},
+		{name: "replay: the head did not move", head: fixedHead("a"), wantEvents: 1},
+		{name: "no publisher: only audited", head: nil, wantEvents: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := &fakeEvents{known: "a"}
+			if err := NewApplier(f, tt.head).Handle(ctx, outbox.Job{Payload: push}); err != nil {
+				t.Fatal(err)
+			}
+			if len(f.events) != tt.wantEvents {
+				t.Fatalf("events = %+v", f.events)
+			}
+			if tt.wantEvents == 2 {
+				last := f.events[1]
+				if last.BeforeSHA != tt.wantLast.BeforeSHA || last.HeadSHA != tt.wantLast.HeadSHA || last.Event != requests.EventNewCommit {
+					t.Fatalf("resync event = %+v", last)
+				}
+			}
+		})
+	}
 }
 
 func (f *fakeEvents) RecordWorkflowHint(_ context.Context, h requests.WorkflowHint) (bool, error) {
@@ -162,7 +204,7 @@ func (f *fakeEvents) RecordWorkflowHint(_ context.Context, h requests.WorkflowHi
 
 func TestApplier(t *testing.T) {
 	f := &fakeEvents{}
-	a := NewApplier(f)
+	a := NewApplier(f, nil)
 	ctx := context.Background()
 	tr, _ := json.Marshal(Command{Kind: KindTransition, RequestShortID: "req-7k3p9x", PRNumber: 812,
 		RequestEvent: requests.EventPRClosed, DeliveryID: "d"})

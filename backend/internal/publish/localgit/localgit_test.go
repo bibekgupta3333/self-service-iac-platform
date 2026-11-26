@@ -166,6 +166,12 @@ func TestFakePullRequests(t *testing.T) {
 	if err := p.DispatchWorkflow(ctx, publish.Dispatch{Workflow: "pr-validate.yml", Ref: "iacp/req-aaaaaa"}); err != nil {
 		t.Fatal(err)
 	}
+	if head, err := p.PullRequestHead(ctx, 2); err != nil || head != gitOut(t, dir, "rev-parse", "iacp/req-bbbbbb") {
+		t.Fatalf("head = %q, %v", head, err)
+	}
+	if _, err := p.PullRequestHead(ctx, 99); err == nil {
+		t.Fatal("unknown PR must fail")
+	}
 	if err := p.ClosePullRequest(ctx, 2); err != nil {
 		t.Fatal(err)
 	}

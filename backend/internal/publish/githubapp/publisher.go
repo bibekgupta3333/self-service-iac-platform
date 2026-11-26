@@ -237,6 +237,19 @@ func (c *Client) AddLabels(ctx context.Context, number int, labels []string) err
 	return nil
 }
 
+// PullRequestHead implements publish.Publisher.
+func (c *Client) PullRequestHead(ctx context.Context, number int) (string, error) {
+	var pr struct {
+		Head struct {
+			SHA string `json:"sha"`
+		} `json:"head"`
+	}
+	if err := c.do(ctx, http.MethodGet, c.repoPath(fmt.Sprintf("/pulls/%d", number)), nil, &pr, authInstallation); err != nil {
+		return "", fmt.Errorf("read pull request #%d: %w", number, err)
+	}
+	return pr.Head.SHA, nil
+}
+
 // ClosePullRequest implements publish.Publisher.
 func (c *Client) ClosePullRequest(ctx context.Context, number int) error {
 	if err := c.do(ctx, http.MethodPatch, c.repoPath(fmt.Sprintf("/pulls/%d", number)),

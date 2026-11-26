@@ -89,6 +89,8 @@ func (f *fakePublisher) ClosePullRequest(_ context.Context, n int) error {
 	return nil
 }
 
+func (f *fakePublisher) PullRequestHead(context.Context, int) (string, error) { return "", nil }
+
 func (f *fakePublisher) DeleteBranch(_ context.Context, b string) error {
 	f.deleted = append(f.deleted, b)
 	return nil

@@ -198,6 +198,16 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		f.refs[strings.TrimPrefix(p, "/git/refs/heads/")] = body["sha"].(string)
 		reply(http.StatusOK, nil)
+	case r.Method == http.MethodGet && strings.HasPrefix(p, "/pulls/"):
+		var n int
+		_, _ = fmt.Sscanf(p, "/pulls/%d", &n)
+		for head, num := range f.pulls {
+			if num == n {
+				reply(http.StatusOK, map[string]any{"number": n, "head": map[string]string{"ref": head, "sha": f.refs[head]}})
+				return
+			}
+		}
+		reply(http.StatusNotFound, map[string]string{"message": "Not Found"})
 	case r.Method == http.MethodPatch && strings.HasPrefix(p, "/pulls/"):
 		if body["state"] != "closed" {
 			reply(http.StatusUnprocessableEntity, map[string]string{"message": "only closing is expected"})
@@ -398,6 +408,13 @@ func TestCloseAndDeleteBranch(t *testing.T) {
 	ctx := context.Background()
 	if _, err := c.CommitFiles(ctx, publish.Commit{Branch: "iacp/req-7k3p9x", Message: "m", Files: files}); err != nil {
 		t.Fatal(err)
+	}
+	pr, err := c.OpenPullRequest(ctx, publish.PullRequestSpec{Head: "iacp/req-7k3p9x", Title: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head, err := c.PullRequestHead(ctx, pr.Number); err != nil || head != f.refs["iacp/req-7k3p9x"] {
+		t.Fatalf("head = %q, %v", head, err)
 	}
 	if err := c.ClosePullRequest(ctx, 800); err != nil {
 		t.Fatal(err)

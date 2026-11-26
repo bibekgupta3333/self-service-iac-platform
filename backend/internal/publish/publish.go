@@ -119,6 +119,9 @@ type Publisher interface {
 	ClosePullRequest(ctx context.Context, number int) error
 	// DeleteBranch deletes a branch; a missing branch is not an error.
 	DeleteBranch(ctx context.Context, branch string) error
+	// PullRequestHead returns the current head commit SHA of a PR (used to resync after a
+	// push webhook was lost or arrived out of order).
+	PullRequestHead(ctx context.Context, number int) (string, error)
 }
 
 // ErrInvalidPath is returned for a file path that could escape the repository.

@@ -84,11 +84,15 @@ func run() error {
 	lockSvc := locks.NewService(locks.NewPostgresRepository(pool, auditWriter), clock, locks.DefaultLease)
 	requestSvc := requests.NewService(requestRepo, catalogSvc, requestRepo, lockSvc, clock, ids)
 
-	handlers := map[string]outbox.Handler{outbox.TopicGitHubEvent: webhooks.NewApplier(requestSvc)}
 	pub, err := newPublisher(ctx, cfg, clock)
 	if err != nil {
 		return err
 	}
+	var heads webhooks.PRHeads
+	if pub != nil {
+		heads = pub
+	}
+	handlers := map[string]outbox.Handler{outbox.TopicGitHubEvent: webhooks.NewApplier(requestSvc, heads)}
 	if pub != nil {
 		requestSvc.EnablePublishing()
 		lockSvc.OnPromote(requests.PublishOnPromote(clock))

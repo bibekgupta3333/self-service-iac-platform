@@ -290,6 +290,22 @@ func (p *Publisher) AddLabels(_ context.Context, number int, labels []string) er
 	return fmt.Errorf("localgit: pull request #%d not found", number)
 }
 
+// PullRequestHead implements publish.Publisher: the commit the fake PR's head branch points at.
+func (p *Publisher) PullRequestHead(ctx context.Context, number int) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	st, err := p.LoadState()
+	if err != nil {
+		return "", err
+	}
+	for _, pr := range st.Pulls {
+		if pr.Number == number {
+			return p.resolve(ctx, pr.Head)
+		}
+	}
+	return "", fmt.Errorf("localgit: pull request #%d not found", number)
+}
+
 // ClosePullRequest implements publish.Publisher by marking the fake PR closed.
 func (p *Publisher) ClosePullRequest(_ context.Context, number int) error {
 	p.mu.Lock()

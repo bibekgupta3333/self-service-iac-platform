@@ -137,11 +137,21 @@ type RequestEvents interface {
 	RecordWorkflowHint(ctx context.Context, h requests.WorkflowHint) (bool, error)
 }
 
-// Applier is the outbox handler for github.event commands.
-type Applier struct{ reqs RequestEvents }
+// PRHeads reads a PR's current head (publish.Publisher implements it).
+type PRHeads interface {
+	PullRequestHead(ctx context.Context, number int) (string, error)
+}
 
-// NewApplier returns an Applier.
-func NewApplier(reqs RequestEvents) *Applier { return &Applier{reqs: reqs} }
+// Applier is the outbox handler for github.event commands.
+type Applier struct {
+	reqs  RequestEvents
+	heads PRHeads // nil without a publisher: stale pushes are only audited
+}
+
+// NewApplier returns an Applier. heads may be nil.
+func NewApplier(reqs RequestEvents, heads PRHeads) *Applier {
+	return &Applier{reqs: reqs, heads: heads}
+}
 
 var _ outbox.Handler = (*Applier)(nil)
 
@@ -154,14 +164,38 @@ func (a *Applier) Handle(ctx context.Context, j outbox.Job) error {
 	}
 	switch c.Kind {
 	case KindTransition:
-		_, err := a.reqs.ApplyGitHubEvent(ctx, requests.GitHubEvent{RequestShortID: c.RequestShortID, PRNumber: c.PRNumber,
+		e := requests.GitHubEvent{RequestShortID: c.RequestShortID, PRNumber: c.PRNumber,
 			Event: c.RequestEvent, MergeCommitSHA: c.MergeCommitSHA, DeliveryID: c.DeliveryID, Action: c.Action,
-			HeadSHA: c.HeadSHA, BeforeSHA: c.BeforeSHA})
-		return err
+			HeadSHA: c.HeadSHA, BeforeSHA: c.BeforeSHA}
+		out, err := a.reqs.ApplyGitHubEvent(ctx, e)
+		if err != nil {
+			return err
+		}
+		return a.resync(ctx, e, out)
 	case KindHint:
 		_, err := a.reqs.RecordWorkflowHint(ctx, requests.WorkflowHint{RequestShortID: c.RequestShortID, Workflow: c.Workflow,
 			RunID: c.RunID, Conclusion: c.Conclusion, HeadSHA: c.HeadSHA, URL: c.URL, DeliveryID: c.DeliveryID})
 		return err
 	}
 	return errors.Join(fmt.Errorf("unknown command kind %q", c.Kind), outbox.ErrPermanent)
+}
+
+// resync handles a push whose before SHA did not match the known head (a lost or
+// reordered synchronize). Instead of dropping it, it reads the PR's real head and, when
+// that differs from the known head, applies one push from the known head to the real
+// one. A replayed old push finds the head unchanged and does nothing.
+func (a *Applier) resync(ctx context.Context, e requests.GitHubEvent, out requests.EventOutcome) error {
+	if a.heads == nil || out.Reason != "stale_head" || e.Event != requests.EventNewCommit || out.KnownHead == "" {
+		return nil
+	}
+	head, err := a.heads.PullRequestHead(ctx, e.PRNumber)
+	if err != nil {
+		return fmt.Errorf("resync head of PR #%d: %w", e.PRNumber, err) // retried by the outbox
+	}
+	if head == "" || head == out.KnownHead {
+		return nil
+	}
+	e.BeforeSHA, e.HeadSHA, e.Action = out.KnownHead, head, "synchronize (resynced from GitHub)"
+	_, err = a.reqs.ApplyGitHubEvent(ctx, e)
+	return err
 }
