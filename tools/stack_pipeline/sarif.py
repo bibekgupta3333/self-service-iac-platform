@@ -25,6 +25,8 @@ import re
 from typing import Any, Iterable, Mapping
 
 FALLBACK_FILE = "main.tf"
+# Run properties the upload job owns: the category and the analysed commit.
+RUN_KEYS_SET_BY_UPLOAD = ("automationDetails", "versionControlProvenance")
 # The pinned tag is part of the download path; the repository path follows it.
 _MODULE_FILE_RE = re.compile(r"(?:^|/)modules/[a-z0-9_-]+/v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]*)?/(.+)$")
 _SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
@@ -109,6 +111,13 @@ def rebase_sarif(
                 fix(item)
 
     fix(out["runs"])
+    # The SARIF comes from a job that runs PR code. A run's automationDetails.id would
+    # win over the upload's category input, so drop it (and the run's own idea of
+    # the commit) and let the upload job decide both.
+    for run in out["runs"]:
+        if isinstance(run, dict):
+            for key in RUN_KEYS_SET_BY_UPLOAD:
+                run.pop(key, None)
     return out
 
 

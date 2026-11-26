@@ -101,6 +101,15 @@ class TestRebaseSarif:
         )
         assert result_count(out) == 1
 
+    def test_drops_category_and_provenance_set_by_the_producer(self):
+        doc = sarif("main.tf")
+        doc["runs"][0]["automationDetails"] = {"id": "pr-validate/checkov/production__payments__orders/"}
+        doc["runs"][0]["versionControlProvenance"] = [{"repositoryUri": "x", "revisionId": "0" * 40}]
+        run = rebase_sarif(doc, STACK)["runs"][0]
+        assert "automationDetails" not in run and "versionControlProvenance" not in run
+        assert run["tool"] == {"driver": {"name": "Checkov"}}
+        assert "automationDetails" in doc["runs"][0]  # the input is not mutated
+
     @pytest.mark.parametrize("doc", [None, [], {"version": "2.1.0"}, {"runs": {}}])
     def test_not_sarif(self, doc):
         with pytest.raises(SarifError):
