@@ -42,8 +42,24 @@ export function buildUrl(baseUrl: string, path: string, query: Record<string, Qu
   return `${base}${path.startsWith("/") ? path : `/${path}`}${qs ? `?${qs}` : ""}`;
 }
 
-/** seg encodes one path segment. Pure. */
-const seg = (s: string): string => encodeURIComponent(s);
+/**
+ * seg encodes one path segment. encodeURIComponent leaves "." and ".." unchanged, and fetch
+ * would then normalise them away (".../versions/.." becomes ".../modules/sqs"), so dot and
+ * empty segments are refused as not found instead of being sent. Pure.
+ */
+export function seg(s: string): string {
+  if (s === "" || s === "." || s === "..") {
+    throw new ApiError({
+      type: "about:blank",
+      title: "Resource not found",
+      status: 404,
+      code: "not_found",
+      detail: `invalid path segment ${JSON.stringify(s)}`,
+      errors: [],
+    });
+  }
+  return encodeURIComponent(s);
+}
 
 interface SendOptions {
   query?: Record<string, QueryValue>;

@@ -65,6 +65,21 @@ describe("ApiClient catalog", () => {
     expect(f.calls[0]?.url).toBe("http://api.test/v1/catalog/modules/sqs/versions/1.0.0%2F..%2Fx");
   });
 
+  it.each([[".."], ["."], [""]])("refuses the path segment %j without calling fetch", async (bad) => {
+    const f = fakeFetch();
+    const err = (await client(f.fetch).getVersion("sqs", bad).catch((e: unknown) => e)) as ApiError;
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.status).toBe(404);
+    expect(f.calls).toHaveLength(0);
+    await expect(client(f.fetch).getRequest("..")).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it("encodes a percent sign in a name", async () => {
+    const f = fakeFetch(json(200, { name: "%" }));
+    await client(f.fetch).getModule("%");
+    expect(f.calls[0]?.url).toBe("http://api.test/v1/catalog/modules/%25");
+  });
+
   it("unwraps versions", async () => {
     const f = fakeFetch(json(200, { data: [{ version: "1.0.0" }], next_cursor: null }));
     expect(await client(f.fetch).listVersions("sqs")).toEqual([{ version: "1.0.0" }]);
