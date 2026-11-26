@@ -91,11 +91,11 @@ While local-first ([ADR-0009](adr/0009-local-first-localstack-and-local-backend.
 Detection algorithm (`python -m tools.stack_pipeline detect`, used by `pr-validate.yml` and later `apply.yml`):
 
 1. `git diff --name-only <base>...<head> -- environments/` (PR: merge base vs. head; push: `github.event.before..github.event.after`).
-2. Map each path to its stack root by taking the first four segments (`environments/<env>/<team>/<stack>`).
-3. Deduplicate; keep roots that still contain `iacp.stack.json`. Roots that were deleted (cleanup after destroy) are skipped — their state is already empty.
-4. Emit a JSON matrix built from each `iacp.stack.json`, whose identity must match its directory: `[{ "id": "development-platform-smoke", "path": "environments/development/platform/smoke", "environment": "...", "team": "...", "stack": "...", "region": "...", "lifecycle": "active", "backend": "local" }]` (`account_id`, `desired_state` and `ephemeral` join the entry when the stack file carries them). `git diff --no-renames` reports a moved stack as a delete plus an add.
+2. Map each path to its stack root by taking the first four segments (`environments/<env>/<team>/<stack>`). **Fail closed:** any changed path under `environments/` that is not inside a valid root fails detection. That covers an unknown environment, a segment that is not a lowercase name (uppercase, spaces), and a file directly under `environments/`, an environment or a team. The only exceptions are `environments/README.md` and `environments/<env>/.gitkeep`.
+3. Deduplicate and keep the roots that contain `iacp.stack.json`. A root whose directory is gone (cleanup after destroy) is skipped, because its state is already empty. A root that still has files but no `iacp.stack.json` fails detection.
+4. Emit a JSON matrix built from each `iacp.stack.json`, whose identity must match its directory: `[{ "id": "development__platform__smoke", "path": "environments/development/platform/smoke", "environment": "...", "team": "...", "stack": "...", "region": "...", "lifecycle": "active", "backend": "local" }]` (`account_id`, `desired_state` and `ephemeral` join the entry when the stack file carries them). `id` joins environment, team and stack with `__`, which names cannot contain, so ids are injective. `git diff --no-renames` reports a moved stack as a delete plus an add.
 5. Guard rails: fail if more than 20 stacks changed (generator emits at most one stack per request; bulk changes require the `iacp/bulk` label and platform-team approval). Fail if two changed stacks have a `depends_on` edge between them — the backend serialises dependent stacks into separate requests (DAG ordering, see [06-lifecycle-management.md](06-lifecycle-management.md#7-dependency-management)). `depends_on` entries may name a stack as `<env>/<team>/<stack>`, by its slug id, or by its path.
-6. A change to the pipeline itself (`.github/workflows/pr-validate.yml`, `tools/stack_pipeline/`) re-validates every stack (`--full-run-prefix`); the 20-stack limit applies to change sets, not to these full runs.
+6. A change to the pipeline or its inputs re-validates every stack (`--full-run-prefix`): `.github/workflows/pr-validate.yml`, `tools/stack_pipeline/`, `policies/` (OPA, custom Checkov checks and their pinned requirements), `.tflint.hcl` and `.terraform-version`. The 20-stack limit applies to change sets, not to these full runs.
 
 Changes outside `environments/` do not plan stacks: `modules/**` triggers `module-release.yml`; `policies/**` triggers `opa test` / `conftest verify` and Checkov custom-check unit tests; `backend/**` and `portal/**` have their own app CI.
 
@@ -348,21 +348,34 @@ Notes:
 | Area | Target design | Today |
 |---|---|---|
 | AWS access | `iacp-plan` role through OIDC | LocalStack service container, dummy `test`/`test` credentials, generated LocalStack provider endpoints and the `local` backend; no `id-token: write` |
-| Triggers | `environments/**` | Also `.github/workflows/pr-validate.yml` and `tools/stack_pipeline/**`, which re-validate every stack |
-| Module fetch | Published `modules/<name>/vX.Y.Z` tag | `verify-pins` step first (below) |
-| Checkov | `checkov -d . --download-external-modules true` | Same, with `--skip-check CKV_TF_1`: stacks pin exact release tags (enforced by `iacp.forbidden.module_source`), and `verify-pins` checks the tag-to-commit binding that CKV_TF_1 protects |
+| Triggers | `environments/**` | Every PR, with no `paths` filter, so the required `pr-validate-result` check always reports. `detect` returns zero stacks quickly when nothing under `environments/` changed. Pipeline, policy and tool-version changes re-validate every stack |
+| Module fetch | Published `modules/<name>/vX.Y.Z` tag | `verify-pins` before init and `verify-modules` after init (below) |
+| Checkov | `checkov -d . --download-external-modules true` | Same, with `--skip-check CKV_TF_1`. Stacks pin exact release tags (enforced by `iacp.forbidden.module_source`), and the tag-to-commit binding that CKV_TF_1 protects is checked twice: by `verify-pins` against the remote, and by `verify-modules` against the checkout that init fetched |
 | Policy context | `GET /v1/internal/budget-context` | `tools.stack_pipeline context`, built from the path-checked `iacp.stack.json`: environment, team, stack, no exceptions (WBS 6.4 replaces it) |
 | Apply | Only in `apply.yml` | A hermetic round trip in the same job: apply the plan to the job's throwaway LocalStack, require an empty `-detailed-exitcode` re-plan, then destroy. Nothing outside the job is touched |
-| PR comment | `marocchino/sticky-pull-request-comment` in the matrix job | The matrix job uploads `comment.md` / `summary.json`. A separate `comment` job, the only job with `pull-requests: write`, upserts one comment per stack by a hidden `<!-- iacp-plan:<id> -->` marker rebuilt from the artifact name. Fork PRs are skipped (read-only token); their summary stays in the job summary |
+| PR comment | `marocchino/sticky-pull-request-comment` in the matrix job | The matrix job uploads `comment.md` / `summary.json`. A separate `comment` job, the only job with `pull-requests: write`, upserts one comment per stack. It writes the hidden `<!-- iacp-plan:<id> -->` marker itself from the validated artifact name, and drops any marker-looking line from the artifact body. Fork PRs are skipped (read-only token); their summary stays in the job summary |
 | Artifacts | `tfplan`, `plan.json`, SARIF, Infracost | Only the rendered summary; `tfplan` and `plan.json` can hold sensitive values and never leave the job. SARIF (6.1) and Infracost (5.5) come later |
 | API report | `iacp-report` action (`plan_ready` / `plan_failed`) | `TODO(WBS 4.10)` in the workflow; the JSON summary is already the payload shape |
 
-**Module pins before tags exist.** Module-release (WBS 3.6) has not published any `modules/*` tag yet. A local relative source would be denied by `iacp.forbidden.module_source`, which cannot be waived, so stacks keep the generator's exact pinned git source. `python -m tools.stack_pipeline verify-pins <stack>` runs before `terraform init`:
+**Module pins.** A local relative source would be denied by `iacp.forbidden.module_source`, which cannot be waived, so stacks always keep the generator's exact pinned git source. Two steps tie that source to the commit recorded in `iacp.stack.json`.
 
-- **Published tag:** the tag on `origin` must resolve to the commit recorded in `iacp.stack.json`, or the step fails.
-- **Unpublished tag:** the recorded commit must already be on `origin/main`, and its `modules/<name>/module.yaml` must declare exactly that version. The step then pushes that one commit as the tag into a throwaway bare mirror, and routes the repository URL (with and without `.git`) to the mirror through `GIT_CONFIG_*` `insteadOf` environment variables. No git config file is changed.
+`python -m tools.stack_pipeline verify-pins <stack>` runs before `terraform init`:
 
-The plan JSON therefore carries the real pinned source, and every policy is evaluated unchanged. Code from the PR branch is never served as a module, and the bootstrap stops applying once the tag is published. `make stack-plan` runs the same sequence locally.
+- **Published tag:** the tag on `origin` must resolve to the recorded commit, or the step fails.
+- **Unpublished tag:** refused, unless the workflow-level `IACP_PIN_BOOTSTRAP` flag is `"true"`. The flag is set while ADR-0009 applies and module-release (WBS 3.6) has not yet published every pinned tag; it passes `--allow-unpublished`. With the flag on:
+  - the recorded commit must already be on `origin/main`, and its `modules/<name>/module.yaml` must declare exactly that version;
+  - the step pushes that one commit as the tag into a throwaway bare mirror;
+  - the repository URL (with and without `.git`) is routed to the mirror through `GIT_CONFIG_*` `insteadOf` environment variables. No git config file is changed.
+
+`python -m tools.stack_pipeline verify-modules <stack>` runs after `terraform init`:
+
+- It reads `.terraform/modules/modules.json`. The stack's root module calls and the pins must match one to one, with none missing and none extra.
+- Each source must be exactly `git::<repo>//modules/<name>?ref=<pinned tag>`, and nested calls inside platform modules may only use local paths.
+- It checks that `HEAD` of each fetched checkout is the recorded commit. This uses an explicit `--git-dir`, so git cannot resolve the enclosing repository. It also catches a tag that moved between `ls-remote` and `init`.
+
+The plan JSON therefore carries the real pinned source, and every policy is evaluated unchanged. Code from the PR branch is never served as a module. `make stack-plan` runs the same sequence locally and honours `IACP_PIN_BOOTSTRAP` (default `true`).
+
+Turning the bootstrap off: once module-release has published every pinned tag, set `IACP_PIN_BOOTSTRAP` to `"false"` (or remove it). Several commits on `main` can declare the same module version, and module-release tags the commit it releases, which may differ from the one a bootstrapped stack recorded. Re-render each such stack with the commit the published tag resolves to (`git ls-remote --tags origin`), or `verify-pins` fails on the mismatch.
 
 ### 4.3 `apply.yml`
 

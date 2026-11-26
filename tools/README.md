@@ -5,7 +5,7 @@ Python developer tooling. Each package follows the same 70/30 split: pure functi
 | Package | Purpose |
 |---------|---------|
 | `manifest_validator` | Validates `modules/*/module.yaml` against the schema and the module's `variables.tf` / `outputs.tf` |
-| `stack_pipeline` | CI helpers for stack roots under `environments/`, used by `.github/workflows/pr-validate.yml`: `detect` (changed stacks as a JSON matrix), `context` (conftest `--data`), `summary` (sticky PR comment and JSON payload), `verify-pins` (module tag-to-commit checks; serves unpublished tags from a local mirror) |
+| `stack_pipeline` | CI helpers for stack roots under `environments/`, used by `.github/workflows/pr-validate.yml`: `detect` (changed stacks as a JSON matrix), `context` (conftest `--data`), `summary` (sticky PR comment and JSON payload), `verify-pins` (module tag-to-commit checks before init; serves unpublished tags from a local mirror only with `--allow-unpublished`), `verify-modules` (installed modules match the pins one to one after init) |
  Each tool is a small, self-contained package with tests. Run tools from the repo root with the project virtualenv:
 
 ```bash

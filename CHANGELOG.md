@@ -52,6 +52,13 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
     - Only the comment job holds `pull-requests: write`.
     - Per-stack concurrency groups; provider and TFLint plugin caches. The API report is a `TODO(WBS 4.10)`.
   - Make targets `stack-detect`, `stack-plan`, `stack-apply`, `stack-destroy` and `stack-clean`.
+  - Review hardening:
+    - `detect` fails closed on any `environments/` path outside a valid stack root, and on a root with files but no `iacp.stack.json`.
+    - Stack ids are joined with `__`, so they are injective.
+    - New `verify-modules` step after init: the installed module calls must match the pins one to one, at the recorded commits.
+    - Serving unpublished tags now requires `IACP_PIN_BOOTSTRAP` (`--allow-unpublished`).
+    - The comment job writes the comment marker itself.
+    - The workflow runs on every PR, and policy and tool-version changes re-validate every stack.
 - Module registry MVP (WBS 3.1–3.5):
   - `modules/_shared/module.schema.json`, the JSON Schema for `module.yaml`.
   - `tools/manifest_validator`: schema, inputs-schema and variables.tf parity checks. Pytest suite; run it with `make validate-manifests`.
