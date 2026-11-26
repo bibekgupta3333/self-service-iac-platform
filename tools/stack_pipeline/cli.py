@@ -19,6 +19,7 @@ from .models import StackMetadataError, StackRef
 from .module_install import MANIFEST, ModuleInstallVerifier, parse_manifest
 from .module_pins import DEFAULT_REPO_URL, DEFAULT_TRUSTED_REF, ModulePinVerifier, PinError, Resolution, insteadof_config
 from .plan_summary import render_markdown, summarize
+from .stack_guard import LOCK_FILE, Violation, check_stack
 from .policy_context import ContextError, build_budget_context, build_context
 from .sarif import SarifError, rebase_sarif, result_count
 from .smoke import SmokeTester
@@ -75,6 +76,10 @@ def build_parser() -> argparse.ArgumentParser:
                               "absent or unusable means no estimate")
     context.add_argument("--api-context", type=Path,
                          help="`fetch-budget-context` output (--budget-gate); absent means no budget is configured")
+
+    guard = sub.add_parser("check-stack",
+                           help="static check of a stack root's HCL before init and plan (no plan-time code)")
+    guard.add_argument("stack_dir", type=Path)
 
     fetch = sub.add_parser("fetch-budget-context",
                            help="GET /v1/internal/budget-context for a stack root and write it to a file")
@@ -278,6 +283,45 @@ def _run_budget_context(args: argparse.Namespace) -> int:
         f"budget gate for {ref.path}: budget {'set' if context.get('budget') else 'not set'}, "
         f"estimate {context.get('estimated_monthly_cost_usd', 'missing')}\n"
     )
+    return 0
+
+
+MAX_GUARDED_FILE_BYTES = 1 << 20
+
+
+def _read_stack_files(root: Path) -> tuple[dict[str, str], list[Violation]]:
+    """The scannable top-level files of a stack root, and a violation for every entry that
+    cannot be trusted as a plain file (a symlink, an oversized or non-UTF-8 file). I/O adapter."""
+    files: dict[str, str] = {}
+    refused: list[Violation] = []
+    if not root.is_dir():
+        raise ValueError(f"{root} is not a directory")
+    for entry in sorted(root.iterdir()):
+        name = entry.name
+        if entry.is_symlink():
+            refused.append(Violation(name, 1, "symlink", "symbolic links are not allowed in a stack root"))
+        elif entry.is_file() and (name.endswith((".tf", ".tf.json")) or name == LOCK_FILE):
+            if entry.stat().st_size > MAX_GUARDED_FILE_BYTES:
+                refused.append(Violation(name, 1, "size", f"the file is larger than {MAX_GUARDED_FILE_BYTES} bytes"))
+                continue
+            try:
+                files[name] = entry.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                refused.append(Violation(name, 1, "unreadable", "the file is not UTF-8"))
+    return files, refused
+
+
+def run_check_stack(args: argparse.Namespace) -> int:
+    files, refused = _read_stack_files(args.stack_dir)
+    violations = refused + check_stack(files)
+    for v in violations:
+        print(f"::error file={args.stack_dir / v.path},line={v.line}::{annotation(v.render())}")
+    if violations:
+        print(f"error: {len(violations)} problem(s) in {args.stack_dir}: the stack root may only call pinned "
+              "platform modules (no resources, data sources, provisioners, other providers or backends)",
+              file=sys.stderr)
+        return 1
+    print(f"{args.stack_dir}: {len(files)} file(s) checked, no plan-time code")
     return 0
 
 
@@ -566,6 +610,7 @@ COMMANDS = {
     "detect": run_detect,
     "context": run_context,
     "fetch-budget-context": run_fetch_budget_context,
+    "check-stack": run_check_stack,
     "summary": run_summary,
     "verify-pins": run_verify_pins,
     "verify-modules": run_verify_modules,
