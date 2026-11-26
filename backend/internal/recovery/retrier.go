@@ -121,14 +121,22 @@ var recoveryPrincipal = identity.Principal{Login: "recovery", Type: identity.Act
 // ones (docs/06 §5). It never dispatches: the dispatch is the Dispatcher's outbox job, so
 // the retry decision, the retry_count increment, its audit and the job commit together.
 type Retrier struct {
-	repo  RetryRepository
-	clock platform.Clock
-	ids   platform.IDGenerator
+	repo     RetryRepository
+	clock    platform.Clock
+	ids      platform.IDGenerator
+	disabled bool
 }
 
 // NewRetrier returns a Retrier.
 func NewRetrier(repo RetryRepository, clock platform.Clock, ids platform.IDGenerator) *Retrier {
 	return &Retrier{repo: repo, clock: clock, ids: ids}
+}
+
+// DisableRetries keeps classifying and recording failures but schedules no retry (decision
+// retries_disabled). The API uses it when no publisher can dispatch workflows.
+func (r *Retrier) DisableRetries() *Retrier {
+	r.disabled = true
+	return r
 }
 
 // OnApplyFailure handles one failed apply.yml stage. In one transaction it locks the stack
@@ -157,6 +165,9 @@ func (r *Retrier) OnApplyFailure(ctx context.Context, f FailedApply) (Outcome, e
 		}
 		c := Classify(Failure{Stage: f.Stage, ExitCode: f.ExitCode, Message: f.Message})
 		plan := PlanRetry(c, f.Stage, t.Snapshot())
+		if plan.Retry && r.disabled {
+			plan = RetryPlan{Decision: DecisionRetriesDisabled}
+		}
 		if plan.Retry {
 			lock, err := st.CurrentLock(ctx, t.StackID)
 			if err != nil {

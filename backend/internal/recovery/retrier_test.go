@@ -257,6 +257,19 @@ func TestRetrierRecordsWithoutRetrying(t *testing.T) {
 	}
 }
 
+func TestRetrierWithRetriesDisabledOnlyRecords(t *testing.T) {
+	tgt := applyingTarget()
+	repo := &memRepo{s: newMem(tgt)}
+	out, err := NewRetrier(repo, platform.FixedClock{T: now}, platform.RandomIDs{}).DisableRetries().
+		OnApplyFailure(context.Background(), throttled(tgt, 1))
+	if err != nil || out.Decision != DecisionRetriesDisabled || out.Class != ClassTransient {
+		t.Fatalf("%+v, %v", out, err)
+	}
+	if len(repo.s.jobs) != 0 || repo.s.target.RetryCount != 0 || len(repo.s.events) != 1 {
+		t.Fatal("no retry without a dispatcher")
+	}
+}
+
 func TestRetrierIgnoresUnknownRequestsAndOtherStacks(t *testing.T) {
 	tgt := applyingTarget()
 	repo := &memRepo{s: newMem(tgt)}

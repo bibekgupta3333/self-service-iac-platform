@@ -28,6 +28,7 @@ const (
 	DecisionRequestNotApplying = "request_not_applying"
 	DecisionBudgetExhausted    = "retry_budget_exhausted"
 	DecisionLockLost           = "lock_lost"
+	DecisionRetriesDisabled    = "retries_disabled"
 )
 
 // retryStages are the stages a transient failure may be retried from: before or during
