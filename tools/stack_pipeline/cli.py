@@ -13,6 +13,7 @@ from typing import Any, Mapping, Sequence
 
 from .adapters import AwsCliTagReader, FileSystemStackRepository, GitCli, GitDiff
 from .api_client import ApiError, FreshCredentials, IacpApiClient, TokenSource
+from .convergence import plan_problem, residual_changes
 from .cost import fold_cost, parse_infracost, redact_plan
 from .detection import DEFAULT_MAX_STACKS, DetectionError, DetectionPolicy, DetectionResult, StackDetector
 from .models import StackMetadataError
@@ -21,7 +22,6 @@ from .module_pins import DEFAULT_REPO_URL, DEFAULT_TRUSTED_REF, ModulePinVerifie
 from .plan_summary import render_markdown, summarize
 from .policy_context import build_context
 from .sarif import SarifError, rebase_sarif, result_count
-from .convergence import residual_changes
 from .smoke import SmokeTester
 from .report import (
     GitHubRun,
@@ -340,6 +340,9 @@ def run_converged(args: argparse.Namespace) -> int:
     doc = _read_json(args.plan)
     if not isinstance(doc, dict):
         raise ValueError(f"missing or not a JSON object: --plan {args.plan}")
+    problem = plan_problem(doc)
+    if problem:
+        raise ValueError(f"--plan {args.plan}: {problem}")
     residual = residual_changes(doc)
     for line in residual:
         print(f"not converged: {line}")

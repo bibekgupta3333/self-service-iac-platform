@@ -33,7 +33,9 @@ class SmokeConfigError(ValueError):
     """The smoke test is not configured to run against LocalStack."""
 
 
-# Resource types whose tags LocalStack 4.4 does not keep: PutMetricAlarm drops its
+# Resource types whose tags LocalStack 4.4 does not keep (the image pinned in
+# docker-compose.yml and the workflows; a test fails when that pin moves, so this set is
+# revisited then): PutMetricAlarm drops its
 # Tags and the provider reads none back, so neither state nor the API can show the
 # required tags. Real AWS stores them; the smoke test only ever runs against LocalStack
 # (see local_endpoint), so these types are left out of the tag checks and reported.
