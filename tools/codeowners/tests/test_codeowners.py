@@ -52,6 +52,8 @@ def test_team_without_owners_needs_an_org() -> None:
         (config(default_owners=None), "default_owners"),
         (config(platform_paths=["modules/"]), "platform_paths"),
         (config(org="bad org"), "org"),
+        (config(platform_paths=["/environments/", "/environments/production/"]), "under /environments/<env>/"),
+        (config(platform_paths=["/environments/staging/payments/"]), "under /environments/<env>/"),
         (config(extra=1), "unknown top-level"),
         ([], "mapping"),
     ],

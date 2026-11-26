@@ -100,6 +100,12 @@ class OwnersConfig:
         paths = doc.get("platform_paths", list(DEFAULT_PLATFORM_PATHS))
         if not isinstance(paths, list) or not all(isinstance(p, str) and _PATH_RE.fullmatch(p) for p in paths):
             raise ConfigError("platform_paths must be a list of repo-anchored paths such as /modules/")
+        shadowed = [p for p in paths if p.startswith("/environments/") and p != "/environments/"]
+        if shadowed:
+            raise ConfigError(
+                f"platform_paths {shadowed} are under /environments/<env>/, where team rules come later and "
+                "always win; set per-environment owners on the team instead (teams.<slug>.environments)"
+            )
         teams_doc = doc.get("teams") or {}
         if not isinstance(teams_doc, dict):
             raise ConfigError("teams must be a mapping of slug to settings")
