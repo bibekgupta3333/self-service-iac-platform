@@ -1,13 +1,18 @@
 package httpapi
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/auth"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/catalog"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
 )
 
 func TestTokenAuthenticator(t *testing.T) {
@@ -42,6 +47,95 @@ func TestTokenAuthenticator(t *testing.T) {
 	r.Header.Set("Authorization", "Bearer ")
 	if _, err := disabled.Authenticate(r); err == nil {
 		t.Fatal("an unconfigured token authenticator must reject every request")
+	}
+}
+
+func workflowClaims(file, ref, event string) auth.Claims {
+	return auth.Claims{Repository: "acme/iacp", Ref: ref, RunID: "11873399021", RunAttempt: "2", EventName: event,
+		JobWorkflowRef: "acme/iacp/.github/workflows/" + file + "@" + ref}
+}
+
+// fakeTokenVerifier maps fixed token strings to verified workflow identities:
+// good/apply = apply.yml on main, release = module-release.yml on main, prvalidate =
+// pr-validate.yml on a PR merge ref; "forbidden.jwt.token" is a global allow-list rejection.
+type fakeTokenVerifier struct{}
+
+func (fakeTokenVerifier) Verify(_ context.Context, raw string) (auth.Claims, error) {
+	switch raw {
+	case "good.jwt.token", "apply.jwt.token":
+		return workflowClaims("apply.yml", "refs/heads/main", "push"), nil
+	case "release.jwt.token":
+		return workflowClaims("module-release.yml", "refs/heads/main", "push"), nil
+	case "prvalidate.jwt.token":
+		return workflowClaims("pr-validate.yml", "refs/pull/812/merge", "pull_request"), nil
+	case "badrun.jwt.token":
+		return auth.Claims{RunID: "x", RunAttempt: "1"}, nil
+	case "forbidden.jwt.token":
+		return auth.Claims{}, &apperr.Error{Kind: apperr.KindForbidden, Code: "workflow_not_allowed", Message: "ref not allowed"}
+	}
+	return auth.Claims{}, fmt.Errorf("%w: bad signature", auth.ErrInvalidToken)
+}
+
+func TestOIDCAuthenticator(t *testing.T) {
+	a := NewOIDCAuthenticator(fakeTokenVerifier{})
+	tests := []struct {
+		name      string
+		header    string
+		ok        bool
+		forbidden bool
+	}{
+		{name: "valid", header: "Bearer good.jwt.token", ok: true},
+		{name: "invalid", header: "Bearer bad.jwt.token"},
+		{name: "not a jwt", header: "Bearer " + testInternalToken},
+		{name: "missing", header: ""},
+		{name: "bad run id claim", header: "Bearer badrun.jwt.token"},
+		{name: "workflow not allowed", header: "Bearer forbidden.jwt.token", forbidden: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest("POST", "/v1/runs", nil)
+			r.Header.Set("Authorization", tt.header)
+			p, err := a.Authenticate(r)
+			if tt.ok != (err == nil) || tt.forbidden != apperr.IsKind(err, apperr.KindForbidden) {
+				t.Fatalf("Authenticate = %+v, %v", p, err)
+			}
+			if tt.ok && (p.Type != identity.ActorGitHubActions || p.Login != "acme/iacp/.github/workflows/apply.yml@refs/heads/main" ||
+				p.Workflow == nil || p.Workflow.RunID != 11873399021 || p.Workflow.RunAttempt != 2 || p.Workflow.Ref != "refs/heads/main") {
+				t.Fatalf("principal = %+v (%+v)", p, p.Workflow)
+			}
+		})
+	}
+}
+
+func TestOIDCOrTokenOnInternalRoutes(t *testing.T) {
+	cat := &fakeCatalog{versions: []catalog.ModuleVersion{sqsVersion()}}
+	h := NewRouter(Deps{Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DevAuthenticator{Principal: devPrincipal},
+		Internal: AnyAuthenticator{NewOIDCAuthenticator(fakeTokenVerifier{}), NewTokenAuthenticator(testInternalToken, releaseBot)},
+		Ready:    okPinger{}, Catalog: NewCatalogHandler(cat)})
+	body := `{"module":"sqs","version":"1.3.0"}`
+	tests := []struct {
+		header string
+		want   int
+	}{
+		{"Bearer release.jwt.token", 201},
+		{"Bearer " + testInternalToken, 200},
+		{"Bearer apply.jwt.token", 403},      // not module-release.yml
+		{"Bearer prvalidate.jwt.token", 403}, // PR-controlled workflow
+		{"Bearer bad.jwt.token", 401},
+		{"Bearer forbidden.jwt.token", 403},
+		{"", 401},
+	}
+	for _, tt := range tests {
+		rec := do(t, h, "POST", "/v1/internal/catalog/index", body, "Authorization", tt.header)
+		if rec.Code != tt.want {
+			t.Errorf("%q: status = %d, want %d: %s", tt.header, rec.Code, tt.want, rec.Body)
+		}
+		if tt.want == 403 && !strings.Contains(rec.Body.String(), `"code":"workflow_not_allowed"`) {
+			t.Errorf("403 body = %s", rec.Body)
+		}
+	}
+	if len(cat.indexed) != 2 || cat.indexed[0].Workflow == nil || cat.indexed[1] != releaseBot {
+		t.Fatalf("indexed by = %+v", cat.indexed)
 	}
 }
 

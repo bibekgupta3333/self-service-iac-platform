@@ -58,8 +58,8 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 | [x] 3.3 | `modules/sqs` (+ DLQ, redrive, KMS) + examples + tests | 1.5 | 3.1 |
 | [x] 3.4 | `modules/lambda` (IAM role least-privilege, log group, SQS trigger option) + tests | 2 | 3.1 |
 | [x] 3.5 | Terratest suites against LocalStack (`tests/`) | 1.5 | 3.2–3.4 |
-| [ ] 3.6 | `module-release.yml`: checks, tests, SemVer interface-diff gate, tag `modules/<n>/vX.Y.Z`, release notes | 1.5 | 3.5 |
-| [ ] 3.7 | Catalog index call (`POST /v1/internal/catalog/index`) | 0.5 | 4.3, 3.6 |
+| [x] 3.6 | `module-release.yml`: checks, tests, SemVer interface-diff gate, tag `modules/<n>/vX.Y.Z`, release notes (static checks and tests run in `ci.yml`; upgrade-plan test pending) | 1.5 | 3.5 |
+| [~] 3.7 | Catalog index call (`POST /v1/internal/catalog/index`) (client and workflow step done; skipped until `IACP_API_URL` and `IACP_INTERNAL_TOKEN` exist, ADR-0009) | 0.5 | 4.3, 3.6 |
 
 **Exit:** merging to `modules/s3` creates a tag, a release, and a catalog row. A breaking change with only a minor bump fails.
 
@@ -71,11 +71,11 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 | [x] 4.3 | Catalog service: `GET /v1/catalog/modules`, `/versions`, index endpoint | 1 | 4.2 |
 | [~] 4.4 | Auth: GitHub OAuth login, sessions/JWT, team sync → memberships, RBAC middleware (membership check on create done) | 2 | 4.2 |
 | [~] 4.5 | Request service + state machine + `Idempotency-Key` (create kind done) | 2 | 4.2 |
-| [ ] 4.6 | Platform per-stack lock, fencing token, queueing (`queued_behind`) | 1 | 4.5 |
+| [x] 4.6 | Platform per-stack lock, fencing token, queueing (`queued_behind`) (admin force-release on `/v1/stacks/{id}/lock` lands with RBAC, 4.4) | 1 | 4.5 |
 | [x] 4.7 | Config generator: templates (main/backend/versions/providers/`iacp.stack.json`), golden tests | 2 | 4.3 |
 | [ ] 4.8 | GitHub App client: branch, commit, PR, labels, workflow_dispatch | 1.5 | 2.5 |
 | [ ] 4.9 | Webhook ingester (HMAC, delivery dedupe) → SQS → worker status updates | 1.5 | 4.5 |
-| [ ] 4.10 | OIDC JWT verifier for `POST /v1/runs` and `/v1/internal/*` | 1 | 4.1 |
+| [~] 4.10 | OIDC JWT verifier for `POST /v1/runs` and `/v1/internal/*` (verifier, allow-lists, run provenance and `POST /v1/runs` done; `jti` replay cache pending) | 1 | 4.1 |
 | [x] 4.11 | Audit writer with hash chain + `/audit/verify` | 0.5 | 4.2 |
 
 **Exit:** `POST /v1/requests` opens a PR in under 10 s with golden-matching files, and the request reaches `applied` after merge.

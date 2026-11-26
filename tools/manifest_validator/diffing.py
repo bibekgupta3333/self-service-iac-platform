@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Iterable, Mapping
 
 from jsonschema import Draft202012Validator
@@ -41,6 +42,17 @@ def schema_errors(schema: Mapping[str, Any], value: Any) -> list[str]:
     """Messages for every way ``value`` violates ``schema`` (empty when valid). Pure: no I/O."""
     validator = Draft202012Validator(dict(schema))
     return sorted(error.message for error in validator.iter_errors(value))
+
+
+_CONSTRAINT_OP = re.compile(r"^(>=|<=|!=|~>|>|<|=)")
+
+
+def normalise_constraint(constraint: str | None) -> str | None:
+    """Canonical form of a version constraint for equality: ``>=1.10,<2.0`` -> ``>= 1.10, < 2.0``."""
+    if constraint is None:
+        return None
+    parts = [re.sub(r"\s+", "", part) for part in str(constraint).split(",")]
+    return ", ".join(_CONSTRAINT_OP.sub(r"\1 ", part) for part in parts if part)
 
 
 def format_names(names: Iterable[str]) -> str:

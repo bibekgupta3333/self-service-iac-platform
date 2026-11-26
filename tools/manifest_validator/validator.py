@@ -7,6 +7,7 @@ from typing import Sequence
 
 from .checks import (
     Check,
+    CompatibilityParityChecker,
     InputsSchemaChecker,
     MetadataChecker,
     OutputParityChecker,
@@ -38,6 +39,7 @@ class ManifestValidator:
             MetadataChecker(),
             VariableParityChecker(),
             OutputParityChecker(),
+            CompatibilityParityChecker(),
             VersionStampChecker(),
         ]
         return cls(ManifestLoader(modules_root), checks)

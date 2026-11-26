@@ -15,6 +15,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/catalog"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/db/dbtest"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/locks"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
 )
 
@@ -61,7 +62,8 @@ func TestConcurrentCreatesOnASmallPool(t *testing.T) {
 		}
 	}
 	repo := NewPostgresRepository(pool, writer)
-	svc := NewService(repo, cat, repo, platform.SystemClock{}, platform.RandomIDs{})
+	lockSvc := locks.NewService(locks.NewPostgresRepository(pool, writer), platform.SystemClock{}, 0)
+	svc := NewService(repo, cat, repo, lockSvc, platform.SystemClock{}, platform.RandomIDs{})
 	user := identity.Principal{UserID: userID, Login: "dev", Type: identity.ActorUser}
 
 	const n = 6
