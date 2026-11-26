@@ -5,6 +5,338 @@
     "root_module": {
       "resources": [
         {
+          "address": "aws_db_instance.default_key",
+          "mode": "managed",
+          "type": "aws_db_instance",
+          "name": "default_key",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "schema_version": 2,
+          "values": {
+            "allocated_storage": 20,
+            "allow_major_version_upgrade": null,
+            "apply_immediately": false,
+            "auto_minor_version_upgrade": true,
+            "blue_green_update": [],
+            "copy_tags_to_snapshot": false,
+            "custom_iam_instance_profile": null,
+            "customer_owned_ip_enabled": null,
+            "dedicated_log_volume": false,
+            "delete_automated_backups": true,
+            "deletion_protection": null,
+            "domain": null,
+            "domain_auth_secret_arn": null,
+            "domain_dns_ips": null,
+            "domain_iam_role_name": null,
+            "domain_ou": null,
+            "enabled_cloudwatch_logs_exports": null,
+            "engine": "postgres",
+            "final_snapshot_identifier": null,
+            "iam_database_authentication_enabled": null,
+            "identifier": "orders-default-key",
+            "instance_class": "db.t4g.micro",
+            "manage_master_user_password": true,
+            "max_allocated_storage": null,
+            "monitoring_interval": 0,
+            "password": null,
+            "password_wo": null,
+            "password_wo_version": null,
+            "performance_insights_enabled": false,
+            "publicly_accessible": false,
+            "region": "eu-central-1",
+            "replicate_source_db": null,
+            "restore_to_point_in_time": [],
+            "s3_import": [],
+            "skip_final_snapshot": true,
+            "storage_encrypted": true,
+            "tags": null,
+            "tags_all": {
+              "iacp:environment": "staging",
+              "iacp:team": "search"
+            },
+            "timeouts": null,
+            "upgrade_storage_config": null,
+            "username": "orders"
+          },
+          "sensitive_values": {
+            "blue_green_update": [],
+            "listener_endpoint": [],
+            "master_user_secret": [],
+            "password": true,
+            "password_wo": true,
+            "replicas": [],
+            "restore_to_point_in_time": [],
+            "s3_import": [],
+            "tags_all": {},
+            "vpc_security_group_ids": []
+          }
+        },
+        {
+          "address": "aws_db_instance.public_plain",
+          "mode": "managed",
+          "type": "aws_db_instance",
+          "name": "public_plain",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "schema_version": 2,
+          "values": {
+            "allocated_storage": 20,
+            "allow_major_version_upgrade": null,
+            "apply_immediately": false,
+            "auto_minor_version_upgrade": true,
+            "blue_green_update": [],
+            "copy_tags_to_snapshot": false,
+            "custom_iam_instance_profile": null,
+            "customer_owned_ip_enabled": null,
+            "dedicated_log_volume": false,
+            "delete_automated_backups": true,
+            "deletion_protection": null,
+            "domain": null,
+            "domain_auth_secret_arn": null,
+            "domain_dns_ips": null,
+            "domain_iam_role_name": null,
+            "domain_ou": null,
+            "enabled_cloudwatch_logs_exports": null,
+            "engine": "postgres",
+            "final_snapshot_identifier": null,
+            "iam_database_authentication_enabled": null,
+            "identifier": "orders-public",
+            "instance_class": "db.t4g.micro",
+            "manage_master_user_password": true,
+            "max_allocated_storage": null,
+            "monitoring_interval": 0,
+            "password": null,
+            "password_wo": null,
+            "password_wo_version": null,
+            "performance_insights_enabled": false,
+            "publicly_accessible": true,
+            "region": "eu-central-1",
+            "replicate_source_db": null,
+            "restore_to_point_in_time": [],
+            "s3_import": [],
+            "skip_final_snapshot": true,
+            "storage_encrypted": false,
+            "tags": null,
+            "tags_all": {
+              "iacp:environment": "staging",
+              "iacp:team": "search"
+            },
+            "timeouts": null,
+            "upgrade_storage_config": null,
+            "username": "orders"
+          },
+          "sensitive_values": {
+            "blue_green_update": [],
+            "listener_endpoint": [],
+            "master_user_secret": [],
+            "password": true,
+            "password_wo": true,
+            "replicas": [],
+            "restore_to_point_in_time": [],
+            "s3_import": [],
+            "tags_all": {},
+            "vpc_security_group_ids": []
+          }
+        },
+        {
+          "address": "aws_ecr_repository.loose",
+          "mode": "managed",
+          "type": "aws_ecr_repository",
+          "name": "loose",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "schema_version": 0,
+          "values": {
+            "encryption_configuration": [],
+            "force_delete": null,
+            "image_scanning_configuration": [
+              {
+                "scan_on_push": false
+              }
+            ],
+            "image_tag_mutability": "MUTABLE",
+            "name": "orders-loose",
+            "region": "eu-central-1",
+            "tags": null,
+            "tags_all": {
+              "iacp:environment": "staging",
+              "iacp:team": "search"
+            },
+            "timeouts": null
+          },
+          "sensitive_values": {
+            "encryption_configuration": [],
+            "image_scanning_configuration": [
+              {}
+            ],
+            "tags_all": {}
+          }
+        },
+        {
+          "address": "aws_ecs_service.public",
+          "mode": "managed",
+          "type": "aws_ecs_service",
+          "name": "public",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "schema_version": 1,
+          "values": {
+            "alarms": [],
+            "availability_zone_rebalancing": "DISABLED",
+            "capacity_provider_strategy": [],
+            "cluster": "arn:aws:ecs:eu-central-1:000000000000:cluster/orders",
+            "deployment_circuit_breaker": [],
+            "deployment_controller": [],
+            "deployment_maximum_percent": 200,
+            "deployment_minimum_healthy_percent": 100,
+            "desired_count": 1,
+            "enable_ecs_managed_tags": false,
+            "enable_execute_command": false,
+            "force_delete": null,
+            "force_new_deployment": null,
+            "health_check_grace_period_seconds": null,
+            "launch_type": "FARGATE",
+            "load_balancer": [],
+            "name": "orders-public",
+            "network_configuration": [
+              {
+                "assign_public_ip": true,
+                "security_groups": null,
+                "subnets": [
+                  "subnet-0aaaaaaaaaaaaaaa1"
+                ]
+              }
+            ],
+            "ordered_placement_strategy": [],
+            "placement_constraints": [],
+            "propagate_tags": null,
+            "region": "eu-central-1",
+            "scheduling_strategy": "REPLICA",
+            "service_connect_configuration": [],
+            "service_registries": [],
+            "tags": null,
+            "tags_all": {
+              "iacp:environment": "staging",
+              "iacp:team": "search"
+            },
+            "task_definition": "orders:1",
+            "timeouts": null,
+            "volume_configuration": [],
+            "vpc_lattice_configurations": [],
+            "wait_for_steady_state": false
+          },
+          "sensitive_values": {
+            "alarms": [],
+            "capacity_provider_strategy": [],
+            "deployment_circuit_breaker": [],
+            "deployment_controller": [],
+            "load_balancer": [],
+            "network_configuration": [
+              {
+                "subnets": [
+                  false
+                ]
+              }
+            ],
+            "ordered_placement_strategy": [],
+            "placement_constraints": [],
+            "service_connect_configuration": [],
+            "service_registries": [],
+            "tags_all": {},
+            "triggers": {},
+            "volume_configuration": [],
+            "vpc_lattice_configurations": []
+          }
+        },
+        {
+          "address": "aws_elasticache_replication_group.default_key",
+          "mode": "managed",
+          "type": "aws_elasticache_replication_group",
+          "name": "default_key",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "schema_version": 3,
+          "values": {
+            "at_rest_encryption_enabled": "true",
+            "auth_token": null,
+            "auth_token_update_strategy": null,
+            "automatic_failover_enabled": false,
+            "description": "cache without a customer-managed key",
+            "engine": "redis",
+            "final_snapshot_identifier": null,
+            "kms_key_id": null,
+            "log_delivery_configuration": [],
+            "multi_az_enabled": false,
+            "node_type": "cache.t4g.micro",
+            "notification_topic_arn": null,
+            "num_cache_clusters": 1,
+            "port": null,
+            "preferred_cache_cluster_azs": null,
+            "region": "eu-central-1",
+            "replication_group_id": "orders-default-key",
+            "snapshot_arns": null,
+            "snapshot_name": null,
+            "snapshot_retention_limit": null,
+            "tags": null,
+            "tags_all": {
+              "iacp:environment": "staging",
+              "iacp:team": "search"
+            },
+            "timeouts": null,
+            "transit_encryption_enabled": true,
+            "user_group_ids": null
+          },
+          "sensitive_values": {
+            "auth_token": true,
+            "log_delivery_configuration": [],
+            "member_clusters": [],
+            "security_group_ids": [],
+            "security_group_names": [],
+            "tags_all": {}
+          }
+        },
+        {
+          "address": "aws_elasticache_replication_group.plain",
+          "mode": "managed",
+          "type": "aws_elasticache_replication_group",
+          "name": "plain",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "schema_version": 3,
+          "values": {
+            "at_rest_encryption_enabled": "false",
+            "auth_token": null,
+            "auth_token_update_strategy": null,
+            "automatic_failover_enabled": false,
+            "description": "unencrypted cache",
+            "engine": "redis",
+            "final_snapshot_identifier": null,
+            "kms_key_id": null,
+            "log_delivery_configuration": [],
+            "multi_az_enabled": false,
+            "node_type": "cache.t4g.micro",
+            "notification_topic_arn": null,
+            "num_cache_clusters": 1,
+            "port": null,
+            "preferred_cache_cluster_azs": null,
+            "region": "eu-central-1",
+            "replication_group_id": "orders-plain",
+            "snapshot_arns": null,
+            "snapshot_name": null,
+            "snapshot_retention_limit": null,
+            "tags": null,
+            "tags_all": {
+              "iacp:environment": "staging",
+              "iacp:team": "search"
+            },
+            "timeouts": null,
+            "transit_encryption_enabled": false,
+            "user_group_ids": null
+          },
+          "sensitive_values": {
+            "auth_token": true,
+            "log_delivery_configuration": [],
+            "member_clusters": [],
+            "security_group_ids": [],
+            "security_group_names": [],
+            "tags_all": {}
+          }
+        },
+        {
           "address": "aws_iam_policy.admin_like",
           "mode": "managed",
           "type": "aws_iam_policy",
@@ -383,6 +715,571 @@
     }
   },
   "resource_changes": [
+    {
+      "address": "aws_db_instance.default_key",
+      "mode": "managed",
+      "type": "aws_db_instance",
+      "name": "default_key",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "allocated_storage": 20,
+          "allow_major_version_upgrade": null,
+          "apply_immediately": false,
+          "auto_minor_version_upgrade": true,
+          "blue_green_update": [],
+          "copy_tags_to_snapshot": false,
+          "custom_iam_instance_profile": null,
+          "customer_owned_ip_enabled": null,
+          "dedicated_log_volume": false,
+          "delete_automated_backups": true,
+          "deletion_protection": null,
+          "domain": null,
+          "domain_auth_secret_arn": null,
+          "domain_dns_ips": null,
+          "domain_iam_role_name": null,
+          "domain_ou": null,
+          "enabled_cloudwatch_logs_exports": null,
+          "engine": "postgres",
+          "final_snapshot_identifier": null,
+          "iam_database_authentication_enabled": null,
+          "identifier": "orders-default-key",
+          "instance_class": "db.t4g.micro",
+          "manage_master_user_password": true,
+          "max_allocated_storage": null,
+          "monitoring_interval": 0,
+          "password": null,
+          "password_wo": null,
+          "password_wo_version": null,
+          "performance_insights_enabled": false,
+          "publicly_accessible": false,
+          "region": "eu-central-1",
+          "replicate_source_db": null,
+          "restore_to_point_in_time": [],
+          "s3_import": [],
+          "skip_final_snapshot": true,
+          "storage_encrypted": true,
+          "tags": null,
+          "tags_all": {
+            "iacp:environment": "staging",
+            "iacp:team": "search"
+          },
+          "timeouts": null,
+          "upgrade_storage_config": null,
+          "username": "orders"
+        },
+        "after_unknown": {
+          "address": true,
+          "arn": true,
+          "availability_zone": true,
+          "backup_retention_period": true,
+          "backup_target": true,
+          "backup_window": true,
+          "blue_green_update": [],
+          "ca_cert_identifier": true,
+          "character_set_name": true,
+          "database_insights_mode": true,
+          "db_name": true,
+          "db_subnet_group_name": true,
+          "domain_fqdn": true,
+          "endpoint": true,
+          "engine_lifecycle_support": true,
+          "engine_version": true,
+          "engine_version_actual": true,
+          "hosted_zone_id": true,
+          "id": true,
+          "identifier_prefix": true,
+          "iops": true,
+          "kms_key_id": true,
+          "latest_restorable_time": true,
+          "license_model": true,
+          "listener_endpoint": true,
+          "maintenance_window": true,
+          "master_user_secret": true,
+          "master_user_secret_kms_key_id": true,
+          "monitoring_role_arn": true,
+          "multi_az": true,
+          "nchar_character_set_name": true,
+          "network_type": true,
+          "option_group_name": true,
+          "parameter_group_name": true,
+          "performance_insights_kms_key_id": true,
+          "performance_insights_retention_period": true,
+          "port": true,
+          "replica_mode": true,
+          "replicas": true,
+          "resource_id": true,
+          "restore_to_point_in_time": [],
+          "s3_import": [],
+          "snapshot_identifier": true,
+          "status": true,
+          "storage_throughput": true,
+          "storage_type": true,
+          "tags_all": {},
+          "timezone": true,
+          "vpc_security_group_ids": true
+        },
+        "before_sensitive": false,
+        "after_sensitive": {
+          "blue_green_update": [],
+          "listener_endpoint": [],
+          "master_user_secret": [],
+          "password": true,
+          "password_wo": true,
+          "replicas": [],
+          "restore_to_point_in_time": [],
+          "s3_import": [],
+          "tags_all": {},
+          "vpc_security_group_ids": []
+        }
+      }
+    },
+    {
+      "address": "aws_db_instance.public_plain",
+      "mode": "managed",
+      "type": "aws_db_instance",
+      "name": "public_plain",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "allocated_storage": 20,
+          "allow_major_version_upgrade": null,
+          "apply_immediately": false,
+          "auto_minor_version_upgrade": true,
+          "blue_green_update": [],
+          "copy_tags_to_snapshot": false,
+          "custom_iam_instance_profile": null,
+          "customer_owned_ip_enabled": null,
+          "dedicated_log_volume": false,
+          "delete_automated_backups": true,
+          "deletion_protection": null,
+          "domain": null,
+          "domain_auth_secret_arn": null,
+          "domain_dns_ips": null,
+          "domain_iam_role_name": null,
+          "domain_ou": null,
+          "enabled_cloudwatch_logs_exports": null,
+          "engine": "postgres",
+          "final_snapshot_identifier": null,
+          "iam_database_authentication_enabled": null,
+          "identifier": "orders-public",
+          "instance_class": "db.t4g.micro",
+          "manage_master_user_password": true,
+          "max_allocated_storage": null,
+          "monitoring_interval": 0,
+          "password": null,
+          "password_wo": null,
+          "password_wo_version": null,
+          "performance_insights_enabled": false,
+          "publicly_accessible": true,
+          "region": "eu-central-1",
+          "replicate_source_db": null,
+          "restore_to_point_in_time": [],
+          "s3_import": [],
+          "skip_final_snapshot": true,
+          "storage_encrypted": false,
+          "tags": null,
+          "tags_all": {
+            "iacp:environment": "staging",
+            "iacp:team": "search"
+          },
+          "timeouts": null,
+          "upgrade_storage_config": null,
+          "username": "orders"
+        },
+        "after_unknown": {
+          "address": true,
+          "arn": true,
+          "availability_zone": true,
+          "backup_retention_period": true,
+          "backup_target": true,
+          "backup_window": true,
+          "blue_green_update": [],
+          "ca_cert_identifier": true,
+          "character_set_name": true,
+          "database_insights_mode": true,
+          "db_name": true,
+          "db_subnet_group_name": true,
+          "domain_fqdn": true,
+          "endpoint": true,
+          "engine_lifecycle_support": true,
+          "engine_version": true,
+          "engine_version_actual": true,
+          "hosted_zone_id": true,
+          "id": true,
+          "identifier_prefix": true,
+          "iops": true,
+          "kms_key_id": true,
+          "latest_restorable_time": true,
+          "license_model": true,
+          "listener_endpoint": true,
+          "maintenance_window": true,
+          "master_user_secret": true,
+          "master_user_secret_kms_key_id": true,
+          "monitoring_role_arn": true,
+          "multi_az": true,
+          "nchar_character_set_name": true,
+          "network_type": true,
+          "option_group_name": true,
+          "parameter_group_name": true,
+          "performance_insights_kms_key_id": true,
+          "performance_insights_retention_period": true,
+          "port": true,
+          "replica_mode": true,
+          "replicas": true,
+          "resource_id": true,
+          "restore_to_point_in_time": [],
+          "s3_import": [],
+          "snapshot_identifier": true,
+          "status": true,
+          "storage_throughput": true,
+          "storage_type": true,
+          "tags_all": {},
+          "timezone": true,
+          "vpc_security_group_ids": true
+        },
+        "before_sensitive": false,
+        "after_sensitive": {
+          "blue_green_update": [],
+          "listener_endpoint": [],
+          "master_user_secret": [],
+          "password": true,
+          "password_wo": true,
+          "replicas": [],
+          "restore_to_point_in_time": [],
+          "s3_import": [],
+          "tags_all": {},
+          "vpc_security_group_ids": []
+        }
+      }
+    },
+    {
+      "address": "aws_ecr_repository.loose",
+      "mode": "managed",
+      "type": "aws_ecr_repository",
+      "name": "loose",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "encryption_configuration": [],
+          "force_delete": null,
+          "image_scanning_configuration": [
+            {
+              "scan_on_push": false
+            }
+          ],
+          "image_tag_mutability": "MUTABLE",
+          "name": "orders-loose",
+          "region": "eu-central-1",
+          "tags": null,
+          "tags_all": {
+            "iacp:environment": "staging",
+            "iacp:team": "search"
+          },
+          "timeouts": null
+        },
+        "after_unknown": {
+          "arn": true,
+          "encryption_configuration": [],
+          "id": true,
+          "image_scanning_configuration": [
+            {}
+          ],
+          "registry_id": true,
+          "repository_url": true,
+          "tags_all": {}
+        },
+        "before_sensitive": false,
+        "after_sensitive": {
+          "encryption_configuration": [],
+          "image_scanning_configuration": [
+            {}
+          ],
+          "tags_all": {}
+        }
+      }
+    },
+    {
+      "address": "aws_ecs_service.public",
+      "mode": "managed",
+      "type": "aws_ecs_service",
+      "name": "public",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "alarms": [],
+          "availability_zone_rebalancing": "DISABLED",
+          "capacity_provider_strategy": [],
+          "cluster": "arn:aws:ecs:eu-central-1:000000000000:cluster/orders",
+          "deployment_circuit_breaker": [],
+          "deployment_controller": [],
+          "deployment_maximum_percent": 200,
+          "deployment_minimum_healthy_percent": 100,
+          "desired_count": 1,
+          "enable_ecs_managed_tags": false,
+          "enable_execute_command": false,
+          "force_delete": null,
+          "force_new_deployment": null,
+          "health_check_grace_period_seconds": null,
+          "launch_type": "FARGATE",
+          "load_balancer": [],
+          "name": "orders-public",
+          "network_configuration": [
+            {
+              "assign_public_ip": true,
+              "security_groups": null,
+              "subnets": [
+                "subnet-0aaaaaaaaaaaaaaa1"
+              ]
+            }
+          ],
+          "ordered_placement_strategy": [],
+          "placement_constraints": [],
+          "propagate_tags": null,
+          "region": "eu-central-1",
+          "scheduling_strategy": "REPLICA",
+          "service_connect_configuration": [],
+          "service_registries": [],
+          "tags": null,
+          "tags_all": {
+            "iacp:environment": "staging",
+            "iacp:team": "search"
+          },
+          "task_definition": "orders:1",
+          "timeouts": null,
+          "volume_configuration": [],
+          "vpc_lattice_configurations": [],
+          "wait_for_steady_state": false
+        },
+        "after_unknown": {
+          "alarms": [],
+          "arn": true,
+          "capacity_provider_strategy": [],
+          "deployment_circuit_breaker": [],
+          "deployment_controller": [],
+          "iam_role": true,
+          "id": true,
+          "load_balancer": [],
+          "network_configuration": [
+            {
+              "subnets": [
+                false
+              ]
+            }
+          ],
+          "ordered_placement_strategy": [],
+          "placement_constraints": [],
+          "platform_version": true,
+          "service_connect_configuration": [],
+          "service_registries": [],
+          "tags_all": {},
+          "triggers": true,
+          "volume_configuration": [],
+          "vpc_lattice_configurations": []
+        },
+        "before_sensitive": false,
+        "after_sensitive": {
+          "alarms": [],
+          "capacity_provider_strategy": [],
+          "deployment_circuit_breaker": [],
+          "deployment_controller": [],
+          "load_balancer": [],
+          "network_configuration": [
+            {
+              "subnets": [
+                false
+              ]
+            }
+          ],
+          "ordered_placement_strategy": [],
+          "placement_constraints": [],
+          "service_connect_configuration": [],
+          "service_registries": [],
+          "tags_all": {},
+          "triggers": {},
+          "volume_configuration": [],
+          "vpc_lattice_configurations": []
+        }
+      }
+    },
+    {
+      "address": "aws_elasticache_replication_group.default_key",
+      "mode": "managed",
+      "type": "aws_elasticache_replication_group",
+      "name": "default_key",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "at_rest_encryption_enabled": "true",
+          "auth_token": null,
+          "auth_token_update_strategy": null,
+          "automatic_failover_enabled": false,
+          "description": "cache without a customer-managed key",
+          "engine": "redis",
+          "final_snapshot_identifier": null,
+          "kms_key_id": null,
+          "log_delivery_configuration": [],
+          "multi_az_enabled": false,
+          "node_type": "cache.t4g.micro",
+          "notification_topic_arn": null,
+          "num_cache_clusters": 1,
+          "port": null,
+          "preferred_cache_cluster_azs": null,
+          "region": "eu-central-1",
+          "replication_group_id": "orders-default-key",
+          "snapshot_arns": null,
+          "snapshot_name": null,
+          "snapshot_retention_limit": null,
+          "tags": null,
+          "tags_all": {
+            "iacp:environment": "staging",
+            "iacp:team": "search"
+          },
+          "timeouts": null,
+          "transit_encryption_enabled": true,
+          "user_group_ids": null
+        },
+        "after_unknown": {
+          "apply_immediately": true,
+          "arn": true,
+          "auto_minor_version_upgrade": true,
+          "cluster_enabled": true,
+          "cluster_mode": true,
+          "configuration_endpoint_address": true,
+          "data_tiering_enabled": true,
+          "engine_version": true,
+          "engine_version_actual": true,
+          "global_replication_group_id": true,
+          "id": true,
+          "ip_discovery": true,
+          "log_delivery_configuration": [],
+          "maintenance_window": true,
+          "member_clusters": true,
+          "network_type": true,
+          "num_node_groups": true,
+          "parameter_group_name": true,
+          "primary_endpoint_address": true,
+          "reader_endpoint_address": true,
+          "replicas_per_node_group": true,
+          "security_group_ids": true,
+          "security_group_names": true,
+          "snapshot_window": true,
+          "subnet_group_name": true,
+          "tags_all": {},
+          "transit_encryption_mode": true
+        },
+        "before_sensitive": false,
+        "after_sensitive": {
+          "auth_token": true,
+          "log_delivery_configuration": [],
+          "member_clusters": [],
+          "security_group_ids": [],
+          "security_group_names": [],
+          "tags_all": {}
+        }
+      }
+    },
+    {
+      "address": "aws_elasticache_replication_group.plain",
+      "mode": "managed",
+      "type": "aws_elasticache_replication_group",
+      "name": "plain",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "at_rest_encryption_enabled": "false",
+          "auth_token": null,
+          "auth_token_update_strategy": null,
+          "automatic_failover_enabled": false,
+          "description": "unencrypted cache",
+          "engine": "redis",
+          "final_snapshot_identifier": null,
+          "kms_key_id": null,
+          "log_delivery_configuration": [],
+          "multi_az_enabled": false,
+          "node_type": "cache.t4g.micro",
+          "notification_topic_arn": null,
+          "num_cache_clusters": 1,
+          "port": null,
+          "preferred_cache_cluster_azs": null,
+          "region": "eu-central-1",
+          "replication_group_id": "orders-plain",
+          "snapshot_arns": null,
+          "snapshot_name": null,
+          "snapshot_retention_limit": null,
+          "tags": null,
+          "tags_all": {
+            "iacp:environment": "staging",
+            "iacp:team": "search"
+          },
+          "timeouts": null,
+          "transit_encryption_enabled": false,
+          "user_group_ids": null
+        },
+        "after_unknown": {
+          "apply_immediately": true,
+          "arn": true,
+          "auto_minor_version_upgrade": true,
+          "cluster_enabled": true,
+          "cluster_mode": true,
+          "configuration_endpoint_address": true,
+          "data_tiering_enabled": true,
+          "engine_version": true,
+          "engine_version_actual": true,
+          "global_replication_group_id": true,
+          "id": true,
+          "ip_discovery": true,
+          "log_delivery_configuration": [],
+          "maintenance_window": true,
+          "member_clusters": true,
+          "network_type": true,
+          "num_node_groups": true,
+          "parameter_group_name": true,
+          "primary_endpoint_address": true,
+          "reader_endpoint_address": true,
+          "replicas_per_node_group": true,
+          "security_group_ids": true,
+          "security_group_names": true,
+          "snapshot_window": true,
+          "subnet_group_name": true,
+          "tags_all": {},
+          "transit_encryption_mode": true
+        },
+        "before_sensitive": false,
+        "after_sensitive": {
+          "auth_token": true,
+          "log_delivery_configuration": [],
+          "member_clusters": [],
+          "security_group_ids": [],
+          "security_group_names": [],
+          "tags_all": {}
+        }
+      }
+    },
     {
       "address": "aws_iam_policy.admin_like",
       "mode": "managed",
@@ -1106,6 +2003,199 @@
     "root_module": {
       "resources": [
         {
+          "address": "aws_db_instance.default_key",
+          "mode": "managed",
+          "type": "aws_db_instance",
+          "name": "default_key",
+          "provider_config_key": "aws",
+          "expressions": {
+            "allocated_storage": {
+              "constant_value": 20
+            },
+            "engine": {
+              "constant_value": "postgres"
+            },
+            "identifier": {
+              "constant_value": "orders-default-key"
+            },
+            "instance_class": {
+              "constant_value": "db.t4g.micro"
+            },
+            "manage_master_user_password": {
+              "constant_value": true
+            },
+            "skip_final_snapshot": {
+              "constant_value": true
+            },
+            "storage_encrypted": {
+              "constant_value": true
+            },
+            "username": {
+              "constant_value": "orders"
+            }
+          },
+          "schema_version": 2
+        },
+        {
+          "address": "aws_db_instance.public_plain",
+          "mode": "managed",
+          "type": "aws_db_instance",
+          "name": "public_plain",
+          "provider_config_key": "aws",
+          "expressions": {
+            "allocated_storage": {
+              "constant_value": 20
+            },
+            "engine": {
+              "constant_value": "postgres"
+            },
+            "identifier": {
+              "constant_value": "orders-public"
+            },
+            "instance_class": {
+              "constant_value": "db.t4g.micro"
+            },
+            "manage_master_user_password": {
+              "constant_value": true
+            },
+            "publicly_accessible": {
+              "constant_value": true
+            },
+            "skip_final_snapshot": {
+              "constant_value": true
+            },
+            "storage_encrypted": {
+              "constant_value": false
+            },
+            "username": {
+              "constant_value": "orders"
+            }
+          },
+          "schema_version": 2
+        },
+        {
+          "address": "aws_ecr_repository.loose",
+          "mode": "managed",
+          "type": "aws_ecr_repository",
+          "name": "loose",
+          "provider_config_key": "aws",
+          "expressions": {
+            "image_scanning_configuration": [
+              {
+                "scan_on_push": {
+                  "constant_value": false
+                }
+              }
+            ],
+            "image_tag_mutability": {
+              "constant_value": "MUTABLE"
+            },
+            "name": {
+              "constant_value": "orders-loose"
+            }
+          },
+          "schema_version": 0
+        },
+        {
+          "address": "aws_ecs_service.public",
+          "mode": "managed",
+          "type": "aws_ecs_service",
+          "name": "public",
+          "provider_config_key": "aws",
+          "expressions": {
+            "cluster": {
+              "constant_value": "arn:aws:ecs:eu-central-1:000000000000:cluster/orders"
+            },
+            "desired_count": {
+              "constant_value": 1
+            },
+            "launch_type": {
+              "constant_value": "FARGATE"
+            },
+            "name": {
+              "constant_value": "orders-public"
+            },
+            "network_configuration": [
+              {
+                "assign_public_ip": {
+                  "constant_value": true
+                },
+                "subnets": {
+                  "constant_value": [
+                    "subnet-0aaaaaaaaaaaaaaa1"
+                  ]
+                }
+              }
+            ],
+            "task_definition": {
+              "constant_value": "orders:1"
+            }
+          },
+          "schema_version": 1
+        },
+        {
+          "address": "aws_elasticache_replication_group.default_key",
+          "mode": "managed",
+          "type": "aws_elasticache_replication_group",
+          "name": "default_key",
+          "provider_config_key": "aws",
+          "expressions": {
+            "at_rest_encryption_enabled": {
+              "constant_value": true
+            },
+            "description": {
+              "constant_value": "cache without a customer-managed key"
+            },
+            "engine": {
+              "constant_value": "redis"
+            },
+            "node_type": {
+              "constant_value": "cache.t4g.micro"
+            },
+            "num_cache_clusters": {
+              "constant_value": 1
+            },
+            "replication_group_id": {
+              "constant_value": "orders-default-key"
+            },
+            "transit_encryption_enabled": {
+              "constant_value": true
+            }
+          },
+          "schema_version": 3
+        },
+        {
+          "address": "aws_elasticache_replication_group.plain",
+          "mode": "managed",
+          "type": "aws_elasticache_replication_group",
+          "name": "plain",
+          "provider_config_key": "aws",
+          "expressions": {
+            "at_rest_encryption_enabled": {
+              "constant_value": false
+            },
+            "description": {
+              "constant_value": "unencrypted cache"
+            },
+            "engine": {
+              "constant_value": "redis"
+            },
+            "node_type": {
+              "constant_value": "cache.t4g.micro"
+            },
+            "num_cache_clusters": {
+              "constant_value": 1
+            },
+            "replication_group_id": {
+              "constant_value": "orders-plain"
+            },
+            "transit_encryption_enabled": {
+              "constant_value": false
+            }
+          },
+          "schema_version": 3
+        },
+        {
           "address": "aws_iam_policy.admin_like",
           "mode": "managed",
           "type": "aws_iam_policy",
@@ -1537,12 +2627,6 @@
     {
       "resource": "aws_s3_bucket.logs",
       "attribute": [
-        "arn"
-      ]
-    },
-    {
-      "resource": "aws_s3_bucket.logs",
-      "attribute": [
         "id"
       ]
     },
@@ -1556,6 +2640,12 @@
       "resource": "module.store.aws_s3_bucket.this",
       "attribute": [
         "bucket"
+      ]
+    },
+    {
+      "resource": "aws_s3_bucket.logs",
+      "attribute": [
+        "arn"
       ]
     },
     {
