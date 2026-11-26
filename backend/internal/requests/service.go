@@ -137,6 +137,10 @@ type Repository interface {
 	StackHolder(ctx context.Context, path string) (StackHolder, error)
 	// StackTarget loads an existing stack for an update or destroy (apperr NotFound when missing).
 	StackTarget(ctx context.Context, id uuid.UUID) (StackTarget, error)
+	// StatusEventsAfter lists up to limit status changes of a request with Seq > after, oldest first.
+	StatusEventsAfter(ctx context.Context, id uuid.UUID, after int64, limit int) ([]StatusEvent, error)
+	// LatestStatusSeq is the Seq of the request's newest status change (0 when none).
+	LatestStatusSeq(ctx context.Context, id uuid.UUID) (int64, error)
 }
 
 // VersionLookup resolves pinned module versions (implemented by catalog.Service).
