@@ -142,3 +142,12 @@ func loadWorker(get func(name, def string) string) (time.Duration, error) {
 	}
 	return d, nil
 }
+
+// loadQueueRetention reads IACP_QUEUE_RETENTION: at least one hour, default 7 days.
+func loadQueueRetention(get func(name, def string) string) (time.Duration, error) {
+	d, err := time.ParseDuration(get("QUEUE_RETENTION", "168h"))
+	if err != nil || d < time.Hour {
+		return 0, fmt.Errorf("%sQUEUE_RETENTION must be a duration of at least 1h", Prefix)
+	}
+	return d, nil
+}

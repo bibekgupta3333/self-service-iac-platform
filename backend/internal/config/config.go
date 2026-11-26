@@ -83,6 +83,9 @@ type Config struct {
 	// reverse proxies whose X-Forwarded-For header is believed for rate limiting and the
 	// audit actor_ip. Empty (the default) trusts no proxy: the client is the TCP peer.
 	TrustedProxies []string
+	// QueueRetention (IACP_QUEUE_RETENTION) is how long processed outbox jobs and webhook
+	// delivery ids are kept before the sweeper deletes them.
+	QueueRetention time.Duration
 	// WorkerPollInterval is how often the in-process worker polls the outbox when idle.
 	WorkerPollInterval time.Duration
 }
@@ -175,6 +178,8 @@ func Load(lookup LookupFunc) (Config, error) {
 	errs = append(errs, err)
 	cfg.Publisher = pub
 	cfg.WorkerPollInterval, err = loadWorker(get)
+	errs = append(errs, err)
+	cfg.QueueRetention, err = loadQueueRetention(get)
 	errs = append(errs, err)
 	if cfg.WebhookSecret != "" && len(cfg.WebhookSecret) < MinWebhookSecretLen {
 		errs = append(errs, fmt.Errorf("%sGITHUB_WEBHOOK_SECRET must be at least %d characters", Prefix, MinWebhookSecretLen))
