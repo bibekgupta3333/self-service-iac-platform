@@ -7,6 +7,12 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 ## [Unreleased]
 
 ### Added
+- GitHub OAuth login, sessions and RBAC (WBS 4.4, core of 8.6):
+  - `IACP_AUTH_MODE=github`: authorization-code flow with `state` and S256 PKCE (`/v1/auth/login`, `/v1/auth/callback`), a `GitHubIdentity` port with an `httptest`-tested adapter (fixed hosts, no cross-host redirects, timeouts, size caps), org-membership gate, fail-closed config
+  - server-side sessions (`iacp_session`, hashed in the new `sessions` table, absolute and sliding idle expiry, logout and disablement revoke, fresh id on every login), per-session `X-CSRF-Token` on unsafe methods, `GET /v1/me` (also in dev mode), `POST /v1/auth/logout`
+  - team sync at login (`iacp-<team>-viewers` / `<team>` / `<team>-maintainers` / admin team), manual memberships preserved, the last platform admin never downgraded
+  - pure `rbac` permission matrix with exhaustive tests, route policies, `rbac.denied`, `auth.login`, `auth.login_denied`, `auth.logout` and `rbac.*` audit events; request creation now uses the matrix
+  - portal `GithubAuthProvider`, sign-in and sign-out controls, server-side cookie forwarding, a controlled `Set-Cookie` pass-through on the login routes only, and a stricter proxy CSRF check for requests that carry a cookie
 - ADR-0009: local-first development with LocalStack and the Terraform local backend until MVP exit.
 - Monorepo layout: `modules/`, `policies/`, `environments/`, `tests/`, `backend/`, `portal/`, `tools/`, `.github/`.
 - `docker-compose.yml` with LocalStack 4.4 and PostgreSQL 17, both with health checks, plus `.env.example`.
