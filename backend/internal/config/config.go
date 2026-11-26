@@ -11,8 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/ttl"
 )
 
 // Prefix is the namespace for every environment variable read by the backend.
@@ -83,7 +81,7 @@ type Config struct {
 	// WorkerPollInterval is how often the in-process worker polls the outbox when idle.
 	WorkerPollInterval time.Duration
 	// TTL bounds the lifetime of ephemeral stacks and their extensions (WBS 8.4).
-	TTL ttl.Policy
+	TTL TTLConfig
 }
 
 // DefaultOIDCIssuer is the GitHub Actions token issuer.

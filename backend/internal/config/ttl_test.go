@@ -3,8 +3,6 @@ package config
 import (
 	"strings"
 	"testing"
-
-	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/ttl"
 )
 
 func TestLoadTTL(t *testing.T) {
@@ -17,12 +15,12 @@ func TestLoadTTL(t *testing.T) {
 	}
 
 	c, err := load(nil)
-	if err != nil || c.TTL != ttl.DefaultPolicy() {
+	if err != nil || c.TTL != (TTLConfig{MinHours: 1, MaxHours: 720, DefaultHours: 72, MaxExtensionHours: 168}) {
 		t.Fatalf("defaults: %+v, %v", c.TTL, err)
 	}
 	c, err = load(map[string]string{"IACP_TTL_MIN_HOURS": "2", "IACP_TTL_MAX_HOURS": "48",
 		"IACP_TTL_DEFAULT_HOURS": "12", "IACP_TTL_MAX_EXTENSION_HOURS": "24"})
-	want := ttl.Policy{MinHours: 2, MaxHours: 48, DefaultHours: 12, MaxExtensionHours: 24}
+	want := TTLConfig{MinHours: 2, MaxHours: 48, DefaultHours: 12, MaxExtensionHours: 24}
 	if err != nil || c.TTL != want {
 		t.Fatalf("overrides: %+v, %v", c.TTL, err)
 	}
