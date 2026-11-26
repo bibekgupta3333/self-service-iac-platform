@@ -207,5 +207,10 @@ jobs:
           IACP_INTERNAL_TOKEN: ${{ secrets.IACP_INTERNAL_TOKEN }}
         run: |
           # Index the commit the tag points at (it may predate this push on a re-run).
+          # Peel an annotated tag (object.type == "tag") to its commit.
+          type="$(gh api "repos/$REPO/git/ref/tags/$TAG" --jq .object.type)"
           sha="$(gh api "repos/$REPO/git/ref/tags/$TAG" --jq .object.sha)"
+          if [ "$type" = "tag" ]; then
+            sha="$(gh api "repos/$REPO/git/tags/$sha" --jq .object.sha)"
+          fi
           python -m tools.module_release index "$MODULE" --commit-sha "$sha" --skip-if-unconfigured
