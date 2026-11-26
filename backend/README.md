@@ -64,7 +64,7 @@ together apply each migration once.
 | `0002_audit.sql` | append-only `audit_events`: link-check trigger, UPDATE/DELETE/TRUNCATE rejection, `iacp_app` INSERT/SELECT grant |
 | `0003_seed_local.sql` | `iacp-bot` system user and the `development` environment (LocalStack account `000000000000`) |
 | `0004_app_role_grants.sql` | runtime grants for `iacp_app`: DML on platform tables, INSERT/SELECT only on `audit_events`, nothing on `goose_db_version` |
-| `0005_pipeline_runs.sql` | `pipeline_kind`, `pipeline_status`, `pipeline_runs` (one row per run, attempt and stack; stage reports appended to `stages`); `iacp_app` gets SELECT/INSERT/UPDATE only |
+| `0005_pipeline_runs.sql` | `pipeline_kind`, `pipeline_status`, `pipeline_runs` (one row per run, attempt and stack, `stack_id NOT NULL`; one `stages` entry per stage name); `iacp_app` gets SELECT/INSERT/UPDATE only |
 
 ### Database roles
 
@@ -94,12 +94,12 @@ dependencies, webhook deliveries, outbox) arrive with their features.
 | `IACP_INTERNAL_TOKEN` | unset | shared bearer token for `/v1/internal/*` and `/v1/runs`, at least 32 characters, accepted next to GitHub OIDC (fallback until every workflow sends an OIDC token) |
 | `IACP_OIDC_AUDIENCE` | unset (OIDC off) | `aud` the workflows request (`core.getIDToken(aud)`); must be set together with `IACP_OIDC_REPOSITORY` |
 | `IACP_OIDC_REPOSITORY` | unset | `owner/name` allowed to call; `repository_owner` must match the owner part |
-| `IACP_OIDC_REPOSITORY_ID` | unset | optional numeric `repository_id` pin (survives renames) |
+| `IACP_OIDC_REPOSITORY_ID` | unset (startup warning) | numeric `repository_id` every token must carry; set it in any shared environment (owner/name can be re-registered after a rename or delete) |
 | `IACP_OIDC_ALLOWED_REFS` | `refs/heads/main,refs/pull/*/merge` | comma-separated `path.Match` patterns for the `ref` claim |
 | `IACP_OIDC_ALLOWED_WORKFLOWS` | `<repo>/.github/workflows/*@refs/heads/main,<repo>/.github/workflows/pr-validate.yml@refs/pull/*/merge` | patterns for `job_workflow_ref` |
 | `IACP_OIDC_LEEWAY` | `30s` | clock skew allowed on `exp`/`nbf`/`iat` (max `5m`) |
 | `IACP_OIDC_ISSUER` | `https://token.actions.githubusercontent.com` | override for tests only (plain http allowed only on loopback) |
-| `IACP_OIDC_JWKS_URL` | `<issuer>/.well-known/jwks` | override for tests only |
+| `IACP_OIDC_JWKS_URL` | `<issuer>/.well-known/jwks` | override for tests only; must be https (plain http only on loopback), or the API refuses to start |
 | `IACP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `IACP_SHUTDOWN_TIMEOUT` | `15s` | drain time on SIGINT/SIGTERM |
 | `IACP_AUTO_MIGRATE` | `true` | apply migrations on start |
@@ -166,16 +166,28 @@ Authentication goes through `httpapi.Authenticator`, and it fails closed:
 - Machine routes (`/v1/internal/*` and `POST /v1/runs`) use a separate authenticator; the dev
   user never reaches them. It accepts a GitHub Actions OIDC JWT when `IACP_OIDC_*` is set and the
   shared `IACP_INTERNAL_TOKEN` (constant-time compare) when set. With neither, every call gets 401.
-- OIDC verification (`internal/auth`): RS256 signature against the issuer's JWKS (cached 1 h,
-  refetched on an unknown `kid` at most every 30 s, stale keys kept during an issuer outage),
-  `iss`, `aud`, `exp` (required) / `nbf` / `iat` with the configured leeway, then `repository`,
-  `repository_owner`, optional `repository_id`, and the `ref` / `job_workflow_ref` allow-lists.
-  `alg: none`, HS256 and every other algorithm are rejected. A genuine token from a workflow
-  outside the allow-list gets `403 workflow_not_allowed`.
-- `POST /v1/runs` then checks provenance per pipeline: the report's `run_id`/`run_attempt` must be
-  the caller's own run (`403 run_mismatch`), `validate` must come from `pr-validate.yml`, `apply`
-  from `apply.yml`, `drift` from `drift.yml`, `ttl_destroy` from `ttl-reaper.yml`, and all but
-  `validate` from `refs/heads/main`. Calls with the shared token skip these OIDC checks.
+- OIDC verification (`internal/auth`): RS256 signature against the issuer's JWKS, then `iss`,
+  `aud`, `exp` (required) / `nbf` / `iat` with the configured leeway, then `repository`,
+  `repository_owner`, `repository_id` (required on every token when `IACP_OIDC_REPOSITORY_ID` is
+  set; the API warns at startup when it is not), and the global `ref` / `job_workflow_ref`
+  allow-lists. `alg: none`, HS256 and every other algorithm are rejected. A genuine token from a
+  workflow outside an allow-list gets `403 workflow_not_allowed`.
+- JWKS (`auth.JWKSCache`): https only (plain http only on loopback), redirects never followed,
+  responses capped at 1 MiB. Keys are cached 1 h; an unknown `kid` triggers a refetch at most
+  every 30 s after the last *completed* attempt. Concurrent misses share one fetch
+  (singleflight) that runs detached from the caller's context with its own 10 s timeout, so a
+  client that disconnects cannot cancel it or start the rate limit, and no lock is held during
+  I/O. Cached keys keep working during an issuer outage.
+- Route classes (`auth.RoutePolicies`, enforced by middleware): lock routes accept only
+  `apply.yml` / `ttl-reaper.yml` on main via `push`, `workflow_dispatch` or `schedule`; catalog
+  indexing only `module-release.yml` on main via `push` or `workflow_dispatch`; `/v1/runs` the four
+  pipeline workflows. A pull-request token therefore only ever reaches `/v1/runs`.
+- `POST /v1/runs` then checks provenance per pipeline: the report's `run_id`/`run_attempt` and
+  `head_sha` must be the token's run and `sha` (`403 run_mismatch`); `validate` must come from
+  `pr-validate.yml` on `pull_request`, `apply` from `apply.yml` on main via `push` /
+  `workflow_dispatch`, `drift` and `ttl_destroy` from `drift.yml` / `ttl-reaper.yml` on main via
+  `schedule` / `workflow_dispatch`. `pull_request_target` and `workflow_run` never qualify.
+- Calls with the shared token are not workflow-scoped and skip these OIDC checks.
 - 401 bodies are generic; the reason is only logged.
 
 GitHub OAuth sessions (WBS 4.4) plug in at the same seam without handler changes.
@@ -195,9 +207,13 @@ GitHub OAuth sessions (WBS 4.4) plug in at the same seam without handler changes
   but the oldest queued request gets it first, so newcomers never jump the queue.
 - Release checks the holder and token (`409 stale_fencing_token` otherwise), deletes the lease and,
   in the same transaction, grants the oldest waiter a new token and re-points the rest of the queue
-  at it. `lock.acquired`, `lock.queued` and `lock.released` are written to the audit log.
+  at it. `lock.acquired`, `lock.queued` and `lock.released` are written to the audit log; a waiter
+  polling again behind the same holder writes nothing.
 - `POST /v1/runs` checks `fencing_token` against the current lease (`FOR SHARE`) for `validate`,
-  `apply` and `ttl_destroy` reports, so a late callback from a superseded run is rejected.
+  `apply` and `ttl_destroy` reports, so a late callback from a superseded run is rejected. It
+  locks the `stacks` row (`FOR KEY SHARE`) first, the same order as lock operations, so reports
+  cannot deadlock with release (`TestRecordAndReleaseDoNotDeadlock`). A report for a stage the run
+  already recorded replaces that entry, so retries are idempotent; a run keeps at most 32 stages.
 
 Request ids look like `req-` followed by 10 Crockford base32 characters, so collisions on the
 unique `short_id` are negligible.
