@@ -2,8 +2,10 @@ package requests
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -172,6 +174,67 @@ func TestPublishedRequestLifecycle(t *testing.T) {
 	}
 	if v, err := audit.NewVerifier(f.pool).Verify(ctx, 1, 0); err != nil || !v.Valid {
 		t.Fatalf("audit chain: %+v, %v", v, err)
+	}
+}
+
+// TestRecordPublishedRequiresTheCurrentLease reproduces the stale-lease case: the request
+// row keeps its fencing token after the lock is released or taken over, so recording
+// must check the lock row itself.
+func TestRecordPublishedRequiresTheCurrentLease(t *testing.T) {
+	tests := []struct {
+		name string
+		lose func(t *testing.T, f lifecycleFixture, req *Request, token int64)
+	}{
+		{name: "released", lose: func(t *testing.T, f lifecycleFixture, req *Request, token int64) {
+			if _, err := f.locks.Release(context.Background(), locks.TokenCommand{StackID: req.Stack.ID, RequestID: req.ID,
+				FencingToken: token, By: f.user}); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "taken over after expiry", lose: func(t *testing.T, f lifecycleFixture, req *Request, _ int64) {
+			ctx := context.Background()
+			var other uuid.UUID
+			if err := f.pool.QueryRow(ctx, `INSERT INTO requests (short_id, stack_id, kind, spec, created_by)
+				VALUES ('req-takeover01', $1, 'update', '{}', $2) RETURNING id`, req.Stack.ID, f.user.UserID).Scan(&other); err != nil {
+				t.Fatal(err)
+			}
+			later := platform.FixedClock{T: time.Now().UTC().Add(8 * 24 * time.Hour)}
+			writer := audit.NewWriter(later, platform.RandomIDs{})
+			res, err := locks.NewService(locks.NewPostgresRepository(f.pool, writer), later, 0).
+				Acquire(ctx, locks.AcquireCommand{StackID: req.Stack.ID, RequestID: other, By: f.user})
+			if err != nil || res.Outcome != locks.OutcomeGranted {
+				t.Fatalf("takeover: %+v, %v", res, err)
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newLifecycleFixture(t)
+			ctx := context.Background()
+			res, err := f.svc.Create(ctx, f.user, createCmd(validInput(), "stale-lease-01"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := res.Request
+			target, err := f.svc.PublishTarget(ctx, req.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			token := *target.FencingToken
+			tt.lose(t, f, req, token)
+
+			if _, err := f.svc.PublishTarget(ctx, req.ID); !errors.Is(err, ErrNotPublishable) {
+				t.Fatalf("PublishTarget after losing the lease: %v", err)
+			}
+			pub := PublishedPR{Publisher: "local", Branch: "iacp/" + req.ShortID, CommitSHA: strings.Repeat("c", 40),
+				TreeSHA: strings.Repeat("e", 40), Number: 9, URL: "file:///x#pull/9", FencingToken: token}
+			if _, err := f.svc.RecordPublished(ctx, req.ID, pub, "c"); !hasCode(err, "stale_fencing_token") {
+				t.Fatalf("RecordPublished after losing the lease: %v", err)
+			}
+			if got, _ := f.svc.Get(ctx, req.ID); got.Status != StatusDraft || got.PR != nil {
+				t.Fatalf("request must stay draft without a PR: %+v", got)
+			}
+		})
 	}
 }
 

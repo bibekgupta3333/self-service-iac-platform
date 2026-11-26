@@ -150,9 +150,10 @@ func (s *Service) RecordPublished(ctx context.Context, id uuid.UUID, p Published
 		if r.Status != StatusDraft {
 			return apperr.Conflict("invalid_transition", fmt.Sprintf("request %s is %s, not draft", r.ShortID, r.Status))
 		}
-		if r.FencingToken == nil || *r.FencingToken != p.FencingToken {
-			return apperr.Conflict("stale_fencing_token",
-				fmt.Sprintf("request %s no longer holds the lock its files were rendered with (token %d)", r.ShortID, p.FencingToken))
+		// requests.fencing_token is not cleared on release or takeover, so check the current
+		// lease itself. The stacks row is locked, so the lease cannot change before commit.
+		if err := holdsLock(ctx, st, r, p.FencingToken); err != nil {
+			return err
 		}
 		from := r.Status
 		if err := r.Fire(EventPROpened, s.clock.Now()); err != nil {
@@ -327,19 +328,38 @@ func (s *Service) RecordWorkflowHint(ctx context.Context, h WorkflowHint) (bool,
 var ErrNotPublishable = errors.New("request is not publishable")
 
 // PublishTarget loads a request for publishing. It returns ErrNotPublishable (wrapped)
-// when the request left draft, waits behind another request, or holds no lock token.
+// when the request left draft, waits behind another request, or does not hold the
+// current lease of its stack (released, or taken over after expiry).
 func (s *Service) PublishTarget(ctx context.Context, id uuid.UUID) (*Request, error) {
-	r, err := s.repo.Get(ctx, id)
+	var out *Request
+	err := s.repo.InTx(ctx, func(st Store) error {
+		r, err := st.GetRequest(ctx, id)
+		if err != nil {
+			return err
+		}
+		out = r
+		switch {
+		case r.Status != StatusDraft:
+			return fmt.Errorf("%w: %s is %s", ErrNotPublishable, r.ShortID, r.Status)
+		case r.IsQueued():
+			return fmt.Errorf("%w: %s is queued behind %s", ErrNotPublishable, r.ShortID, *r.QueuedBehind)
+		case r.FencingToken == nil:
+			return fmt.Errorf("%w: %s holds no stack lock", ErrNotPublishable, r.ShortID)
+		}
+		if err := holdsLock(ctx, st, r, *r.FencingToken); err != nil {
+			return fmt.Errorf("%w: %w", ErrNotPublishable, err)
+		}
+		return nil
+	})
+	return out, err
+}
+
+// holdsLock checks that r holds the current lease of its stack with token (pure check
+// over the lock row read in the caller's transaction).
+func holdsLock(ctx context.Context, st Store, r *Request, token int64) error {
+	current, err := st.Locks().Current(ctx, r.Stack.ID)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("read stack lock: %w", err)
 	}
-	switch {
-	case r.Status != StatusDraft:
-		return r, fmt.Errorf("%w: %s is %s", ErrNotPublishable, r.ShortID, r.Status)
-	case r.IsQueued():
-		return r, fmt.Errorf("%w: %s is queued behind %s", ErrNotPublishable, r.ShortID, *r.QueuedBehind)
-	case r.FencingToken == nil:
-		return r, fmt.Errorf("%w: %s holds no stack lock", ErrNotPublishable, r.ShortID)
-	}
-	return r, nil
+	return locks.CheckToken(current, r.ID, token)
 }
