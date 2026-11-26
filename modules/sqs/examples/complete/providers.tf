@@ -1,7 +1,7 @@
 # LocalStack provider configuration (ADR-0009). Only examples and tests
 # configure endpoints; the module itself is provider-agnostic.
 provider "aws" {
-  region                      = var.region
+  region                      = "us-east-1"
   access_key                  = "test"
   secret_key                  = "test"
   skip_credentials_validation = true

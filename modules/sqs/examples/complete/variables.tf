@@ -1,9 +1,3 @@
-variable "region" {
-  description = "AWS region used by the LocalStack provider."
-  type        = string
-  default     = "us-east-1"
-}
-
 variable "localstack_endpoint" {
   description = "LocalStack edge endpoint."
   type        = string
