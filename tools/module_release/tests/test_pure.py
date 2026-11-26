@@ -199,6 +199,10 @@ class TestDiff:
             pytest.param('description = "Name"', 'description = "The name"', [], id="description-only"),
             pytest.param('output "id" {\n  value = "x"\n}', 'output "id" {\n  value = "x"\n}\noutput "arn" {\n  value = "y"\n}',
                          [("output", "arn", Bump.MINOR)], id="output-added"),
+            pytest.param('output "id" {\n  value = "x"\n}', 'output "id" {\n  value     = "x"\n  sensitive = true\n}',
+                         [("output", "id", Bump.MAJOR)], id="output-marked-sensitive"),
+            pytest.param('output "id" {\n  value = "x"\n}', 'output "id" {\n  value     = "x"\n  sensitive = false\n}',
+                         [], id="output-sensitive-false-is-default"),
         ],
     )
     def test_classification(self, old, new, expected):
@@ -357,3 +361,16 @@ class TestNotes:
     def test_release_notes_prefers_changelog(self):
         assert release_notes(CHANGELOG, gate("1.1.0", "1.0.0", [Bump.MINOR])).startswith("### Added")
         assert release_notes(CHANGELOG, gate("1.2.0", "1.1.0", [Bump.MINOR])).startswith("Release of `demo`")
+
+
+class TestOutputSensitivity:
+    SENSITIVE = BASE_TF.replace('output "id" {\n  value = "x"\n}', 'output "id" {\n  value     = "x"\n  sensitive = true\n}')
+
+    def test_parsed(self):
+        assert iface(self.SENSITIVE).outputs["id"].sensitive is True
+        assert iface().outputs["id"].sensitive is False
+
+    def test_turning_off_is_minor(self):
+        changes = diff_interfaces(iface(self.SENSITIVE), iface())
+        assert labels(changes) == [("output", "id", Bump.MINOR)]
+        assert "no longer sensitive" in changes[0].description

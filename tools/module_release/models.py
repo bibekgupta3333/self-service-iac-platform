@@ -99,6 +99,7 @@ class Output:
     """The consumer-facing contract of one Terraform ``output`` block."""
 
     name: str
+    sensitive: bool = False
 
 
 @dataclass(frozen=True)

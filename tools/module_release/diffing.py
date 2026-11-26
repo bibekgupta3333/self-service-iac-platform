@@ -6,9 +6,10 @@ point of view:
 * MAJOR: variable or output removed (a rename is a removal plus an addition),
   new required variable, type changed, default removed, ``nullable`` turned
   off, validation condition added or changed (it may reject values that were
-  valid before).
+  valid before), output marked ``sensitive``.
 * MINOR: new optional variable, new output, default added or changed,
-  ``nullable`` turned on, validation condition removed.
+  ``nullable`` turned on, validation condition removed, output no longer
+  ``sensitive``.
 * PATCH: any other change to release-relevant files.
 """
 
@@ -65,6 +66,13 @@ def diff_interfaces(old: Interface, new: Interface) -> list[Change]:
         changes.append(Change(Subject.OUTPUT, name, "removed (or renamed)", Bump.MAJOR))
     for name in sorted(set(new.outputs) - set(old.outputs)):
         changes.append(Change(Subject.OUTPUT, name, "added", Bump.MINOR))
+    for name in sorted(set(old.outputs) & set(new.outputs)):
+        was, now = old.outputs[name].sensitive, new.outputs[name].sensitive
+        if not was and now:
+            changes.append(Change(Subject.OUTPUT, name,
+                                  "marked sensitive: consumers that re-export it must mark theirs sensitive", Bump.MAJOR))
+        elif was and not now:
+            changes.append(Change(Subject.OUTPUT, name, "no longer sensitive", Bump.MINOR))
     return changes
 
 

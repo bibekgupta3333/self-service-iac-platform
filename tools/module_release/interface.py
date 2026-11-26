@@ -48,6 +48,11 @@ def parse_variable(name: str, body: Mapping[str, Any]) -> Variable:
     )
 
 
+def parse_output(name: str, body: Mapping[str, Any]) -> Output:
+    """Build an Output from one parsed ``output`` block body."""
+    return Output(name=name, sensitive=body.get("sensitive") is True)
+
+
 def _labelled_blocks(document: Mapping[str, Any], kind: str) -> Iterable[tuple[str, Mapping[str, Any]]]:
     for block in document.get(kind) or []:
         for label, body in block.items():
@@ -71,5 +76,5 @@ def parse_interface(files: Mapping[str, str]) -> Interface:
             continue
         document = parse_document(files[filename], filename)
         variables.update((n, parse_variable(n, b)) for n, b in _labelled_blocks(document, "variable"))
-        outputs.update((n, Output(n)) for n, _ in _labelled_blocks(document, "output"))
+        outputs.update((n, parse_output(n, b)) for n, b in _labelled_blocks(document, "output"))
     return Interface(variables=variables, outputs=outputs)
