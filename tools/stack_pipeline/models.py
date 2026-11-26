@@ -10,8 +10,10 @@ ENVIRONMENTS_DIR = "environments"
 STACK_FILE = "iacp.stack.json"
 ENVIRONMENTS = ("development", "staging", "production")
 
-# Same identity rule as backend/internal/generator (nameRe).
+# Same identity rule as backend/internal/generator (nameRe). Names never contain
+# "_", which is what makes StackRef.id injective.
 _NAME_RE = re.compile(r"[a-z][a-z0-9-]{1,40}")
+ID_SEPARATOR = "__"
 
 # Files under environments/ that are not part of any stack root.
 _NON_STACK_FILE_RE = re.compile(r"environments/README\.md|environments/(development|staging|production)/\.gitkeep")
@@ -71,8 +73,12 @@ class StackRef:
 
     @property
     def id(self) -> str:
-        """Slug safe for artifact names and concurrency groups."""
-        return f"{self.environment}-{self.team}-{self.stack}"
+        """Slug for artifact names, concurrency groups and comment markers.
+
+        Joined with "__", which names cannot contain, so distinct stacks never
+        share an id (``a-b/c`` and ``a/b-c`` would collide with a single "-").
+        """
+        return ID_SEPARATOR.join((self.environment, self.team, self.stack))
 
 
 @dataclass(frozen=True)

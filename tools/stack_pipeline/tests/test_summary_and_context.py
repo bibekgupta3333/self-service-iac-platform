@@ -119,9 +119,9 @@ class TestSummary:
         assert not summarize("id", "p", PLAN, conftest, steps).ok
 
     def test_markdown_has_marker_counts_and_findings(self):
-        summary = summarize("development-platform-smoke", "environments/development/platform/smoke", PLAN, CONFTEST, STEPS)
+        summary = summarize("development__platform__smoke", "environments/development/platform/smoke", PLAN, CONFTEST, STEPS)
         md = render_markdown(summary, plan_text="Plan: 2 to add", commit="0123456789abcdef", run_url="https://example/run/1")
-        assert md.startswith("<!-- iacp-plan:development-platform-smoke -->\n")
+        assert md.startswith("<!-- iacp-plan:development__platform__smoke -->\n")
         assert "(failed)" in md
         assert "2 to add, 1 to change, 1 to replace, 1 to destroy" in md
         assert "- deny: [iacp.tags.required] x: missing tag" in md

@@ -47,17 +47,31 @@ class TestStackRef:
     def test_from_path(self, path, expected):
         assert StackRef.from_path(path) == expected
 
+    @pytest.mark.parametrize(
+        "a,b",
+        [
+            (("development", "a-b", "cc"), ("development", "aa", "b-cc")),
+            (("development", "ab-cd", "ef"), ("development", "ab", "cd-ef")),
+            (("development", "x--y", "zz"), ("development", "x", "-y-zz")),
+        ],
+    )
+    def test_ids_are_injective(self, a, b):
+        assert StackRef(*a).id != StackRef(*b).id
+
+    def test_id_round_trips(self):
+        assert tuple(SMOKE.id.split("__")) == ("development", "platform", "smoke")
+
     def test_derived_names(self):
         assert SMOKE.path == "environments/development/platform/smoke"
         assert SMOKE.key == "development/platform/smoke"
-        assert SMOKE.id == "development-platform-smoke"
+        assert SMOKE.id == "development__platform__smoke"
 
 
 class TestStackMetadata:
     def test_matrix_entry(self):
         entry = metadata("development", "platform", "smoke").matrix_entry()
         assert entry == {
-            "id": "development-platform-smoke",
+            "id": "development__platform__smoke",
             "path": "environments/development/platform/smoke",
             "environment": "development",
             "team": "platform",
@@ -115,7 +129,7 @@ class TestPureFunctions:
 
     @pytest.mark.parametrize(
         "dep",
-        ["development/platform/base", "development-platform-base", "environments/development/platform/base"],
+        ["development/platform/base", "development__platform__base", "environments/development/platform/base"],
     )
     def test_dependency_conflicts_by_any_alias(self, dep):
         stacks = [metadata("development", "platform", "base"), metadata("development", "platform", "app", depends_on=[dep])]
@@ -306,7 +320,7 @@ class TestCli:
         printed = json.loads(capsys.readouterr().out)
         assert printed["count"] == 1
         lines = dict(line.split("=", 1) for line in out.read_text().splitlines())
-        assert json.loads(lines["matrix"])[0]["id"] == "development-platform-smoke"
+        assert json.loads(lines["matrix"])[0]["id"] == "development__platform__smoke"
         assert lines["count"] == "1" and lines["full_run"] == "false"
 
     def test_detect_from_stdin(self, tmp_path, make_stack, capsys, monkeypatch):
