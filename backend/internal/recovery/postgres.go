@@ -18,17 +18,56 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/requests"
 )
 
-// PostgresRepository implements RetryRepository with pgx.
+// PostgresRepository implements RetryRepository and History with pgx.
 type PostgresRepository struct {
+	pool  *pgxpool.Pool
 	tx    *db.TxRunner
 	audit *audit.Writer
 }
 
-var _ RetryRepository = (*PostgresRepository)(nil)
+var (
+	_ RetryRepository = (*PostgresRepository)(nil)
+	_ History         = (*PostgresRepository)(nil)
+)
 
 // NewPostgresRepository returns a PostgresRepository.
 func NewPostgresRepository(pool *pgxpool.Pool, w *audit.Writer) *PostgresRepository {
-	return &PostgresRepository{tx: db.NewTxRunner(pool), audit: w}
+	return &PostgresRepository{pool: pool, tx: db.NewTxRunner(pool), audit: w}
+}
+
+// OpenRequests implements History.
+func (r *PostgresRepository) OpenRequests(ctx context.Context, stackID uuid.UUID) (int, error) {
+	var n int
+	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM requests WHERE stack_id = $1 AND completed_at IS NULL`, stackID).
+		Scan(&n); err != nil {
+		return 0, fmt.Errorf("count open requests: %w", err)
+	}
+	return n, nil
+}
+
+// AppliedSpecs implements History: applied create and update requests, newest completion
+// first (a rollback is an update, so it counts as an applied configuration too).
+func (r *PostgresRepository) AppliedSpecs(ctx context.Context, stackID uuid.UUID, limit int) ([]AppliedSpec, error) {
+	rows, err := r.pool.Query(ctx, `SELECT id, short_id, spec, completed_at FROM requests
+		WHERE stack_id = $1 AND status = 'applied' AND kind IN ('create', 'update') AND completed_at IS NOT NULL
+		ORDER BY completed_at DESC, created_at DESC, id DESC
+		LIMIT $2`, stackID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query applied requests: %w", err)
+	}
+	out, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (AppliedSpec, error) {
+		var (
+			a    AppliedSpec
+			spec []byte
+		)
+		err := row.Scan(&a.RequestID, &a.ShortID, &spec, &a.CompletedAt)
+		a.Spec = spec
+		return a, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("scan applied requests: %w", err)
+	}
+	return out, nil
 }
 
 // InTx implements RetryRepository.
