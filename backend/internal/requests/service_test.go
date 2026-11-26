@@ -19,6 +19,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/locks"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/outbox"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/ttl"
 )
 
 // memRepo is an in-memory Repository. InTx works on a copy and commits it only on
@@ -32,7 +33,9 @@ type memState struct {
 	events   []audit.Event
 	jobs     []outbox.Message
 	status   map[uuid.UUID]StackStatus // stack status; a stack not listed is provisioning
-	applied  []StackApplied            // stack writes of apply reports, in order
+	// environmentOf overrides the environment name of a stack (default development).
+	environmentOf map[uuid.UUID]string
+	applied       []StackApplied // stack writes of apply reports, in order
 }
 
 type memKey struct {
@@ -91,7 +94,7 @@ func (s memState) clone() memState {
 		status[k] = v
 	}
 	return memState{keys: keys, stacks: slices.Clone(s.stacks), requests: slices.Clone(s.requests), events: slices.Clone(s.events),
-		jobs: slices.Clone(s.jobs), status: status, applied: slices.Clone(s.applied)}
+		jobs: slices.Clone(s.jobs), status: status, applied: slices.Clone(s.applied), environmentOf: cloneStrMap(s.environmentOf)}
 }
 
 func (m *memRepo) InTx(_ context.Context, fn func(Store) error) error {
@@ -137,8 +140,13 @@ func memStackTarget(s memState, id uuid.UUID) (StackTarget, error) {
 		if !ok {
 			status = StackProvisioning
 		}
+		env := "development"
+		if e, ok := s.environmentOf[id]; ok {
+			env = e
+		}
 		return StackTarget{ID: id, TeamID: st.TeamID, TeamSlug: "payments", EnvironmentID: st.EnvironmentID,
-			Environment: "development", Name: st.Name, Path: st.Path, Region: st.Region, Status: status}, nil
+			Environment: env, Name: st.Name, Path: st.Path, Region: st.Region, Status: status,
+			IsEphemeral: st.IsEphemeral, ExpiresAt: st.ExpiresAt}, nil
 	}
 	return StackTarget{}, apperr.NotFound("stack %s not found", id)
 }
@@ -243,6 +251,26 @@ func (m *memStore) GetRequestByShortID(_ context.Context, shortID string) (*Requ
 		}
 	}
 	return nil, apperr.NotFound("request %s not found", shortID)
+}
+
+func (m *memStore) TTLDestroyAttempts(_ context.Context, stackID uuid.UUID) ([]ttl.Attempt, error) {
+	var out []ttl.Attempt
+	for _, r := range m.s.requests {
+		if r.Stack.ID == stackID && r.Kind == KindDestroy && r.Justification == TTLJustification && r.Status.IsTerminal() &&
+			r.Status != StatusApplied && r.CompletedAt != nil {
+			out = append(out, ttl.Attempt{CreatedAt: r.CreatedAt, EndedAt: *r.CompletedAt, Outcome: string(r.Status)})
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) TTLBlockedSince(_ context.Context, stackID uuid.UUID, since time.Time) (bool, error) {
+	for _, e := range m.s.events {
+		if e.Action == "ttl.blocked" && e.SubjectID == stackID.String() && !e.OccurredAt.Before(since) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (m *memStore) LockStackTarget(_ context.Context, id uuid.UUID) (StackTarget, error) {
@@ -446,6 +474,72 @@ func TestCreate(t *testing.T) {
 	if len(repo.state.events) != 1 || ev.Action != "request.created" || ev.SubjectID != r.ID.String() ||
 		*ev.TeamID != teamID || ev.CorrelationID != "corr-1" || ev.ActorID != dev.UserID.String() {
 		t.Fatalf("audit = %+v", repo.state.events)
+	}
+}
+
+func TestCreateEphemeralAppliesTheTTLPolicy(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name      string
+		ephemeral *Ephemeral
+		policy    ttl.Policy
+		wantHours int
+		wantCode  string
+	}{
+		{name: "omitted hours take the default", ephemeral: &Ephemeral{}, policy: ttl.Policy{MinHours: 1, MaxHours: 100, DefaultHours: 36}, wantHours: 36},
+		{name: "explicit hours", ephemeral: &Ephemeral{TTLHours: 5}, policy: ttl.DefaultPolicy(), wantHours: 5},
+		{name: "below the configured minimum", ephemeral: &Ephemeral{TTLHours: 1}, policy: ttl.Policy{MinHours: 4, MaxHours: 100, DefaultHours: 8},
+			wantCode: "minimum"},
+		{name: "above the configured maximum", ephemeral: &Ephemeral{TTLHours: 50}, policy: ttl.Policy{MinHours: 1, MaxHours: 24, DefaultHours: 8},
+			wantCode: "maximum"},
+		{name: "permanent stack has no TTL", ephemeral: nil, policy: ttl.DefaultPolicy()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := newMemRepo()
+			svc := newSvc(repo, fakeVersions{}).WithTTLPolicy(tt.policy)
+			in := validInput()
+			in.Ephemeral = tt.ephemeral
+			_, err := svc.Create(ctx, dev, createCmd(in, "key-ttl-00001"))
+			if tt.wantCode != "" {
+				e, ok := apperr.As(err)
+				if !ok || e.Code != "policy_preflight_denied" || len(e.Fields) != 1 || e.Fields[0].Code != tt.wantCode {
+					t.Fatalf("err = %v", err)
+				}
+				if len(repo.state.stacks) != 0 {
+					t.Fatal("a refused request must not create a stack")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			st := repo.state.stacks[0]
+			if tt.ephemeral == nil {
+				if st.IsEphemeral || st.TTLHours != nil || st.ExpiresAt != nil {
+					t.Fatalf("permanent stack = %+v", st)
+				}
+				return
+			}
+			if !st.IsEphemeral || st.TTLHours == nil || *st.TTLHours != tt.wantHours ||
+				!st.ExpiresAt.Equal(t0.Add(time.Duration(tt.wantHours)*time.Hour)) {
+				t.Fatalf("stack = %+v", st)
+			}
+			var spec NormalizedSpec
+			if err := json.Unmarshal(repo.state.requests[0].Spec, &spec); err != nil || spec.Ephemeral == nil || spec.Ephemeral.TTLHours != tt.wantHours {
+				t.Fatalf("spec records %+v, want the applied %d h (%v)", spec.Ephemeral, tt.wantHours, err)
+			}
+		})
+	}
+}
+
+func TestValidateEnvironmentRefusesEphemeralProduction(t *testing.T) {
+	prod := Environment{Name: "production", AllowedRegions: []string{"us-east-1"}, AllowEphemeral: true}
+	in := validInput()
+	in.Ephemeral = &Ephemeral{TTLHours: 4}
+	got := pointers(ValidateEnvironment(in, prod, "us-east-1", ttl.DefaultPolicy()))
+	if !slices.Equal(got, []string{"/ephemeral:ephemeral_not_allowed"}) {
+		t.Fatalf("production with ephemeral = %v", got)
 	}
 }
 

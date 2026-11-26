@@ -35,6 +35,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/retention"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/runs"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/stacks"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/ttl"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/webhooks"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/migrations"
 )
@@ -107,6 +108,20 @@ func run() error {
 	} else {
 		slog.Info("publisher disabled (IACP_PUBLISHER=none): requests stay in draft")
 	}
+	ttlPolicy := ttl.Policy(cfg.TTL) // config.TTLConfig mirrors ttl.Policy field for field
+	if err := ttlPolicy.Validate(); err != nil {
+		return fmt.Errorf("ttl policy: %w", err)
+	}
+	requestSvc.WithTTLPolicy(ttlPolicy)
+	ttlRepo := ttl.NewPostgresRepository(pool, auditWriter)
+	ttlSvc := ttl.NewService(ttlRepo, requestRepo, requestSvc, clock, ttlPolicy)
+	if commenter, ok := pub.(publish.Commenter); ok {
+		stackURL := cfg.PortalURL + "/stacks"
+		ttlSvc.EnableComments(stackURL)
+		handlers[outbox.TopicTTLWarning] = ttl.NewWarningNotifier(ttlRepo, commenter, clock, stackURL)
+	} else {
+		slog.Info("ttl warnings are recorded in the audit trail only: the publisher cannot comment on pull requests")
+	}
 	outboxStore := outbox.NewPostgresStore(pool)
 	webhookRepo := webhooks.NewPostgresRepository(pool)
 	go retention.NewSweeper([]retention.Purger{
@@ -145,6 +160,7 @@ func run() error {
 			httpapi.NewRequestHandler(requestSvc, access),
 			httpapi.NewRequestEventsHandler(requestSvc, httpapi.StreamOptions{Stop: ctx.Done(), Session: ua.Streams}),
 			httpapi.NewStackHandler(stacks.NewService(stacks.NewPostgresRepository(pool), users)),
+			httpapi.NewTTLHandler(ttlSvc),
 			httpapi.NewAuditHandler(audit.NewVerifier(pool)),
 			ua.Handler,
 		},
@@ -156,6 +172,7 @@ func run() error {
 		InternalHandlers: []httpapi.RouteRegistrar{
 			httpapi.NewLockHandler(lockSvc),
 			httpapi.NewRequestLookupHandler(requestSvc),
+			httpapi.NewTTLReaperHandler(ttlSvc),
 			httpapi.NewBudgetContextHandler(budgets.NewService(budgets.NewPostgresRepository(pool), clock)),
 		},
 		Webhooks:         []httpapi.RouteRegistrar{webhookHandler},

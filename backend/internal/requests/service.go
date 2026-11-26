@@ -22,6 +22,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/outbox"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/rbac"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/ttl"
 )
 
 // Team is the subset of a team the request service needs.
@@ -50,6 +51,7 @@ type NewStack struct {
 	StateKey      string
 	Region        string
 	IsEphemeral   bool
+	TTLHours      *int // the lifetime asked for; nil for a permanent stack
 	ExpiresAt     *time.Time
 	CreatedBy     uuid.UUID
 	CreatedAt     time.Time
@@ -111,6 +113,12 @@ type Store interface {
 	// UpdateRequest writes r's mutable fields if the stored status is still from;
 	// otherwise it returns a concurrent_update conflict.
 	UpdateRequest(ctx context.Context, r *Request, from Status) error
+	// TTLDestroyAttempts lists the stack's TTL destroys (opened by the platform bot with the
+	// "ttl expired" justification) that ended failed, rejected or cancelled, oldest first.
+	TTLDestroyAttempts(ctx context.Context, stackID uuid.UUID) ([]ttl.Attempt, error)
+	// TTLBlockedSince reports whether a ttl.blocked audit event exists for the stack at or
+	// after since.
+	TTLBlockedSince(ctx context.Context, stackID uuid.UUID, since time.Time) (bool, error)
 	// Enqueue adds an outbox job in the same transaction.
 	Enqueue(ctx context.Context, m outbox.Message) (bool, error)
 	// UpdateStackApplied writes the outcome of an apply on the stack row, which the caller
@@ -193,6 +201,8 @@ type Service struct {
 	publishing bool
 	// access scopes the status feed to the caller's visible teams (WithAccess).
 	access RequestViewer
+	// ttl bounds the TTL of ephemeral stacks (WithTTLPolicy).
+	ttl ttl.Policy
 }
 
 // Memberships resolves a user's role in a team (users.is_platform_admin counts as admin).
@@ -205,7 +215,15 @@ type Memberships interface {
 // NewService returns a request Service.
 func NewService(repo Repository, versions VersionLookup, members Memberships, locker StackLocker,
 	clock platform.Clock, ids platform.IDGenerator) *Service {
-	return &Service{repo: repo, versions: versions, members: members, locker: locker, clock: clock, ids: ids}
+	return &Service{repo: repo, versions: versions, members: members, locker: locker, clock: clock, ids: ids,
+		ttl: ttl.DefaultPolicy()}
+}
+
+// WithTTLPolicy sets the bounds of ephemeral TTLs (IACP_TTL_*); the default is
+// ttl.DefaultPolicy.
+func (s *Service) WithTTLPolicy(p ttl.Policy) *Service {
+	s.ttl = p
+	return s
 }
 
 // EnablePublishing makes Create (and lock promotion) enqueue a request.publish outbox job
@@ -497,7 +515,7 @@ func (s *Service) create(ctx context.Context, st Store, by identity.Principal, c
 		region = env.DefaultRegion
 	}
 	now := s.clock.Now()
-	if errs := ValidateEnvironment(in, env, region); len(errs) > 0 {
+	if errs := ValidateEnvironment(in, env, region, s.ttl); len(errs) > 0 {
 		return nil, apperr.Invalid("policy_preflight_denied", "request violates environment rules", errs...)
 	}
 
@@ -514,8 +532,11 @@ func (s *Service) create(ctx context.Context, st Store, by identity.Principal, c
 	stack := NewStack{ID: s.ids.NewID(), TeamID: team.ID, EnvironmentID: env.ID, Name: in.Stack, Path: path,
 		StateKey: stateKey, Region: region, CreatedBy: by.UserID, CreatedAt: now}
 	if in.Ephemeral != nil {
-		exp := now.Add(time.Duration(in.Ephemeral.TTLHours) * time.Hour)
-		stack.IsEphemeral, stack.ExpiresAt = true, &exp
+		// ValidateEnvironment accepted the TTL, so Resolve cannot fail; it fills in the default.
+		hours, _ := s.ttl.Resolve(in.Ephemeral.TTLHours, envRule(env))
+		exp := ttl.ExpiresAt(now, hours)
+		stack.IsEphemeral, stack.TTLHours, stack.ExpiresAt = true, &hours, &exp
+		in.Ephemeral = &Ephemeral{TTLHours: hours} // the spec records the TTL actually applied
 	}
 	if err := st.InsertStack(ctx, stack); err != nil {
 		return nil, fmt.Errorf("insert stack: %w", err)
@@ -686,22 +707,22 @@ func (s *Service) resolve(ctx context.Context, resources []ResourceInput) ([]Res
 	return out, nil
 }
 
-// ValidateEnvironment applies environment rules (region allow-list, ephemeral TTL). Pure.
-func ValidateEnvironment(in CreateInput, env Environment, region string) []apperr.FieldError {
+// envRule is the environment's ephemeral rule for the TTL policy. Pure.
+func envRule(env Environment) ttl.EnvRule {
+	return ttl.EnvRule{Name: env.Name, AllowEphemeral: env.AllowEphemeral, MaxTTLHours: env.MaxTTLHours}
+}
+
+// ValidateEnvironment applies environment rules: the region allow-list and, for an
+// ephemeral stack, the TTL policy (never production, bounds from policy and environment). Pure.
+func ValidateEnvironment(in CreateInput, env Environment, region string, policy ttl.Policy) []apperr.FieldError {
 	var errs []apperr.FieldError
 	if !slices.Contains(env.AllowedRegions, region) {
 		errs = append(errs, apperr.FieldError{Pointer: "/region", Code: "region_not_allowed",
 			Message: fmt.Sprintf("region %q is not allowed in %s (allowed: %v)", region, env.Name, env.AllowedRegions)})
 	}
 	if in.Ephemeral != nil {
-		switch {
-		case !env.AllowEphemeral:
-			errs = append(errs, apperr.FieldError{Pointer: "/ephemeral", Code: "ephemeral_not_allowed",
-				Message: fmt.Sprintf("ephemeral stacks are not allowed in %s", env.Name)})
-		case env.MaxTTLHours != nil && in.Ephemeral.TTLHours > *env.MaxTTLHours:
-			errs = append(errs, apperr.FieldError{Pointer: "/ephemeral/ttl_hours", Code: "maximum",
-				Message: fmt.Sprintf("must be <= %d in %s", *env.MaxTTLHours, env.Name)})
-		}
+		_, ttlErrs := policy.Resolve(in.Ephemeral.TTLHours, envRule(env))
+		errs = append(errs, ttlErrs...)
 	}
 	return errs
 }

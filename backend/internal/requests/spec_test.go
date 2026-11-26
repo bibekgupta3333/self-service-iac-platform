@@ -13,6 +13,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/catalog"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/fp"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/inputschema"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/ttl"
 )
 
 func pointers(errs []apperr.FieldError) []string {
@@ -47,7 +48,7 @@ func TestValidateShape(t *testing.T) {
 		{name: "duplicate resource", mutate: func(c *CreateInput) { c.Resources[1].Name = "orders_queue" }, want: []string{"/resources:duplicate"}},
 		{name: "bad instance and version", mutate: func(c *CreateInput) { c.Resources[0].Name, c.Resources[0].Version = "Queue", "latest" },
 			want: []string{"/resources/0/name:pattern", "/resources/0/version:pattern"}},
-		{name: "bad ttl", mutate: func(c *CreateInput) { c.Ephemeral = &Ephemeral{TTLHours: 0} }, want: []string{"/ephemeral/ttl_hours:minimum"}},
+		{name: "bad ttl", mutate: func(c *CreateInput) { c.Ephemeral = &Ephemeral{TTLHours: -1} }, want: []string{"/ephemeral/ttl_hours:minimum"}},
 		{name: "depends_on", mutate: func(c *CreateInput) { c.DependsOn = []string{"x"} }, want: []string{"/depends_on:unsupported"}},
 	}
 	for _, tt := range tests {
@@ -153,16 +154,16 @@ func TestValidateEnvironment(t *testing.T) {
 	maxTTL := 168
 	env := Environment{Name: "development", AllowedRegions: []string{"us-east-1"}, AllowEphemeral: true, MaxTTLHours: &maxTTL}
 	in := validInput()
-	if errs := ValidateEnvironment(in, env, "us-east-1"); len(errs) != 0 {
+	if errs := ValidateEnvironment(in, env, "us-east-1", ttl.DefaultPolicy()); len(errs) != 0 {
 		t.Fatalf("unexpected %v", errs)
 	}
 	in.Ephemeral = &Ephemeral{TTLHours: 500}
-	got := pointers(ValidateEnvironment(in, env, "eu-west-1"))
+	got := pointers(ValidateEnvironment(in, env, "eu-west-1", ttl.DefaultPolicy()))
 	if !slices.Equal(got, []string{"/ephemeral/ttl_hours:maximum", "/region:region_not_allowed"}) {
 		t.Fatalf("got %v", got)
 	}
 	env.AllowEphemeral = false
-	if got := pointers(ValidateEnvironment(in, env, "us-east-1")); !slices.Equal(got, []string{"/ephemeral:ephemeral_not_allowed"}) {
+	if got := pointers(ValidateEnvironment(in, env, "us-east-1", ttl.DefaultPolicy())); !slices.Equal(got, []string{"/ephemeral:ephemeral_not_allowed"}) {
 		t.Fatalf("got %v", got)
 	}
 }

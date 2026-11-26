@@ -27,6 +27,7 @@ import (
 const (
 	TopicRequestPublish = "request.publish" // render and publish a request's PR
 	TopicGitHubEvent    = "github.event"    // apply a mapped GitHub webhook command
+	TopicTTLWarning     = "ttl.warning"     // comment the TTL warning on the stack's pull request
 )
 
 // Message is a job to enqueue.
