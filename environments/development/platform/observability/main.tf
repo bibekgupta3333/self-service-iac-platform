@@ -181,8 +181,24 @@ module "observability" {
       metric_name = "ApproximateAgeOfOldestMessage"
       namespace   = "AWS/SQS"
       stat        = "Maximum"
+      }, {
+      dimensions = {
+        QueueName = "iacp-github-outbound"
+      }
+      label       = "iacp-github-outbound visible"
+      metric_name = "ApproximateNumberOfMessagesVisible"
+      namespace   = "AWS/SQS"
+      stat        = "Maximum"
+      }, {
+      dimensions = {
+        QueueName = "iacp-github-outbound"
+      }
+      label       = "outbound oldest message age (s)"
+      metric_name = "ApproximateAgeOfOldestMessage"
+      namespace   = "AWS/SQS"
+      stat        = "Maximum"
     }]
-    title = "Event queue backlog"
+    title = "Event and GitHub outbound queue backlog"
     }, {
     metrics = [{
       dimensions = {
@@ -225,6 +241,11 @@ module "observability" {
       oldest_message_age_seconds = 60
       queue_name                 = "iacp-events-dlq"
       visible_messages_threshold = 0
+    }
+    github-outbound = {
+      oldest_message_age_seconds = 300
+      queue_name                 = "iacp-github-outbound"
+      visible_messages_threshold = 100
     }
   }
   stack = "observability"
