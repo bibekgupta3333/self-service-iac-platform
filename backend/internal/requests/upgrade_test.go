@@ -3,6 +3,7 @@ package requests
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -253,6 +254,29 @@ func TestCheckStackAllowsUpgrade(t *testing.T) {
 	if err := CheckStackAllowsKind(KindUpgrade, StackActive, nil); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// A refusal before the access checks is never answered with a replay, even for a used key.
+func TestUpgradeReplayNeedsAccess(t *testing.T) {
+	ctx := context.Background()
+	repo, svc, created := existingStackFixture(t, StackActive)
+	in := stackInput(upgradeInput("1.4.0"), created.Stack.ID)
+	if _, err := svc.Create(ctx, dev, createCmd(in, "key-upgrade-access")); err != nil {
+		t.Fatal(err)
+	}
+	outsider := newSvcWithMembers(repo, fakeVersions{}, fakeMembers{})
+	if _, err := outsider.Create(ctx, dev, createCmd(in, "key-upgrade-access")); !hasCode(err, "stack_not_found") {
+		t.Fatalf("a user who lost access must not get the request back: %v", err)
+	}
+	if !errorsAsAccessChecked(refusedAfterAccess(KindUpgrade, apperr.Conflict("x", "y"))) ||
+		refusedAfterAccess(KindUpgrade, nil) != nil || errorsAsAccessChecked(refusedAfterAccess(KindUpdate, apperr.Conflict("x", "y"))) {
+		t.Fatal("refusedAfterAccess marks upgrade refusals only")
+	}
+}
+
+func errorsAsAccessChecked(err error) bool {
+	var c accessChecked
+	return errors.As(err, &c)
 }
 
 func TestUpgradeChecks(t *testing.T) {

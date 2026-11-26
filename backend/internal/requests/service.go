@@ -290,6 +290,20 @@ func (s *Service) Create(ctx context.Context, by identity.Principal, cmd CreateC
 	return res, nil
 }
 
+// accessChecked marks an upgrade refusal raised after the stack lookup and the role check
+// passed. Only such refusals may be answered by replaying an earlier request.
+type accessChecked struct{ error }
+
+func (e accessChecked) Unwrap() error { return e.error }
+
+// refusedAfterAccess wraps an upgrade's refusal as accessChecked; nil stays nil. Pure.
+func refusedAfterAccess(kind Kind, err error) error {
+	if err == nil || kind != KindUpgrade {
+		return err
+	}
+	return accessChecked{err}
+}
+
 // errFreshKey rolls back the probe in replayRefusedUpgrade when the key was never used.
 var errFreshKey = errors.New("idempotency key not used yet")
 
@@ -297,10 +311,14 @@ var errFreshKey = errors.New("idempotency key not used yet")
 // the stack's newest spec, and once recorded it is that spec, so a retry with the same key
 // fails the precheck (not_an_upgrade) although it should return the original request. When
 // an upgrade's precheck fails on the request's content or the stack's state (invalid or
-// conflict), the key is probed in a transaction that is rolled back if the key is new;
-// replayed is false then and the precheck error stands. Missing access is never replayed.
+// conflict) after the caller's access to the stack was confirmed, the key is probed in a
+// transaction that is rolled back if the key is new; replayed is false then and the
+// precheck error stands. A refusal before the access checks (shape, unknown or hidden
+// stack, missing role) is never replayed.
 func (s *Service) replayRefusedUpgrade(ctx context.Context, by identity.Principal, cmd CreateCommand, refusal error) (CreateResult, bool, error) {
-	if cmd.Input.Kind != KindUpgrade || !(apperr.IsKind(refusal, apperr.KindInvalid) || apperr.IsKind(refusal, apperr.KindConflict)) {
+	var checked accessChecked
+	if cmd.Input.Kind != KindUpgrade || !errors.As(refusal, &checked) ||
+		!(apperr.IsKind(refusal, apperr.KindInvalid) || apperr.IsKind(refusal, apperr.KindConflict)) {
 		return CreateResult{}, false, nil
 	}
 	var res CreateResult
@@ -381,7 +399,7 @@ func (s *Service) precheckExisting(ctx context.Context, by identity.Principal, i
 		return nil, err
 	}
 	if err := CheckStackAllowsKind(in.Kind, t.Status, nil); err != nil {
-		return nil, err
+		return nil, refusedAfterAccess(in.Kind, err)
 	}
 	if in.Kind == KindDestroy && in.ConfirmStackName != t.Name {
 		return nil, apperr.Invalid("validation_failed", "the confirmation does not match the stack name",
@@ -389,7 +407,8 @@ func (s *Service) precheckExisting(ctx context.Context, by identity.Principal, i
 				Message: fmt.Sprintf("must be %q, the name of the stack to destroy", t.Name)})
 	}
 	if in.Kind == KindUpgrade {
-		return s.prepareUpgrade(ctx, t, in)
+		plan, err := s.prepareUpgrade(ctx, t, in)
+		return plan, refusedAfterAccess(in.Kind, err)
 	}
 	if !in.Kind.RequiresResources() {
 		return nil, nil
