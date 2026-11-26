@@ -22,4 +22,9 @@ describe("Nav", () => {
     expect(screen.getByRole("link", { name: "Catalog" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("link", { name: "Requests" })).not.toHaveAttribute("aria-current");
   });
+
+  it("links to the stacks list", () => {
+    render(<Nav />);
+    expect(screen.getByRole("link", { name: "Stacks" })).toHaveAttribute("href", "/stacks");
+  });
 });

@@ -3,6 +3,10 @@ import { describe, expect, it } from "vitest";
 import { createAuthProvider, DevAuthProvider, GithubAuthProvider, isSafeMethod, loginUrl, type Me } from "./provider";
 
 describe("DevAuthProvider", () => {
+  it("assumes the local user may act and leaves the decision to the API", async () => {
+    expect(await new DevAuthProvider().capabilities()).toEqual({ kind: "unrestricted" });
+  });
+
   it("sends no credentials, like the backend's DevAuthenticator expects", async () => {
     const p = new DevAuthProvider("alice");
     expect(await p.requestHeaders()).toEqual({});
@@ -78,6 +82,13 @@ describe("GithubAuthProvider", () => {
   it("falls back to the login when there is no display name", async () => {
     const { provider } = make(() => json(me({ display_name: "" })));
     expect((await provider.viewer()).displayName).toBe("priya");
+  });
+
+  it("derives capabilities from /v1/me, and none without a session", async () => {
+    const { provider } = make(() => json(me({ is_platform_admin: true, teams: [{ slug: "payments", role: "maintainer" }] })));
+    expect(await provider.capabilities()).toEqual({ kind: "teams", admin: true, roles: { payments: "maintainer" } });
+    const anon = make(() => json({ code: "unauthenticated" }, 401)).provider;
+    expect(await anon.capabilities()).toEqual({ kind: "teams", admin: false, roles: {} });
   });
 
   it("reports an anonymous viewer on 401", async () => {

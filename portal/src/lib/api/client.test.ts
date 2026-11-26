@@ -176,3 +176,77 @@ describe("ApiClient errors", () => {
     expect(err.problem.detail).toBe("fetch failed");
   });
 });
+
+describe("ApiClient stacks", () => {
+  const sid = "7b1c0a52-6c11-4f0e-b9b6-5f2f3c8d1a90";
+
+  it("lists stacks with the API's filter names and cursor", async () => {
+    const f = fakeFetch(json(200, { data: [], next_cursor: "c2" }));
+    const page = await client(f.fetch).listStacks({ team: "payments", env: "production", status: "drifted", limit: 25, cursor: "c1" });
+    expect(f.calls[0]?.url).toBe("http://api.test/v1/stacks?team=payments&env=production&status=drifted&limit=25&cursor=c1");
+    expect(page.next_cursor).toBe("c2");
+  });
+
+  it("lists with no filter and reads one stack by id", async () => {
+    const f = fakeFetch(json(200, { data: [], next_cursor: null }), json(200, { id: sid, name: "orders" }));
+    await client(f.fetch).listStacks();
+    expect(f.calls[0]?.url).toBe("http://api.test/v1/stacks");
+    expect((await client(f.fetch).getStack(sid)).name).toBe("orders");
+    expect(f.calls[1]?.url).toBe(`http://api.test/v1/stacks/${sid}`);
+  });
+
+  it("posts update and destroy bodies with an Idempotency-Key", async () => {
+    const accepted = (kind: string) => json(202, { id: "r1", kind }, { "Idempotent-Replayed": "true" });
+    const f = fakeFetch(accepted("destroy"), accepted("update"));
+    const c = client(f.fetch);
+    const destroy = { kind: "destroy", stack_id: sid, confirm_stack_name: "orders", justification: "retired" } as const;
+    const res = await c.createRequest(destroy, "key-1");
+    expect(res.replayed).toBe(true);
+    expect(JSON.parse(String(f.calls[0]?.init.body))).toEqual(destroy);
+    expect(headersOf(f.calls[0]).get("idempotency-key")).toBe("key-1");
+    await c.createRequest({ kind: "update", stack_id: sid, allow_removals: true, resources: [] }, "key-2");
+    expect(JSON.parse(String(f.calls[1]?.init.body))).toMatchObject({ kind: "update", allow_removals: true });
+  });
+});
+
+describe("ApiClient.openRequestEvents", () => {
+  const id = "0d7e3a52-6c11-4f0e-b9b6-5f2f3c8d1a90";
+
+  it("GETs the stream with Accept, Last-Event-ID and the abort signal, leaving the body unread", async () => {
+    const stream = new Response("event: end\ndata: {}\n\n", { status: 200, headers: { "content-type": "text/event-stream" } });
+    const f = fakeFetch(stream);
+    const ctl = new AbortController();
+    const res = await client(f.fetch, "/api/iacp").openRequestEvents(id, { lastEventId: "12", signal: ctl.signal });
+    expect(res).toBe(stream);
+    expect(res.bodyUsed).toBe(false);
+    expect(f.calls[0]?.url).toBe(`/api/iacp/v1/requests/${id}/events`);
+    expect(f.calls[0]?.init.method).toBe("GET");
+    expect(f.calls[0]?.init.signal).toBe(ctl.signal);
+    const h = headersOf(f.calls[0]);
+    expect(h.get("accept")).toBe("text/event-stream");
+    expect(h.get("last-event-id")).toBe("12");
+  });
+
+  it("omits Last-Event-ID on a first connection and sends 0 as given", async () => {
+    const f = fakeFetch(new Response("", { status: 200 }), new Response("", { status: 200 }));
+    await client(f.fetch).openRequestEvents(id);
+    await client(f.fetch).openRequestEvents(id, { lastEventId: "0" });
+    expect(headersOf(f.calls[0]).has("last-event-id")).toBe(false);
+    expect(headersOf(f.calls[1]).get("last-event-id")).toBe("0");
+  });
+
+  it("turns a 429 problem into an ApiError", async () => {
+    const f = fakeFetch(json(429, { title: "Too many open streams", status: 429, code: "too_many_streams" }, { "Retry-After": "5" }));
+    const err = (await client(f.fetch).openRequestEvents(id).catch((e: unknown) => e)) as ApiError;
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.status).toBe(429);
+    expect(err.code).toBe("too_many_streams");
+  });
+
+  it("wraps a transport failure and refuses a dot path segment", async () => {
+    const f = fakeFetch(new TypeError("fetch failed"));
+    const err = (await client(f.fetch).openRequestEvents(id).catch((e: unknown) => e)) as ApiError;
+    expect(err.code).toBe("network_error");
+    await expect(client(f.fetch).openRequestEvents("..")).rejects.toMatchObject({ status: 404 });
+  });
+});

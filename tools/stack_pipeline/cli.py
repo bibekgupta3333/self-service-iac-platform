@@ -371,10 +371,10 @@ def run_fold_cost(args: argparse.Namespace) -> int:
 
 
 def run_sarif(args: argparse.Namespace) -> int:
-    meta = FileSystemStackRepository(args.repo_root).load_dir(args.stack_dir)
     doc = _read_json(args.input)
     if doc is None:
         raise SarifError(f"{args.input} is missing or is not JSON")
+    meta = FileSystemStackRepository(args.repo_root).load_dir(args.stack_dir)
     # Both spellings: a tool may print the resolved path (/private/tmp on macOS).
     dirs = [str(p) for d in args.external_dir for p in dict.fromkeys((Path(d), Path(d).resolve()))]
     out = rebase_sarif(doc, meta.ref.path, dirs, str(Path(args.repo_root).resolve()))
