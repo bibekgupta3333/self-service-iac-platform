@@ -35,6 +35,7 @@ API_CONTEXT = {
             "budget": {"month": "2026-11", "limit_usd": 2000.0, "spent_usd": 1500.0, "actual_usd": None,
                        "hard_block": True, "scope": "team"},
             "budget_override": None,
+            "current_committed_usd": 420.5,
             "exceptions": [],
             "yanked_module_versions": [],
             "now": "2026-11-24T10:05:00Z",
@@ -102,6 +103,7 @@ class TestMergeApiContext:
         out = ctx(merge_api_context(REF, self.base(), API_CONTEXT))
         assert out["budget"]["limit_usd"] == 2000.0
         assert out["now"] == "2026-11-24T10:05:00Z" and out["allowed_regions"] == ["us-east-1"]
+        assert out["current_committed_usd"] == 420.5
         assert out["stack_path"] == PATH
 
     @pytest.mark.parametrize("key,value", [("environment", "production"), ("team", "search"), ("stack", "other")])

@@ -30,7 +30,8 @@ COST_CURRENCY = "USD"
 # Keys only this module may set in the budget gate's context.
 _GATE_KEYS = ("budget_gate", "estimated_monthly_cost_usd")
 # Keys the Platform API owns: copied from its document when present.
-_API_KEYS = ("allowed_regions", "budget", "budget_override", "exceptions", "yanked_module_versions", "now")
+_API_KEYS = ("allowed_regions", "budget", "budget_override", "current_committed_usd", "exceptions",
+             "yanked_module_versions", "now")
 
 
 class ContextError(ValueError):
