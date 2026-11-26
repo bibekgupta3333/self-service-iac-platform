@@ -1,0 +1,12 @@
+{
+  "format_version": "1.2",
+  "resource_changes": [],
+  "configuration": {
+    "root_module": {
+      "module_calls": {
+        "database": { "source": "../../" },
+        "queue": { "source": "git::https://github.com/bibekgupta3333/self-service-iac-platform.git//modules/sqs?ref=main" }
+      }
+    }
+  }
+}

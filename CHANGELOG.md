@@ -155,7 +155,7 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
   - `iacp.network.rds_public`, `iacp.network.ecs_public_ip`
   - `iacp.ecr.scan_on_push`, `iacp.ecr.immutable_tags`
   - The non-compliant conftest fixture trips every new rule; `verify.sh` now asserts 30 deny and 4 warn rule IDs.
-- `policies/example-plan.sh` and `make example-plans`: plan a module's `examples/complete` and run conftest with its `policy-context.json`, allowing only the relative-source deny.
+- `policies/example-plan.sh` and `make example-plans`: plan a module's `examples/complete` and run conftest with its `policy-context.json`, allowing only the deny for relative `../` module sources.
 - CI: a `module-tests-offline` job runs suites that mock the AWS provider without LocalStack, and the `module-tests` job, which skips those suites, now plans and checks every module example with conftest. LocalStack suites run as before.
 
 ### Security

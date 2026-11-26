@@ -57,6 +57,7 @@ policy-test: ## Unit-test OPA policies and verify conftest fixtures
 	opa test policies/opa --coverage --threshold 90 >/dev/null
 	opa test policies/opa
 	policies/fixtures/verify.sh
+	policies/fixtures/verify-example-gate.sh
 
 lint: fmt-check validate validate-manifests module-gate codeowners-check tflint checkov policy-test ## All static checks
 
