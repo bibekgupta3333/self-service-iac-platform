@@ -1,0 +1,105 @@
+# Reports one pipeline stage to the Platform API (POST /v1/runs, docs/03 section 6.9).
+#
+# A thin wrapper around `python -m tools.stack_pipeline report`, which builds and
+# validates the payload (backend/internal/runs/report.go) and sends it. The caller
+# must have checked out the repository and set up Python 3.12.
+#
+# Auth: a GitHub OIDC token for `audience` when the job has `id-token: write`,
+# otherwise the shared `internal-token`. Tokens never reach argv or the log: they
+# travel through env and are registered with ::add-mask::.
+#
+# `github.head_sha` is always the job's github.sha (the OIDC token's `sha` claim; for
+# pull_request events the merge commit). There is no input to override it.
+#
+# With `api-url` empty the step only prints a ::notice:: (local-first, ADR-0009).
+name: iacp-report
+description: Report a pipeline stage to the Platform API (POST /v1/runs) with GitHub OIDC
+
+inputs:
+  api-url:
+    description: Platform API base URL (vars.IACP_API_URL). Empty skips the report with a notice.
+    required: false
+    default: ""
+  audience:
+    description: OIDC audience the API expects (vars.IACP_OIDC_AUDIENCE). Needs id-token write in the job.
+    required: false
+    default: ""
+  internal-token:
+    description: Shared IACP_INTERNAL_TOKEN, used only when no OIDC token can be requested.
+    required: false
+    default: ""
+  pipeline:
+    description: validate | apply | drift | ttl_destroy
+    required: true
+  stack-path:
+    description: Stack root (environments/<env>/<team>/<stack>) relative to the workspace.
+    required: true
+  stage:
+    description: Stage name; a passed "summary" finishes the run.
+    required: true
+  status:
+    description: in_progress | passed | failed | cancelled, or a GitHub outcome. Empty derives it from summary-json.
+    required: false
+    default: ""
+  summary-json:
+    description: Path to a `stack_pipeline summary --json-out` document (plan and policy blocks).
+    required: false
+    default: ""
+  outputs-json:
+    description: Path to `terraform output -json`; sensitive values are redacted.
+    required: false
+    default: ""
+  terraform-exit-code:
+    description: Terraform exit code for the stage.
+    required: false
+    default: ""
+  error-message:
+    description: error.message for a failed stage.
+    required: false
+    default: ""
+  fencing-token:
+    description: The stack lock's fencing token. validate defaults to iacp.stack.json.
+    required: false
+    default: ""
+  request-short-id:
+    description: Request short id (req-...). Defaults to request_id in iacp.stack.json.
+    required: false
+    default: ""
+  fail-on-error:
+    description: '"true" fails the step when the report is rejected (use before apply). Otherwise a warning.'
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Report ${{ inputs.pipeline }}/${{ inputs.stage }}
+      shell: bash
+      env:
+        IACP_API_URL: ${{ inputs.api-url }}
+        IACP_OIDC_AUDIENCE: ${{ inputs.audience }}
+        IACP_INTERNAL_TOKEN: ${{ inputs.internal-token }}
+        IN_PIPELINE: ${{ inputs.pipeline }}
+        IN_STACK_PATH: ${{ inputs.stack-path }}
+        IN_STAGE: ${{ inputs.stage }}
+        IN_STATUS: ${{ inputs.status }}
+        IN_SUMMARY: ${{ inputs.summary-json }}
+        IN_OUTPUTS: ${{ inputs.outputs-json }}
+        IN_EXIT_CODE: ${{ inputs.terraform-exit-code }}
+        IN_ERROR: ${{ inputs.error-message }}
+        IN_FENCING_TOKEN: ${{ inputs.fencing-token }}
+        IN_REQUEST: ${{ inputs.request-short-id }}
+        IN_FAIL: ${{ inputs.fail-on-error }}
+        PYTHONPATH: ${{ github.workspace }}
+      run: |
+        set -euo pipefail
+        args=(--pipeline "$IN_PIPELINE" --stage "$IN_STAGE" --skip-if-unconfigured)
+        [ -n "$IN_STATUS" ] && args+=(--status "$IN_STATUS")
+        [ -n "$IN_SUMMARY" ] && args+=(--summary "$IN_SUMMARY")
+        [ -n "$IN_OUTPUTS" ] && args+=(--outputs "$IN_OUTPUTS")
+        [ -n "$IN_EXIT_CODE" ] && args+=(--terraform-exit-code "$IN_EXIT_CODE")
+        [ -n "$IN_ERROR" ] && args+=(--error-message "$IN_ERROR")
+        [ -n "$IN_FENCING_TOKEN" ] && args+=(--fencing-token "$IN_FENCING_TOKEN")
+        [ -n "$IN_REQUEST" ] && args+=(--request-short-id "$IN_REQUEST")
+        [ "$IN_FAIL" = "true" ] || args+=(--warn-on-error)
+        python -m tools.stack_pipeline --repo-root "$GITHUB_WORKSPACE" report "$GITHUB_WORKSPACE/$IN_STACK_PATH" "${args[@]}"
