@@ -29,6 +29,11 @@ const (
 	// apply is verified against, and a pull-request token comes from a workflow file the
 	// PR author controls. pr-validate.yml reads its request id and token from iacp.stack.json.
 	RouteRequestLookup RouteClass = "request_lookup"
+	// RouteDrift: GET /v1/internal/drift/stacks and POST /v1/internal/drift. Only drift.yml
+	// on main, on its schedule or by dispatch: a report moves a stack's health and the list
+	// names what to scan, and a pull-request token comes from a workflow file the PR author
+	// controls.
+	RouteDrift RouteClass = "drift"
 	// RouteTTL: /v1/internal/ttl/*. The hourly reaper lists the stacks that are due for a TTL
 	// warning or teardown and acts on them. Only ttl-reaper.yml on main, from its schedule or
 	// a manual dispatch: teardown opens a destroy request, so it must not be reachable from a
@@ -72,6 +77,11 @@ var RoutePolicies = map[RouteClass]RoutePolicy{
 	},
 	RouteTTL: {
 		Workflows: []string{"ttl-reaper.yml"},
+		MainOnly:  true,
+		Events:    []string{"schedule", "workflow_dispatch"},
+	},
+	RouteDrift: {
+		Workflows: []string{"drift.yml"},
 		MainOnly:  true,
 		Events:    []string{"schedule", "workflow_dispatch"},
 	},

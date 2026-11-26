@@ -29,6 +29,8 @@ internal/
   locks/                 per-stack platform lock: pure Decide/NextInQueue/CheckToken, Service, Postgres repo
   auth/                  GitHub Actions OIDC: claim allow-lists (pure), JWKSCache, Verifier, jti ReplayGuard
   budgets/               policy context for conftest: pure ParseStackPath / BuildContext, Service, Postgres repo
+  drift/                 drift reports: pure ClassifyExit/NextHealth/Allowed/Validate, Service (Record, Resolve), Postgres repo,
+                         RequestReconciler adapter onto requests.Service.ReconcileStack
   runs/                  POST /v1/runs reports: pure Validate/CheckProvenance/RunStatus/Progress, Service (drives apply reports into requests and stacks), Postgres repo
   retention/             hourly sweeper for processed outbox jobs and webhook delivery ids
   generator/             pure Terraform renderer + BackendStrategy / ProviderStrategy, golden files
@@ -82,6 +84,7 @@ together apply each migration once.
 | `0009_sessions.sql` | `sessions` (hashed opaque session ids, absolute and idle expiry, revocation) |
 | `0010_outbox_purge.sql` | `purge_processed_outbox(cutoff, max_rows)`, a `SECURITY DEFINER` function that deletes only processed outbox rows; `iacp_app` gets `EXECUTE` on it and still no `DELETE` on `outbox` |
 | `0011_stack_health.sql` | `stacks.health` (`unknown`, `healthy`, `degraded`), set from the post-apply smoke test |
+| `0013_drift_reports.sql` | `drift_result`, `drift_status`, `drift_reports` (one row per drift.yml run and stack, CHECKs tie result, status, counts and resolution together) and `stacks.health` widened with `drifted` ([ADR-0013](../docs/adr/0013-drift-in-stack-health.md)); `iacp_app` gets SELECT/INSERT and UPDATE on the resolution columns only, no DELETE |
 
 ### Database roles
 
@@ -96,7 +99,7 @@ The API never serves requests as the schema owner:
 In `IACP_AUTH_MODE=dev` the app password defaults to `iacp-app-local-only`, which matches the
 default runtime URL, so a local `go run` works against the compose Postgres with no extra setup.
 
-Tables for later milestones (plan summaries, costs, drift, budget overrides, policy exceptions, stack
+Tables for later milestones (plan summaries, costs, budget overrides, policy exceptions, stack
 dependencies) arrive with their features.
 
 ## Configuration
@@ -187,6 +190,8 @@ docker run --rm -p 127.0.0.1:8080:8080 -e IACP_AUTH_MODE=dev \
 |--------|------|-------|
 | GET | `/healthz`, `/readyz` | no auth |
 | GET | `/metrics` | Prometheus exposition; loopback peers without proxy headers, or `Authorization: Bearer $IACP_METRICS_TOKEN` (`403 metrics_forbidden` otherwise) |
+| GET | `/v1/internal/drift/stacks?limit=` | machine auth (`drift` class: `drift.yml` on main, `schedule`/`workflow_dispatch`); the stacks to check: settled, not locked, least recently checked first, at most 256 |
+| POST | `/v1/internal/drift` | machine auth (`drift` class); one drift check of one stack from `drift.yml`: stores a `drift_reports` row, sets `stacks.health`, audits it; `409 stack_not_checkable` for a stack that is mid-change, `403 run_mismatch` / `workflow_not_allowed`; a replay of the same run returns the stored report (`replayed: true`) |
 | GET | `/v1/internal/budget-context?stack_path=` | machine auth (`budget_context` class); conftest `--data` document for the stack (below) |
 | GET | `/v1/catalog/modules?category=&status=` | modules with `latest_version` |
 | GET | `/v1/catalog/modules/{name}` | module + latest version detail |
@@ -208,7 +213,9 @@ docker run --rm -p 127.0.0.1:8080:8080 -e IACP_AUTH_MODE=dev \
 | POST | `/v1/internal/ttl/{id}/teardown` | machine auth (`ttl`); opens a destroy request as the platform bot for an expired stack: `202 {"status":"created","request_id","short_id"}`, `200 {"status":"already_pending"}`, `409 ttl_not_due` / `not_ephemeral` / `production_not_ephemeral` / `stack_busy` |
 | POST | `/v1/stacks/{id}/ttl/extend` | `{"hours"}`; developer role in the stack's team (`stack.extend_ttl`); `200 {"stack_id","expires_at","extended_hours","remaining_extension_hours"}`; `409 ttl_extension_cap` / `ttl_environment_max` / `destroy_pending` / `not_ephemeral`; `404` for a stack in another team |
 | GET | `/v1/stacks?team=&env=&status=&limit=&cursor=` | stacks of the caller's teams (platform admins: all), newest first, keyset pagination |
-| GET | `/v1/stacks/{id}` | `status`, `outputs`, `latest_request` and links; `404` when the caller may not see it |
+| GET | `/v1/stacks/{id}` | `status`, `health`, `outputs`, `latest_request` and links; `404` when the caller may not see it |
+| GET | `/v1/stacks/{id}/drift?limit=` | drift history of a stack the caller may see, newest first; viewer |
+| POST | `/v1/drift/{id}/resolve` | `{"action":"reconcile"\|"codify"\|"ignore","reason"}`: reconcile opens an update request for the stack through `requests.Service` (developer), codify records the decision only (developer; the update is manual follow-up), ignore needs a `reason` and the maintainer role; audited as `drift.resolved` |
 | POST | `/v1/webhooks/github` | GitHub App webhook, authenticated by `X-Hub-Signature-256` only; `202 {"accepted","duplicate","enqueued"}`, `401 invalid_signature` / `webhook_not_configured`, `400` for a bad delivery id, event header or payload |
 | GET | `/v1/audit/verify?from_seq=&to_seq=` | recomputes the hash chain, at most 10,000 events per call (`has_more`) |
 
@@ -240,8 +247,8 @@ Authentication goes through `httpapi.Authenticator`, and it fails closed:
   indexing only `module-release.yml` on main via `push` or `workflow_dispatch`; `/v1/runs` the four
   pipeline workflows; the budget context `pr-validate.yml` and `apply.yml` via `pull_request`,
   `push` or `workflow_dispatch`; the TTL routes (`/v1/internal/ttl/*`) only `ttl-reaper.yml` on
-  main via `schedule` or `workflow_dispatch`. A pull-request token therefore only reaches
-  `/v1/runs` and the read-only budget context.
+  main and the drift routes only `drift.yml` on main, both via `schedule` or `workflow_dispatch`.
+  A pull-request token therefore only reaches `/v1/runs` and the read-only budget context.
 - `POST /v1/runs` then checks provenance per pipeline: the report's `run_id`/`run_attempt` and
   `head_sha` must be the token's run and `sha` (`403 run_mismatch`); `validate` must come from
   `pr-validate.yml` on `pull_request`, `apply` from `apply.yml` on main via `push` /
