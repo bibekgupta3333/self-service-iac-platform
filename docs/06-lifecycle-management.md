@@ -183,27 +183,26 @@ Prefer config-driven changes (`moved`, `import`, `removed` blocks) shipped throu
 | Layer | Mechanism | Scope | Held for | Protects against |
 |---|---|---|---|---|
 | Terraform | S3 native lockfile `<key>.tflock` (`use_lockfile = true`, conditional write `If-None-Match`) | One Terraform operation | Duration of `apply` / `state` command | Two Terraform processes writing state concurrently |
-| Platform | Row in `locks`, 1:1 with `stacks` (`stack_id` PK, `holder_request_id`, `fencing_token`, `acquired_at`, `lease_expires_at`) | One request | From PR open (`pr_open`) until terminal status | Two requests editing the same stack config, plan-hash invalidation, merge races |
+| Platform | Row in `locks`, 1:1 with `stacks` (`stack_id` PK, `request_id`, `holder`, `fencing_token`, `acquired_at`, `expires_at`) | One request | From request creation until terminal status | Two requests editing the same stack config, plan-hash invalidation, merge races |
 | Workflow | GitHub `concurrency: stack-<id>-apply` | One job | Job duration | Two apply runs for the same stack (e.g. retry + push) |
 
-Acquisition (Go, simplified):
+Acquisition (`backend/internal/locks`; full SQL in [03 §2](03-data-model-and-api.md)): every lock operation first takes `SELECT … FOR UPDATE` on the `stacks` row, so operations on one stack run one at a time. The pure `locks.Decide` then picks one outcome:
 
-```sql
--- name: AcquireStackLock :one
-INSERT INTO locks (stack_id, holder_request_id, lease_expires_at)
-VALUES ($1, $2, now() + interval '7 days')
-ON CONFLICT (stack_id) DO NOTHING
-RETURNING stack_id, holder_request_id, fencing_token;
-```
+| Lock state | Caller | Outcome |
+|---|---|---|
+| held by the caller (live or expired) | holder | `held`: lease renewed, token kept |
+| live lease held by another request | anyone | `queued` behind the holder |
+| free, or expired lease | oldest waiter, or nobody is waiting | `granted`: new lease, new `fencing_token` (upsert) |
+| free, or expired lease | newcomer while others wait | the oldest waiter is granted first; the caller is `queued` behind it |
 
-If no row is returned, the request stays `draft` with `requests.queued_behind` set to the current holder (FIFO chain per stack); the portal shows "Waiting for req-… to finish". The `fencing_token` is passed to every pipeline callback and stale tokens are rejected, so a late callback from a superseded run cannot change stack status. When a request reaches a terminal status the worker releases the lock and promotes the next queued request (its config is regenerated against the latest `main`).
+A queued request stays `draft` with `requests.queued_behind` set to the current holder (every waiter points at the holder; order is `created_at`, then id); the portal shows "Waiting for req-… to finish", and a queued request cannot open its PR (`409 stack_locked`). `fencing_token` comes from `lock_fencing_seq`, so every grant on a stack has a larger token than all earlier ones. It is recorded on the request, passed to every pipeline callback, and stale tokens are rejected (`409 stale_fencing_token`), so a late callback from a superseded run cannot change stack status. The holder renews its lease with a heartbeat. When a request reaches a terminal status the worker releases the lock with its token; in the same transaction the oldest queued request is granted a new lease and the other waiters are pointed at it (its config is regenerated against the latest `main`).
 
 PR plans run with `-lock=false` (read-only) and drift checks too; only `apply.yml` and break-glass take the S3 lock.
 
-**Data touched.** `locks`, `requests.queued_behind`, S3 `*.tflock` objects, `audit_events` (`lock.acquired`, `lock.released`, `lock.force_released`).
+**Data touched.** `locks`, `requests.queued_behind`, `requests.fencing_token`, S3 `*.tflock` objects, `audit_events` (`lock.acquired`, `lock.queued`, `lock.released`, `lock.force_released`).
 
 **Edge cases.**
-- *Abandoned PR*: the lock has `lease_expires_at` (7 days). The worker warns the requester at day 5; at expiry it closes the PR, cancels the request and releases the lock.
+- *Abandoned PR*: the lock has `expires_at` (7-day lease, renewed by heartbeat). An expired lease can be taken over (oldest waiter first); the old holder's token is then stale. The worker warns the requester at day 5; at expiry it closes the PR, cancels the request and releases the lock.
 - *Runner died mid-apply*: the S3 lockfile remains; the `workflow_run` webhook reports the job as failed/cancelled (or the reconciler finds it timed out). The stack is marked `failed` with reason `apply_interrupted`.
 - *Human merges a PR out of band*: CODEOWNERS + platform lock check refuses (via `GET /v1/internal/requests/by-path`) to apply a commit not associated with the lock-holding request (HTTP 409); the run fails and alerts.
 

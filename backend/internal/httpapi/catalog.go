@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/auth"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/catalog"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/fp"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
@@ -37,9 +38,10 @@ func (h *CatalogHandler) Routes(r chi.Router) {
 	r.Get("/catalog/modules/{name}/versions/{version}", h.getVersion)
 }
 
-// InternalRoutes registers the routes called by GitHub Actions.
+// InternalRoutes registers the routes called by GitHub Actions. Only module-release.yml
+// on main (or the shared token) may index.
 func (h *CatalogHandler) InternalRoutes(r chi.Router) {
-	r.Post("/catalog/index", h.index)
+	r.With(requireRoute(auth.RouteCatalogIndex)).Post("/catalog/index", h.index)
 }
 
 type moduleDTO struct {
