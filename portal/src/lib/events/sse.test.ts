@@ -71,6 +71,11 @@ describe("SseParser", () => {
     expect(feed(["data: a\r", "\ndata: b\r", "\n\r", "\n"]).frames).toEqual([{ data: "a\nb" }]);
   });
 
+  it("keeps a CRLF split by an empty chunk as one line break", () => {
+    // Without the guard the LF after the empty chunk would read as a blank line and end the frame early.
+    expect(feed(["data: a\r", "", "\ndata: b\n\n"]).frames).toEqual([{ data: "a\nb" }]);
+  });
+
   it("joins multiple data lines and strips one leading space", () => {
     expect(feed(["data: a\ndata:  b\n\n"]).frames).toEqual([{ data: "a\n b" }]);
   });

@@ -104,6 +104,9 @@ export class SseParser {
 
   push(chunk: string): SseChunkResult {
     const out: SseChunkResult = { frames: [], comments: 0, dropped: 0 };
+    // An empty chunk (TextDecoder gives "" for a zero-length read) must not clear skipLf:
+    // a CR, an empty chunk, then an LF is still one CRLF line break.
+    if (chunk === "") return out;
     let i = this.skipLf && chunk.startsWith("\n") ? 1 : 0;
     this.skipLf = false;
     while (i < chunk.length) {
