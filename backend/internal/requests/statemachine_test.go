@@ -237,6 +237,27 @@ func TestRequestRetryCountTracked(t *testing.T) {
 	}
 }
 
+func TestHeadCheck(t *testing.T) {
+	tests := []struct {
+		name  string
+		known string
+		e     GitHubEvent
+		want  bool
+	}{
+		{"untracked head accepts", "", GitHubEvent{Event: EventPRClosed}, true},
+		{"close at the known head", "h1", GitHubEvent{Event: EventPRClosed, HeadSHA: "h1"}, true},
+		{"close at an old head", "h2", GitHubEvent{Event: EventPRClosed, HeadSHA: "h1"}, false},
+		{"merge without a head", "h1", GitHubEvent{Event: EventPRMerged}, false},
+		{"push continuing the head", "h1", GitHubEvent{Event: EventNewCommit, BeforeSHA: "h1", HeadSHA: "h2"}, true},
+		{"replayed push", "h2", GitHubEvent{Event: EventNewCommit, BeforeSHA: "h1", HeadSHA: "h2"}, false},
+	}
+	for _, tt := range tests {
+		if got := HeadCheck(tt.known, tt.e); got != tt.want {
+			t.Errorf("%s: HeadCheck = %v", tt.name, got)
+		}
+	}
+}
+
 func TestPublishFailureAndMerge(t *testing.T) {
 	t0 := time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC)
 	r := NewDraft(uuid.New(), "req-abc", StackRef{}, KindCreate, nil, "", uuid.New(), t0)

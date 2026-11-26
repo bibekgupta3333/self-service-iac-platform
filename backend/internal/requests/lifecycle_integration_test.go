@@ -112,6 +112,13 @@ func TestPublishedRequestLifecycle(t *testing.T) {
 	if err != nil || target.FencingToken == nil {
 		t.Fatalf("publish target: %+v, %v", target, err)
 	}
+	head, pushed := strings.Repeat("c", 40), strings.Repeat("d", 40)
+
+	// A close that races RecordPublished is retried (an error for the outbox), not dropped.
+	if _, err := f.svc.ApplyGitHubEvent(ctx, GitHubEvent{RequestShortID: req.ShortID, PRNumber: 812, Event: EventPRClosed,
+		HeadSHA: head, DeliveryID: "d-0"}); !errors.Is(err, ErrNotYetPublished) {
+		t.Fatalf("early close: %v", err)
+	}
 
 	// A stale token (files rendered under an older lease) is refused.
 	pub := PublishedPR{Publisher: "local", Branch: "iacp/" + req.ShortID, CommitSHA: strings.Repeat("c", 40),
@@ -132,19 +139,38 @@ func TestPublishedRequestLifecycle(t *testing.T) {
 		t.Fatal("a pr_open request must not be published again")
 	}
 	stored, err := f.svc.Get(ctx, req.ID)
-	if err != nil || stored.PR == nil || stored.PR.Branch != pub.Branch || stored.PR.URL != pub.URL || stored.RenderedTreeSHA != pub.TreeSHA {
+	if err != nil || stored.PR == nil || stored.PR.Branch != pub.Branch || stored.PR.URL != pub.URL ||
+		stored.RenderedTreeSHA != pub.TreeSHA || stored.PR.HeadSHA != head {
 		t.Fatalf("stored = %+v, %v", stored, err)
 	}
 
-	// Webhook events: wrong PR and disallowed transitions are ignored and audited.
-	out, err := f.svc.ApplyGitHubEvent(ctx, GitHubEvent{RequestShortID: req.ShortID, PRNumber: 7, Event: EventPRClosed, DeliveryID: "d-1"})
+	// Webhook events: wrong PR, stale heads and disallowed transitions are ignored and audited.
+	out, err := f.svc.ApplyGitHubEvent(ctx, GitHubEvent{RequestShortID: req.ShortID, PRNumber: 7, Event: EventPRClosed, HeadSHA: head, DeliveryID: "d-1"})
 	if err != nil || out.Applied || out.Reason != "pr_mismatch" {
 		t.Fatalf("pr mismatch: %+v, %v", out, err)
 	}
 	out, err = f.svc.ApplyGitHubEvent(ctx, GitHubEvent{RequestShortID: req.ShortID, PRNumber: 812, Event: EventPRMerged,
-		MergeCommitSHA: strings.Repeat("a", 40), DeliveryID: "d-2"})
+		MergeCommitSHA: strings.Repeat("a", 40), HeadSHA: head, DeliveryID: "d-2"})
 	if err != nil || out.Applied || out.Reason != "invalid_transition" {
 		t.Fatalf("unapproved merge: %+v, %v", out, err)
+	}
+	// A push moves the head even though new_commit is not allowed in pr_open...
+	out, err = f.svc.ApplyGitHubEvent(ctx, GitHubEvent{RequestShortID: req.ShortID, PRNumber: 812, Event: EventNewCommit,
+		BeforeSHA: head, HeadSHA: pushed, DeliveryID: "d-2b"})
+	if err != nil || out.Applied || out.Reason != "invalid_transition" {
+		t.Fatalf("push: %+v, %v", out, err)
+	}
+	if got, _ := f.svc.Get(ctx, req.ID); got.PR.HeadSHA != pushed {
+		t.Fatalf("head not tracked: %+v", got.PR)
+	}
+	// ...so a replay of that push, or a close naming the old head, is stale.
+	for _, e := range []GitHubEvent{
+		{RequestShortID: req.ShortID, PRNumber: 812, Event: EventNewCommit, BeforeSHA: head, HeadSHA: pushed, DeliveryID: "d-2c"},
+		{RequestShortID: req.ShortID, PRNumber: 812, Event: EventPRClosed, HeadSHA: head, DeliveryID: "d-2d"},
+	} {
+		if out, err := f.svc.ApplyGitHubEvent(ctx, e); err != nil || out.Reason != "stale_head" {
+			t.Fatalf("stale %s: %+v, %v", e.Event, out, err)
+		}
 	}
 	if out, err := f.svc.ApplyGitHubEvent(ctx, GitHubEvent{RequestShortID: "req-unknown1", PRNumber: 1, Event: EventPRClosed}); err != nil || out.Reason != "unknown_request" {
 		t.Fatalf("unknown request: %+v, %v", out, err)
@@ -156,7 +182,7 @@ func TestPublishedRequestLifecycle(t *testing.T) {
 
 	// Closing the PR unmerged rejects the request and releases its lock.
 	out, err = f.svc.ApplyGitHubEvent(ctx, GitHubEvent{RequestShortID: req.ShortID, PRNumber: 812, Event: EventPRClosed,
-		Action: "closed", DeliveryID: "d-4"})
+		Action: "closed", HeadSHA: pushed, DeliveryID: "d-4"})
 	if err != nil || !out.Applied || out.From != StatusPROpen || out.To != StatusRejected {
 		t.Fatalf("close: %+v, %v", out, err)
 	}
@@ -164,12 +190,13 @@ func TestPublishedRequestLifecycle(t *testing.T) {
 		t.Fatal("the lock must be released when the request is rejected")
 	}
 	// A redelivery after the terminal transition is ignored.
-	if out, err := f.svc.ApplyGitHubEvent(ctx, GitHubEvent{RequestShortID: req.ShortID, PRNumber: 812, Event: EventPRClosed, DeliveryID: "d-5"}); err != nil || out.Applied {
+	if out, err := f.svc.ApplyGitHubEvent(ctx, GitHubEvent{RequestShortID: req.ShortID, PRNumber: 812, Event: EventPRClosed, HeadSHA: pushed, DeliveryID: "d-5"}); err != nil || out.Applied {
 		t.Fatalf("redelivery: %+v, %v", out, err)
 	}
 
 	want := []string{"request.created", "request.publish_enqueued", "request.transitioned", "request.github_event_ignored",
-		"request.github_event_ignored", "request.workflow_run_completed", "request.transitioned", "request.github_event_ignored"}
+		"request.github_event_ignored", "request.github_event_ignored", "request.github_event_ignored", "request.github_event_ignored",
+		"request.workflow_run_completed", "request.transitioned", "request.github_event_ignored"}
 	if got := f.actions(t, req.ID); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("audit trail:\n got %v\nwant %v", got, want)
 	}

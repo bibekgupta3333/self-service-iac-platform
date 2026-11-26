@@ -76,10 +76,11 @@ type Command struct {
 	PRNumber       int            `json:"pr_number,omitempty"`
 	RequestEvent   requests.Event `json:"request_event,omitempty"`
 	MergeCommitSHA string         `json:"merge_commit_sha,omitempty"`
+	HeadSHA        string         `json:"head_sha,omitempty"`   // PR head (after the push for synchronize)
+	BeforeSHA      string         `json:"before_sha,omitempty"` // synchronize: head before the push
 	Workflow       string         `json:"workflow,omitempty"`
 	RunID          int64          `json:"run_id,omitempty"`
 	Conclusion     string         `json:"conclusion,omitempty"`
-	HeadSHA        string         `json:"head_sha,omitempty"`
 	URL            string         `json:"url,omitempty"`
 }
 
@@ -90,11 +91,14 @@ type repoField struct {
 type pullRequestPayload struct {
 	Action      string `json:"action"`
 	Number      int    `json:"number"`
+	Before      string `json:"before"` // synchronize
+	After       string `json:"after"`  // synchronize
 	PullRequest struct {
 		Merged         bool   `json:"merged"`
 		MergeCommitSHA string `json:"merge_commit_sha"`
 		Head           struct {
 			Ref string `json:"ref"`
+			SHA string `json:"sha"`
 		} `json:"head"`
 	} `json:"pull_request"`
 	Repository repoField `json:"repository"`
@@ -134,14 +138,17 @@ func Map(event, deliveryID string, body []byte) (*Command, error) {
 			return nil, nil
 		}
 		c := &Command{Kind: KindTransition, DeliveryID: deliveryID, Event: event, Action: p.Action,
-			Repository: p.Repository.FullName, RequestShortID: shortID, PRNumber: p.Number}
+			Repository: p.Repository.FullName, RequestShortID: shortID, PRNumber: p.Number, HeadSHA: p.PullRequest.Head.SHA}
 		switch {
 		case p.Action == "closed" && p.PullRequest.Merged:
 			c.RequestEvent, c.MergeCommitSHA = requests.EventPRMerged, p.PullRequest.MergeCommitSHA
 		case p.Action == "closed":
 			c.RequestEvent = requests.EventPRClosed
 		case p.Action == "synchronize":
-			c.RequestEvent = requests.EventNewCommit
+			c.RequestEvent, c.BeforeSHA = requests.EventNewCommit, p.Before
+			if p.After != "" {
+				c.HeadSHA = p.After
+			}
 		default:
 			return nil, nil
 		}

@@ -6,11 +6,17 @@
 -- webhook ingester enqueues "github.event" commands, and the worker claims rows with
 -- FOR UPDATE SKIP LOCKED. Publishing rows to SQS instead is a later adapter.
 --
+-- requests.github_head_sha is the PR head the platform last saw (the published commit,
+-- then each accepted synchronize). Webhook commands carry the head SHA and are ignored when
+-- it does not match, so a replayed or late event cannot move the request.
+--
 -- Privileges (least privilege for iacp_app):
 --   webhook_deliveries: SELECT, INSERT, and DELETE for the 7-day purge; never UPDATE.
 --   outbox:             SELECT, INSERT, UPDATE (claim, complete, retry); never DELETE.
 
 -- +goose Up
+ALTER TABLE requests ADD COLUMN github_head_sha char(40) CHECK (github_head_sha ~ '^[0-9a-f]{40}$');
+
 CREATE TABLE webhook_deliveries (
     delivery_id uuid        PRIMARY KEY,                 -- X-GitHub-Delivery
     event       text        NOT NULL CHECK (length(event) BETWEEN 1 AND 64),
@@ -53,3 +59,4 @@ END $$;
 -- +goose Down
 DROP TABLE outbox;
 DROP TABLE webhook_deliveries;
+ALTER TABLE requests DROP COLUMN github_head_sha;

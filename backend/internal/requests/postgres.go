@@ -65,7 +65,7 @@ func (r *PostgresRepository) Get(ctx context.Context, id uuid.UUID) (*Request, e
 
 const requestCols = `r.id, r.short_id, r.stack_id, s.path, s.status, r.kind, r.status, r.spec, coalesce(r.justification, ''),
 	r.queued_behind, r.fencing_token, coalesce(r.approved_plan_hash, ''), r.approved_by, r.approved_at, r.retry_count,
-	r.github_branch, r.github_pr_number, r.github_pr_url, coalesce(r.rendered_tree_sha, ''), coalesce(r.merge_commit_sha, ''),
+	r.github_branch, r.github_pr_number, r.github_pr_url, coalesce(r.github_head_sha, ''), coalesce(r.rendered_tree_sha, ''), coalesce(r.merge_commit_sha, ''),
 	coalesce(r.failure_reason, ''), r.failure_detail, r.created_by, r.created_at, r.updated_at, r.completed_at`
 
 func scanRequest(row pgx.Row) (*Request, error) {
@@ -76,10 +76,11 @@ func scanRequest(row pgx.Row) (*Request, error) {
 		prNumber *int
 		prURL    *string
 		detail   []byte
+		headSHA  string
 	)
 	err := row.Scan(&q.ID, &q.ShortID, &q.Stack.ID, &q.Stack.Path, &q.Stack.Status, &q.Kind, &q.Status, &spec,
 		&q.Justification, &q.QueuedBehind, &q.FencingToken, &q.ApprovedPlanHash, &q.ApprovedBy, &q.ApprovedAt, &q.RetryCount,
-		&branch, &prNumber, &prURL, &q.RenderedTreeSHA, &q.MergeCommitSHA, &q.FailureReason, &detail,
+		&branch, &prNumber, &prURL, &headSHA, &q.RenderedTreeSHA, &q.MergeCommitSHA, &q.FailureReason, &detail,
 		&q.CreatedBy, &q.CreatedAt, &q.UpdatedAt, &q.CompletedAt)
 	if err != nil {
 		return nil, err
@@ -89,7 +90,7 @@ func scanRequest(row pgx.Row) (*Request, error) {
 		q.FailureDetail = detail
 	}
 	if prNumber != nil {
-		q.PR = &PRLink{Number: *prNumber}
+		q.PR = &PRLink{Number: *prNumber, HeadSHA: headSHA}
 		if branch != nil {
 			q.PR.Branch = *branch
 		}
@@ -285,9 +286,10 @@ func (s *pgStore) UpdateRequest(ctx context.Context, r *Request, from Status) er
 		branch, url *string
 		number      *int
 		detail      []byte
+		head        string
 	)
 	if r.PR != nil {
-		branch, number, url = &r.PR.Branch, &r.PR.Number, &r.PR.URL
+		branch, number, url, head = &r.PR.Branch, &r.PR.Number, &r.PR.URL, r.PR.HeadSHA
 	}
 	if len(r.FailureDetail) > 0 {
 		detail = r.FailureDetail
@@ -295,10 +297,11 @@ func (s *pgStore) UpdateRequest(ctx context.Context, r *Request, from Status) er
 	tag, err := s.tx.Exec(ctx, `UPDATE requests SET status = $3, retry_count = $4, approved_plan_hash = nullif($5, ''),
 			approved_by = $6, approved_at = $7, updated_at = $8, completed_at = $9, github_branch = $10,
 			github_pr_number = $11, github_pr_url = $12, rendered_tree_sha = nullif($13, ''),
-			merge_commit_sha = nullif($14, ''), failure_reason = nullif($15, ''), failure_detail = $16
+			merge_commit_sha = nullif($14, ''), failure_reason = nullif($15, ''), failure_detail = $16,
+			github_head_sha = nullif($17, '')
 		WHERE id = $1 AND status = $2`,
 		r.ID, string(from), string(r.Status), r.RetryCount, r.ApprovedPlanHash, r.ApprovedBy, r.ApprovedAt, r.UpdatedAt,
-		r.CompletedAt, branch, number, url, r.RenderedTreeSHA, r.MergeCommitSHA, r.FailureReason, detail)
+		r.CompletedAt, branch, number, url, r.RenderedTreeSHA, r.MergeCommitSHA, r.FailureReason, detail, head)
 	if db.IsUniqueViolation(err, "requests_pr_idx") {
 		return apperr.Conflict("pr_number_in_use", fmt.Sprintf("pull request #%d is already linked to another request", r.PR.Number))
 	}

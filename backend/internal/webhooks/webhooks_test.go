@@ -43,8 +43,8 @@ func TestVerifySignature(t *testing.T) {
 }
 
 func prBody(action string, merged bool, ref string) []byte {
-	b, _ := json.Marshal(map[string]any{"action": action, "number": 812,
-		"pull_request": map[string]any{"merged": merged, "merge_commit_sha": "abc", "head": map[string]any{"ref": ref}},
+	b, _ := json.Marshal(map[string]any{"action": action, "number": 812, "before": "b0", "after": "a1",
+		"pull_request": map[string]any{"merged": merged, "merge_commit_sha": "abc", "head": map[string]any{"ref": ref, "sha": "h1"}},
 		"repository":   map[string]any{"full_name": "acme/infra"}})
 	return b
 }
@@ -60,11 +60,11 @@ func TestMap(t *testing.T) {
 		err   bool
 	}{
 		{"merged", "pull_request", prBody("closed", true, "iacp/req-7k3p9x"), &Command{Kind: KindTransition,
-			RequestEvent: requests.EventPRMerged, MergeCommitSHA: "abc", Action: "closed"}, false},
+			RequestEvent: requests.EventPRMerged, MergeCommitSHA: "abc", Action: "closed", HeadSHA: "h1"}, false},
 		{"closed unmerged", "pull_request", prBody("closed", false, "iacp/req-7k3p9x"), &Command{Kind: KindTransition,
-			RequestEvent: requests.EventPRClosed, Action: "closed"}, false},
+			RequestEvent: requests.EventPRClosed, Action: "closed", HeadSHA: "h1"}, false},
 		{"synchronize", "pull_request", prBody("synchronize", false, "iacp/req-7k3p9x"), &Command{Kind: KindTransition,
-			RequestEvent: requests.EventNewCommit, Action: "synchronize"}, false},
+			RequestEvent: requests.EventNewCommit, Action: "synchronize", BeforeSHA: "b0", HeadSHA: "a1"}, false},
 		{"opened is ignored", "pull_request", prBody("opened", false, "iacp/req-7k3p9x"), nil, false},
 		{"foreign branch is ignored", "pull_request", prBody("closed", true, "feature/x"), nil, false},
 		{"workflow run completed", "workflow_run", run, &Command{Kind: KindHint, Action: "completed",

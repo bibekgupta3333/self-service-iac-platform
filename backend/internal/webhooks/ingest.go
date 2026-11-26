@@ -155,7 +155,8 @@ func (a *Applier) Handle(ctx context.Context, j outbox.Job) error {
 	switch c.Kind {
 	case KindTransition:
 		_, err := a.reqs.ApplyGitHubEvent(ctx, requests.GitHubEvent{RequestShortID: c.RequestShortID, PRNumber: c.PRNumber,
-			Event: c.RequestEvent, MergeCommitSHA: c.MergeCommitSHA, DeliveryID: c.DeliveryID, Action: c.Action})
+			Event: c.RequestEvent, MergeCommitSHA: c.MergeCommitSHA, DeliveryID: c.DeliveryID, Action: c.Action,
+			HeadSHA: c.HeadSHA, BeforeSHA: c.BeforeSHA})
 		return err
 	case KindHint:
 		_, err := a.reqs.RecordWorkflowHint(ctx, requests.WorkflowHint{RequestShortID: c.RequestShortID, Workflow: c.Workflow,

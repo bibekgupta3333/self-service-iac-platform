@@ -47,6 +47,8 @@ type PRLink struct {
 	Branch string `json:"branch"`
 	Number int    `json:"pr_number"`
 	URL    string `json:"pr_url"`
+	// HeadSHA is the PR head the platform last accepted (published commit, then synchronize).
+	HeadSHA string `json:"head_sha,omitempty"`
 }
 
 // Request is a change request against one stack. Status changes go through Fire and

@@ -204,7 +204,11 @@ func (s *Service) RecordPublished(ctx context.Context, id uuid.UUID, p Published
 		if err := r.Fire(EventPROpened, s.clock.Now()); err != nil {
 			return err
 		}
-		r.PR, r.RenderedTreeSHA = &PRLink{Branch: p.Branch, Number: p.Number, URL: p.URL}, p.TreeSHA
+		head := ""
+		if shaRe.MatchString(p.CommitSHA) {
+			head = p.CommitSHA
+		}
+		r.PR, r.RenderedTreeSHA = &PRLink{Branch: p.Branch, Number: p.Number, URL: p.URL, HeadSHA: head}, p.TreeSHA
 		if err := s.commit(ctx, st, r, from, EventPROpened, publisherPrincipal(p.Publisher), correlationID, map[string]any{
 			"publisher": p.Publisher, "branch": p.Branch, "commit_sha": p.CommitSHA, "tree_sha": p.TreeSHA,
 			"pr_number": p.Number, "pr_url": p.URL, "fencing_token": p.FencingToken,
@@ -271,6 +275,26 @@ type GitHubEvent struct {
 	MergeCommitSHA string // pr_merged only
 	DeliveryID     string // X-GitHub-Delivery, recorded in the audit payload
 	Action         string // webhook action, for the audit trail
+	HeadSHA        string // pull_request.head.sha (after the push, for synchronize)
+	BeforeSHA      string // synchronize only: the head before the push
+}
+
+// ErrNotYetPublished means a webhook names a request whose PR is not recorded yet (the
+// event raced RecordPublished). It is returned as an error so the outbox retries it.
+var ErrNotYetPublished = errors.New("pull request not recorded yet")
+
+// HeadCheck decides whether a webhook's head SHA continues the PR head the platform
+// knows: a synchronize must start from the known head (its before SHA), and any other
+// event must name it. ok is false for a replayed or out-of-order event. An unknown known
+// head (published before head tracking) accepts everything. Pure.
+func HeadCheck(known string, e GitHubEvent) (ok bool) {
+	if known == "" {
+		return true
+	}
+	if e.Event == EventNewCommit {
+		return e.BeforeSHA == known
+	}
+	return e.HeadSHA == known
 }
 
 // EventOutcome reports what ApplyGitHubEvent did.
@@ -309,15 +333,30 @@ func (s *Service) ApplyGitHubEvent(ctx context.Context, e GitHubEvent) (EventOut
 			out.Reason = reason
 			return s.audit(ctx, st, webhookPrincipal, "request.github_event_ignored", r.ID, e.DeliveryID, map[string]any{
 				"short_id": r.ShortID, "event": e.Event, "action": e.Action, "status": r.Status, "reason": reason,
-				"delivery_id": e.DeliveryID, "pr_number": e.PRNumber,
+				"delivery_id": e.DeliveryID, "pr_number": e.PRNumber, "head_sha": e.HeadSHA,
 			})
+		}
+		if r.PR == nil && r.Status == StatusDraft {
+			return fmt.Errorf("%s: %w", r.ShortID, ErrNotYetPublished) // retried by the outbox
 		}
 		if r.PR == nil || r.PR.Number != e.PRNumber {
 			return ignore("pr_mismatch")
 		}
+		if !HeadCheck(r.PR.HeadSHA, e) {
+			return ignore("stale_head")
+		}
 		from := r.Status
+		if e.Event == EventNewCommit && shaRe.MatchString(e.HeadSHA) {
+			r.PR.HeadSHA = e.HeadSHA
+		}
 		if err := r.Fire(e.Event, s.clock.Now()); err != nil {
 			if ae, ok := apperr.As(err); ok && ae.Kind == apperr.KindConflict {
+				// The push still moved the head: keep tracking it so later events match.
+				if e.Event == EventNewCommit {
+					if err := st.UpdateRequest(ctx, r, from); err != nil {
+						return err
+					}
+				}
 				return ignore(ae.Code)
 			}
 			return err
