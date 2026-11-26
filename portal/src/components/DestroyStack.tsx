@@ -107,7 +107,9 @@ export function DestroyStack({ stack, state, client, newIdempotencyKey, onCreate
   };
 
   const onClose = () => {
-    reset();
+    // A browser may still close the dialog on a second Escape after the first `cancel` was
+    // prevented; keep the fields (and the error summary to come) while the submit is in flight.
+    if (!inFlight.current) reset();
     triggerRef.current?.focus();
   };
 

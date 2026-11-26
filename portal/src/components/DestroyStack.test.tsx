@@ -199,6 +199,10 @@ describe("DestroyStack", () => {
     fireEvent(dialog, cancel);
     expect(cancel.defaultPrevented).toBe(true);
     expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeDisabled();
+    // A browser can still close it on a second Escape; the fields are kept while in flight.
+    fireEvent(dialog, new Event("close"));
+    expect(within(dialog).getByLabelText(/Type orders to confirm/)).toHaveValue("orders");
+    expect(within(dialog).getByLabelText(/^Justification/)).toHaveValue("retired");
     await act(async () => finish({ request: created, replayed: false }));
     expect(onCreated).toHaveBeenCalledTimes(1);
     const after = new Event("cancel", { cancelable: true });
