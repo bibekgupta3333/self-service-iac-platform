@@ -20,6 +20,7 @@ from .module_install import MANIFEST, ModuleInstallVerifier, parse_manifest
 from .module_pins import DEFAULT_REPO_URL, DEFAULT_TRUSTED_REF, ModulePinVerifier, PinError, Resolution, insteadof_config
 from .plan_summary import render_markdown, summarize
 from .policy_context import build_context
+from .sarif import SarifError, rebase_sarif, result_count
 from .report import (
     GitHubRun,
     ReportError,
@@ -98,6 +99,14 @@ def build_parser() -> argparse.ArgumentParser:
     installed = sub.add_parser("verify-modules", help="after init: match installed modules to the pins one to one")
     installed.add_argument("stack_dir", type=Path)
     installed.add_argument("--repo-url", default=DEFAULT_REPO_URL, help="module repository URL used in stack sources")
+
+    sarif = sub.add_parser("sarif", help="rewrite a stack's TFLint or Checkov SARIF to repository-relative paths")
+    sarif.add_argument("stack_dir", type=Path)
+    sarif.add_argument("--in", dest="input", type=Path, required=True, help="SARIF written inside the stack root")
+    sarif.add_argument("--out", type=Path, required=True)
+    sarif.add_argument("--external-dir", action="append", default=[],
+                       help="Checkov --external-modules-download-path (repeatable)")
+
     report = sub.add_parser("report", help="POST one stage report to $IACP_API_URL/v1/runs")
     report.add_argument("stack_dir", type=Path)
     report.add_argument("--pipeline", required=True, choices=("validate", "apply", "drift", "ttl_destroy"))
@@ -251,6 +260,19 @@ def run_verify_modules(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_sarif(args: argparse.Namespace) -> int:
+    meta = FileSystemStackRepository(args.repo_root).load_dir(args.stack_dir)
+    doc = _read_json(args.input)
+    if doc is None:
+        raise SarifError(f"{args.input} is missing or is not JSON")
+    # Both spellings: a tool may print the resolved path (/private/tmp on macOS).
+    dirs = [str(p) for d in args.external_dir for p in dict.fromkeys((Path(d), Path(d).resolve()))]
+    out = rebase_sarif(doc, meta.ref.path, dirs, str(Path(args.repo_root).resolve()))
+    args.out.write_text(json.dumps(out, indent=1) + "\n", encoding="utf-8")
+    print(f"{meta.ref.path}: {result_count(out)} SARIF result(s) -> {args.out}")
+    return 0
+
+
 def _build_report(args: argparse.Namespace, env: Mapping[str, str]) -> RunReport:
     """Assemble the report from the stack file, the pipeline's files and the runner env."""
     meta = FileSystemStackRepository(args.repo_root).load_dir(args.stack_dir)
@@ -386,6 +408,7 @@ COMMANDS = {
     "summary": run_summary,
     "verify-pins": run_verify_pins,
     "verify-modules": run_verify_modules,
+    "sarif": run_sarif,
     "report": run_report,
     "lock": run_lock,
 }
