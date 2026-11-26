@@ -63,16 +63,20 @@ lint: fmt-check validate validate-manifests tflint checkov policy-test ## All st
 ## ---- stacks (environments/, mirrors pr-validate.yml) ----
 STACK ?= environments/development/platform/smoke
 BASE  ?= origin/main
+# Same switch as the workflow's IACP_PIN_BOOTSTRAP (ADR-0009); set to false to refuse unpublished tags.
+IACP_PIN_BOOTSTRAP ?= true
+PIN_BOOTSTRAP_FLAG := $(if $(filter true,$(IACP_PIN_BOOTSTRAP)),--allow-unpublished,)
 
 stack-detect: ## Stacks changed since BASE (default origin/main) as a JSON matrix
 	$(PYTHON) -m tools.stack_pipeline detect --base $(BASE) --head HEAD --github-output ''
 
 stack-plan: ## pr-validate checks + plan + conftest for STACK against LocalStack (needs `make up`)
 	@set -euo pipefail; tmp="$$(mktemp -d)"; trap 'rm -rf "$$tmp"' EXIT; \
-	exports="$$($(PYTHON) -m tools.stack_pipeline verify-pins $(STACK) --mirror "$$tmp/mirror.git" --github-env '')"; \
+	exports="$$($(PYTHON) -m tools.stack_pipeline verify-pins $(STACK) --mirror "$$tmp/mirror.git" $(PIN_BOOTSTRAP_FLAG) --github-env '')"; \
 	eval "$$exports"; \
 	terraform -chdir=$(STACK) fmt -check -recursive; \
 	terraform -chdir=$(STACK) init -input=false -lockfile=readonly >/dev/null; \
+	$(PYTHON) -m tools.stack_pipeline verify-modules $(STACK); \
 	terraform -chdir=$(STACK) validate -no-color; \
 	terraform -chdir=$(STACK) plan -input=false -lock=false -out=tfplan; \
 	terraform -chdir=$(STACK) show -json tfplan > "$$tmp/plan.json"; \
