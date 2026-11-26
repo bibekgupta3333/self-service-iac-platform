@@ -37,7 +37,7 @@ Related: [01-system-architecture.md](01-system-architecture.md) · [04-module-re
 | `plan_summaries` | Parsed plan: add/change/destroy counts, resource changes, plan hash, policy results. | pipeline_run |
 | `cost_estimates` | Infracost result: monthly before/after/delta. | pipeline_run |
 | `drift_reports` | Nightly drift detection result per stack. | stack, pipeline_run |
-| `budgets` | Team monthly budget (`limit_usd`, `spent_usd`, `actual_usd`, hard block, admin override with reason and expiry). | team, environment, users (override_by, updated_by) |
+| `budgets` | Team monthly budget (`limit_usd`, `spent_usd`, `actual_usd`, hard block, single-change cap, admin override with reason, expiry and bound). | team, environment, users (override_by, updated_by) |
 | `budget_overrides` | Admin override for a specific request (max delta, reason, expiry). | budget, request |
 | `policy_exceptions` | Time-boxed waiver of a policy rule for a stack/team. | team, stack |
 | `locks` | Platform-level per-stack mutation lock with fencing token. | stack, request |
@@ -172,6 +172,8 @@ CREATE TABLE stacks (
     last_applied_sha char(40),
     last_applied_request_id uuid,
     last_drift_check_at timestamptz,
+    committed_monthly_usd numeric(12,2) CHECK (committed_monthly_usd IS NULL OR committed_monthly_usd >= 0),  -- migration 0013; summed into the budget context
+    committed_at        timestamptz,
     tags             jsonb       NOT NULL DEFAULT '{}'::jsonb,
     created_by       uuid        NOT NULL REFERENCES users(id),
     created_at       timestamptz NOT NULL DEFAULT now(),
@@ -322,6 +324,8 @@ CREATE TABLE budgets (
     updated_at      timestamptz   NOT NULL DEFAULT now(),
     override_reason text,                                           -- >= 20 chars; override_by, reason and expiry are set or null together
     override_expires_at timestamptz,
+    override_max_delta_usd numeric(12,2),                           -- the override covers a stack costing at most this per month
+    single_change_cap_usd  numeric(12,2) NOT NULL DEFAULT 5000,     -- one stack above this is denied whatever the headroom
     actual_usd      numeric(12,2) CHECK (actual_usd IS NULL OR actual_usd >= 0),  -- recorded by POST /internal/budget-actuals
     actual_recorded_at timestamptz,
     UNIQUE NULLS NOT DISTINCT (team_id, environment_id, month),
@@ -912,12 +916,12 @@ data: {"request_id":"…","status":"applied"}
 **Budget administration (WBS 8.5).** Both budget routes are admin-only: `DefaultPolicies` requires the admin role in some team, and `budgets.AdminService` then requires `budget.set` (admin) in the team named in the path (a platform admin counts everywhere); a route without a policy entry is refused with `403`, and a denial is audited as `rbac.denied`. `month` is `YYYY-MM`, from a year back to two years ahead. The body of `PUT` is strict (unknown fields are `400`):
 
 ```json
-{ "environment": "production", "limit_usd": 2500.50, "currency": "USD", "hard_block": true,
-  "alert_thresholds": [50, 80, 100],
-  "override": { "reason": "launch week capacity, approved in CAB-123", "expires_at": "2026-12-01T00:00:00Z" } }
+{ "environment": "staging", "limit_usd": 2500.50, "currency": "USD", "hard_block": true,
+  "alert_thresholds": [50, 80, 100], "single_change_cap_usd": 5000,
+  "override": { "reason": "launch week capacity, approved in CAB-123", "max_delta_usd": 750, "expires_at": "2026-12-01T00:00:00Z" } }
 ```
 
-`limit_usd` is required, from 0 to 1,000,000 with at most two decimals; `currency` is empty or `USD`; `environment` is `development`, `staging`, `production`, or omitted for a team-wide budget (an environment row wins over a team-wide row for that environment); `hard_block` defaults to true; `alert_thresholds` defaults to `[50,80,100]` (1 to 200 percent, at most ten, sorted and de-duplicated). `override` waives the hard limit until `expires_at` (at most 31 days away, reason 20 to 500 characters), outside production only ([07 §6.7](07-security-and-policy.md#67-budget-limit)); omitting it clears an override. A `PUT` replaces the row's settings, never `spent_usd` or `actual_usd`. All problems are returned together as `422 validation_failed` field errors (`/limit_usd`, `/currency`, `/environment`, `/alert_thresholds`, `/override/reason`, `/override/expires_at`); `404` for an unknown team, `422 invalid_month` for a bad month. The response (`200`) is the stored budget: `id`, `team`, `environment` (null = every environment), `month`, `currency`, `limit_usd`, `spent_usd`, `actual_usd`, `used_usd` (the larger of `spent_usd` and `actual_usd`), `utilisation_pct`, `hard_block`, `alert_thresholds`, `override` (`granted_by`, `reason`, `expires_at`, or null), `updated_by`, `updated_at`. Each write appends to the audit chain in the same transaction: `budget.set` (amounts as decimal strings, with the previous limit), plus `budget.override.granted` or `budget.override.revoked`.
+`limit_usd` is required, from 0 to 1,000,000 with at most two decimals; `currency` is empty or `USD`; `environment` is `development`, `staging`, `production`, or omitted for a team-wide budget (an environment row wins over a team-wide row for that environment); `hard_block` defaults to true; `alert_thresholds` defaults to `[50,80,100]` (1 to 200 percent, at most ten, sorted and de-duplicated). `single_change_cap_usd` defaults to 5000 (0 to 1,000,000). `override` waives the hard limit or the cap until `expires_at` (at most 31 days away, reason 20 to 500 characters) for a stack whose monthly cost is at most `max_delta_usd` (required, above 0, at most 1,000,000), outside production only ([07 §6.7](07-security-and-policy.md#67-budget-limit)): an override on a production-scoped budget is a `422` (`/override`). Omitting it clears an override; re-sending an identical one keeps its grantor and is not audited as a new grant. A `PUT` replaces the row's settings, never `spent_usd` or `actual_usd`. All problems are returned together as `422 validation_failed` field errors (`/limit_usd`, `/currency`, `/environment`, `/alert_thresholds`, `/single_change_cap_usd`, `/override`, `/override/reason`, `/override/expires_at`, `/override/max_delta_usd`); `404` for an unknown team, `422 invalid_month` for a bad month. The response (`200`) is the stored budget: `id`, `team`, `environment` (null = every environment), `month`, `currency`, `limit_usd`, `spent_usd`, `actual_usd`, `used_usd` (the larger of `spent_usd` and `actual_usd`), `utilisation_pct`, `hard_block`, `alert_thresholds`, `single_change_cap_usd`, `override` (`granted_by`, `reason`, `expires_at`, `max_delta_usd`, or null), `updated_by`, `updated_at`. Each write appends to the audit chain in the same transaction: `budget.set` (amounts as decimal strings, with the previous limit), plus `budget.override.granted` or `budget.override.revoked`.
 
 The per-request override (`POST /requests/{id}/budget-override`) and the `budget_overrides` table remain planned; the budget-level override above is what `budget.rego` reads today.
 
@@ -959,6 +963,7 @@ Called only by GitHub Actions jobs with `Authorization: Bearer <GitHub OIDC JWT>
 | GET | `/internal/requests/by-path?stack_path=&head_sha=` | `apply.yml` (before the lock claim) | Resolves the request that holds the stack's lock: stack and request ids, `fencing_token`, `approved_plan_hash` (below). Fails closed. |
 | GET | `/internal/budget-context?stack_path=` | `pr-validate.yml`, `apply.yml` | OPA input (`conftest --data`): environment, team, allowed regions, budget (`limit_usd`, `spent_usd`, active override), approved policy exceptions, yanked module versions. |
 | POST | `/internal/budget-actuals` | shared internal token only | Record a team's actual spend: `{"team", "environment"?, "month": "YYYY-MM", "actual_usd"}` → `200` with the budget (as in [6.7](#67-budgets-and-exceptions)); `404` when the team has no such budget, `422` for a bad amount. Audited as `budget.actual.recorded`. The future Cost Explorer worker calls it; nothing does yet (Cost Explorer is not reachable under LocalStack, ADR-0009). |
+| POST | `/internal/budget-committed` | shared internal token only | Record one stack's committed monthly cost: `{"stack_path", "monthly_usd"}` → `200 {"stack_path", "monthly_usd"}`; `404` for an unknown or destroyed stack, `422` for a bad amount. Audited as `stack.cost.committed`. The budget context sums it over the team's other active stacks (`current_committed_usd`). Nothing calls it yet (`apply.yml` does not price a plan; ADR-0012). |
 | POST | `/drift` | `drift.yml` | Drift result per stack (see [6.6](#66-drift)). |
 | POST | `/internal/catalog/index` | `module-release.yml` | Index a released module version (see [6.2](#62-catalog-modules-and-versions)). |
 | GET | `/internal/stacks/{id}/lock` | worker, `apply.yml` | Current platform lock: `stack_id`, `request_id`, `holder`, `fencing_token`, `acquired_at`, `expires_at`; `404` when unlocked. |
@@ -979,7 +984,7 @@ Route classes (`backend/internal/auth/routes.go`, pure table enforced by middlew
 | runs | `/runs` | `pr-validate.yml`, `apply.yml`, `drift.yml`, `ttl-reaper.yml` | per pipeline | `pull_request`, `push`, `workflow_dispatch`, `schedule` |
 | request_lookup | `/internal/requests/by-path` (read-only) | `apply.yml` only | `refs/heads/main` (ref and workflow definition) | `push`, `workflow_dispatch` |
 | budget_context | `/internal/budget-context` (read-only) | `pr-validate.yml`, `apply.yml` | global allow-list (PR merge ref for `pr-validate.yml`, main otherwise) | `pull_request`, `push`, `workflow_dispatch` |
-| budget_actuals | `/internal/budget-actuals` (write) | none: shared internal token only | n/a | n/a |
+| budget_actuals | `/internal/budget-actuals`, `/internal/budget-committed` (write) | none: shared internal token only | n/a | n/a |
 
 Per pipeline on `/runs`: `validate` ← `pr-validate.yml` on `pull_request`; `apply` ← `apply.yml` on main via `push`/`workflow_dispatch`; `drift` ← `drift.yml` on main via `schedule`/`workflow_dispatch`; `ttl_destroy` ← `ttl-reaper.yml` on main via `schedule`/`workflow_dispatch`. `pull_request_target` and `workflow_run` never qualify.
 
@@ -1041,7 +1046,7 @@ Response `200 {"accepted": true, "run_id": "…", "run_status": "succeeded", "re
 
 Current implementation (WBS 4.10): `pipeline` is one of `validate`, `apply`, `drift`, `ttl_destroy`; `status` is `in_progress`, `passed`, `failed` or `cancelled`. `fencing_token` and `request_short_id` are required except for `drift`; `github.head_sha` must be the job's `github.sha`. Each report is recorded in `pipeline_runs.stages` (one row per run id, attempt and stack): a report for a stage already recorded replaces that entry, so retried calls are idempotent, and a run records at most 32 distinct stages (`422 too_many_stages`). A `passed` `summary` stage finishes the run as `succeeded`, a `failed`/`cancelled` stage finishes it as such, and a finished run keeps its status. The report transaction locks the `stacks` row (`FOR KEY SHARE`) before reading the lock, the same order as the lock operations, so reports never deadlock with release or promotion. `request_status` is the request's status as stored; the transitions driven by reports, `plan_summaries` and `cost_estimates` arrive with WBS 5.2/5.3.
 
-`GET /v1/internal/budget-context?stack_path=environments/development/payments/order-events` (pr-validate) → `200`. The body is the conftest `--data` file, read by the policies as `data.iacp.context` ([07 §6.1](07-security-and-policy.md#61-layout-and-evaluation)). Everything is derived from the path, so it also works for a stack the PR is creating. `budget` is the team's row for the current UTC month, the environment-specific row winning over a team-wide one (`scope`), or `null` when none is set; `spent_usd` stays `0` until cost estimates are recorded, `actual_usd` is `null` until an actual is recorded (`POST /internal/budget-actuals`), and the policy counts the larger of the two as used. `budget_override` is the budget's admin override (`granted_by`, `reason`, `expires_at`) or `null`; `exceptions` is `[]` until policy exceptions exist. `yanked_module_versions` lists every yanked version, including all versions of a yanked module. `stack=` is accepted as an alias. Errors: `422 invalid_stack_path`, `404 environment_not_found`.
+`GET /v1/internal/budget-context?stack_path=environments/development/payments/order-events` (pr-validate) → `200`. The body is the conftest `--data` file, read by the policies as `data.iacp.context` ([07 §6.1](07-security-and-policy.md#61-layout-and-evaluation)). Everything is derived from the path, so it also works for a stack the PR is creating. `budget` is the team's row for the current UTC month, the environment-specific row winning over a team-wide one (`scope`), or `null` when none is set; `spent_usd` stays `0` until cost estimates are recorded, `actual_usd` is `null` until an actual is recorded (`POST /internal/budget-actuals`), and the policy counts the larger of the two as used. `budget_override` is the budget's admin override (`granted_by`, `reason`, `expires_at`, `max_delta_usd`) or `null`; `current_committed_usd` (only with a budget) is the committed monthly cost of the team's other active stacks in the budget's scope; `exceptions` is `[]` until policy exceptions exist. `yanked_module_versions` lists every yanked version, including all versions of a yanked module. `stack=` is accepted as an alias. Errors: `422 invalid_stack_path`, `404 environment_not_found`.
 
 ```json
 {
@@ -1050,8 +1055,9 @@ Current implementation (WBS 4.10): `pipeline` is one of `validate`, `apply`, `dr
       "environment": "development", "team": "payments", "stack": "order-events",
       "stack_path": "environments/development/payments/order-events",
       "allowed_regions": ["us-east-1"],
-      "budget": { "month": "2026-11", "limit_usd": 2000.0, "spent_usd": 0, "actual_usd": null, "hard_block": true, "scope": "environment" },
+      "budget": { "month": "2026-11", "limit_usd": 2000.0, "spent_usd": 0, "actual_usd": null, "hard_block": true, "scope": "environment", "single_change_cap_usd": 5000 },
       "budget_override": null,
+      "current_committed_usd": 0,
       "exceptions": [],
       "yanked_module_versions": [ { "module": "s3", "version": "1.1.0", "tag": "modules/s3/v1.1.0" } ],
       "now": "2026-11-24T10:05:00Z"

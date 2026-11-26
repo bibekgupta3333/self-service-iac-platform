@@ -78,7 +78,7 @@ together apply each migration once.
 | `0006_oidc_jti.sql` | `oidc_jti` (used GitHub OIDC token ids until `exp` + leeway, shared by replicas); `iacp_app` gets SELECT/INSERT/DELETE only, no UPDATE |
 | `0007_budgets.sql` | `budgets` (team monthly budget, optionally per environment; `spent_usd` 0 until cost data lands in WBS 8.5) |
 | `0008_webhooks_outbox.sql` | `webhook_deliveries` (delivery id primary key) and `outbox` (job queue: `available_at`, `locked_until`, `attempts`, `dedupe_key`); `iacp_app` gets SELECT/INSERT/DELETE and SELECT/INSERT/UPDATE respectively |
-| `0013_budget_admin.sql` | `budgets`: `updated_by`, `updated_at`, `override_reason`, `override_expires_at` (set or null with `override_by`), `actual_usd`, `actual_recorded_at`; limit and threshold bounds |
+| `0013_budget_admin.sql` | `budgets`: `updated_by`, `updated_at`, `override_reason`, `override_expires_at`, `override_max_delta_usd` (set or null with `override_by`; a half-made override from 0007 is cleared), `single_change_cap_usd`, `actual_usd`, `actual_recorded_at`; limit, cap and threshold bounds; `stacks.committed_monthly_usd` and `committed_at` |
 
 ### Database roles
 
@@ -181,7 +181,7 @@ docker run --rm -p 127.0.0.1:8080:8080 -e IACP_AUTH_MODE=dev \
 | GET | `/metrics` | Prometheus exposition; loopback peers without proxy headers, or `Authorization: Bearer $IACP_METRICS_TOKEN` (`403 metrics_forbidden` otherwise) |
 | GET | `/v1/internal/budget-context?stack_path=` | machine auth (`budget_context` class); conftest `--data` document for the stack (below) |
 | GET, PUT | `/v1/teams/{slug}/budgets[/{month}]` | admin only: `GET` lists, `PUT /v1/teams/{slug}/budgets/{month}` sets a monthly budget (below) |
-| POST | `/v1/internal/budget-actuals` | shared internal token only (`budget_actuals` class, no workflow); records `actual_usd` |
+| POST | `/v1/internal/budget-actuals`, `/v1/internal/budget-committed` | shared internal token only (`budget_actuals` class, no workflow); record `actual_usd` and a stack's committed monthly cost |
 | GET | `/v1/catalog/modules?category=&status=` | modules with `latest_version` |
 | GET | `/v1/catalog/modules/{name}` | module + latest version detail |
 | GET | `/v1/catalog/modules/{name}/versions` | SemVer descending |
@@ -335,8 +335,12 @@ are admin only. `DefaultPolicies` requires the admin role in some team (`budget.
 everywhere); a route with no policy entry is a `403`. `budgets.NewWrite` validates everything in
 one pure pass and reports every problem as a field error: `limit_usd` 0 to 1,000,000 with at most
 two decimals, `currency` empty or `USD`, `environment` one of the three or omitted (team-wide),
-`alert_thresholds` 1 to 200 (default 50, 80, 100), and an `override` (`reason` 20 to 500 characters,
-`expires_at` within 31 days) that waives a hard limit outside production only. Writes and their
+`alert_thresholds` 1 to 200 (default 50, 80, 100), `single_change_cap_usd` (default 5000), and an
+`override` (`reason` 20 to 500 characters, `expires_at` within 31 days, a required `max_delta_usd`
+bound) that waives a hard limit or the cap outside production only and is refused on a
+production-scoped budget. The budget context also sums `stacks.committed_monthly_usd` over the
+team's other active stacks (`current_committed_usd`, `Repository.CommittedUSD`); nothing records it
+yet (ADR-0012), so until then the limit is effectively per stack. Writes and their
 audit events (`budget.set`, `budget.override.granted`, `budget.override.revoked`) share one
 transaction. `POST /v1/internal/budget-actuals` takes `{team, environment?, month, actual_usd}` and
 accepts only the shared internal token: no OIDC workflow is in its route class, so a pull-request

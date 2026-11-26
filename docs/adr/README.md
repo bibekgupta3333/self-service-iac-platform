@@ -15,6 +15,7 @@
 | [0009](0009-local-first-localstack-and-local-backend.md) | Local-first development with LocalStack and the local backend | Accepted |
 | [0010](0010-audit-hash-chain-computed-in-go.md) | Audit hash chain computed in Go, enforced by PostgreSQL | Proposed |
 | [0011](0011-portal-form-renderer.md) | Portal request form uses a small typed schema renderer instead of `@rjsf/core` | Proposed |
+| [0012](0012-budget-gate-inputs-and-deferrals.md) | Budget gate inputs, what it trusts, and what is deferred | Accepted |
 
 ## Process
 
