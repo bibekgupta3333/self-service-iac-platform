@@ -18,7 +18,7 @@ func TestSessionCookieIsRejectedOnMachineRoutes(t *testing.T) {
 	f.store.rows[string(session.HashID(c.Value))] = rec
 
 	f.deps.Internal = NewTokenAuthenticator(testInternalToken, releaseBot)
-	f.deps.InternalHandlers = []RouteRegistrar{NewLockHandler(nil), NewBudgetContextHandler(nil)}
+	f.deps.InternalHandlers = []RouteRegistrar{NewLockHandler(nil), NewBudgetContextHandler(nil), NewDriftIngestHandler(nil)}
 	f.deps.PipelineHandlers = []RouteRegistrar{NewRunHandler(nil)}
 	f.h = NewRouter(f.deps)
 
@@ -28,6 +28,8 @@ func TestSessionCookieIsRejectedOnMachineRoutes(t *testing.T) {
 		{"GET", "/v1/internal/budget-context?stack_path=environments/development/a/b"},
 		{"GET", "/v1/internal/stacks/00000000-0000-0000-0000-000000000001/lock"},
 		{"POST", "/v1/runs"},
+		{"POST", "/v1/internal/drift"},
+		{"GET", "/v1/internal/drift/stacks"},
 	} {
 		got := f.req(tc.method, tc.path, "{}", []*http.Cookie{c}, "X-CSRF-Token", tok)
 		if got.Code != http.StatusUnauthorized {
