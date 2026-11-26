@@ -34,6 +34,11 @@ const (
 	// names what to scan, and a pull-request token comes from a workflow file the PR author
 	// controls.
 	RouteDrift RouteClass = "drift"
+	// RouteTTL: /v1/internal/ttl/*. The hourly reaper lists the stacks that are due for a TTL
+	// warning or teardown and acts on them. Only ttl-reaper.yml on main, from its schedule or
+	// a manual dispatch: teardown opens a destroy request, so it must not be reachable from a
+	// workflow file a pull-request author controls.
+	RouteTTL RouteClass = "ttl"
 )
 
 // RoutePolicy is what an OIDC caller must be to use a route class.
@@ -69,6 +74,11 @@ var RoutePolicies = map[RouteClass]RoutePolicy{
 		Workflows: []string{"apply.yml"},
 		MainOnly:  true,
 		Events:    []string{"push", "workflow_dispatch"},
+	},
+	RouteTTL: {
+		Workflows: []string{"ttl-reaper.yml"},
+		MainOnly:  true,
+		Events:    []string{"schedule", "workflow_dispatch"},
 	},
 	RouteDrift: {
 		Workflows: []string{"drift.yml"},

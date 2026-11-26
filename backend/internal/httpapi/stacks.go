@@ -70,6 +70,8 @@ type stackDTO struct {
 	Health         requests.StackHealth `json:"health"`
 	Lock           *stackLockDTO        `json:"lock"`
 	IsEphemeral    bool                 `json:"is_ephemeral"`
+	TTLHours       *int                 `json:"ttl_hours"`
+	TTLExtended    int                  `json:"ttl_extended_hours"`
 	ExpiresAt      *time.Time           `json:"expires_at"`
 	Outputs        json.RawMessage      `json:"outputs"`
 	LastAppliedSHA string               `json:"last_applied_sha,omitempty"`
@@ -82,7 +84,7 @@ type stackDTO struct {
 func toStackDTO(s stacks.Stack) stackDTO {
 	d := stackDTO{
 		ID: s.ID, Team: s.Team, Environment: s.Environment, Name: s.Name, Path: s.Path, Region: s.Region, Status: s.Status,
-		Health: s.Health, IsEphemeral: s.IsEphemeral, ExpiresAt: s.ExpiresAt, Outputs: s.Outputs, LastAppliedSHA: s.LastAppliedSHA,
+		Health: s.Health, IsEphemeral: s.IsEphemeral, TTLHours: s.TTLHours, TTLExtended: s.TTLExtended, ExpiresAt: s.ExpiresAt, Outputs: s.Outputs, LastAppliedSHA: s.LastAppliedSHA,
 		CreatedAt: s.CreatedAt.UTC(), UpdatedAt: s.UpdatedAt.UTC(),
 		Links: stackLinks{Self: "/v1/stacks/" + s.ID.String(), Drift: "/v1/stacks/" + s.ID.String() + "/drift"},
 	}

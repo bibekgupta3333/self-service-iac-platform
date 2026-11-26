@@ -26,7 +26,7 @@ func NewPostgresRepository(conn db.DBTX) *PostgresRepository { return &PostgresR
 // stackSelect joins what Stack needs and restricts rows to the visible teams: $1 is
 // identity.Visibility's "all teams" flag and $2 its team ids.
 const stackSelect = `
-	SELECT s.id, t.slug, e.name::text, s.name, s.path, s.region, s.status::text, s.is_ephemeral, s.expires_at,
+	SELECT s.id, t.slug, e.name::text, s.name, s.path, s.region, s.status::text, s.is_ephemeral, s.ttl_hours, s.ttl_extended_hours, s.expires_at,
 	       s.outputs, coalesce(s.last_applied_sha, ''), s.created_at, s.updated_at,
 	       lr.id, lr.short_id, lr.kind::text, lr.status::text, lr.created_at,
 	       s.health,
@@ -56,7 +56,7 @@ func scanStack(row pgx.Row) (Stack, error) {
 		lockShort, holder  *string
 		lockAt, lockExpiry *time.Time
 	)
-	err := row.Scan(&s.ID, &s.Team, &s.Environment, &s.Name, &s.Path, &s.Region, &status, &s.IsEphemeral, &s.ExpiresAt,
+	err := row.Scan(&s.ID, &s.Team, &s.Environment, &s.Name, &s.Path, &s.Region, &status, &s.IsEphemeral, &s.TTLHours, &s.TTLExtended, &s.ExpiresAt,
 		&outputs, &s.LastAppliedSHA, &s.CreatedAt, &s.UpdatedAt, &reqID, &reqShort, &reqKind, &reqStatus, &reqAt,
 		&health, &lockReq, &lockShort, &holder, &lockAt, &lockExpiry)
 	if err != nil {

@@ -38,7 +38,7 @@ func (h *DriftIngestHandler) Routes(r chi.Router) {
 	r.With(requireRoute(auth.RouteDrift)).Post("/drift", h.record)
 }
 
-type dueStackDTO struct {
+type driftDueStackDTO struct {
 	StackID     uuid.UUID `json:"stack_id"`
 	Path        string    `json:"path"`
 	Team        string    `json:"team"`
@@ -62,8 +62,8 @@ func (h *DriftIngestHandler) stacks(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"stacks": fp.Map(rows, func(d drift.DueStack) dueStackDTO {
-		return dueStackDTO{StackID: d.ID, Path: d.Path, Team: d.Team, Environment: d.Environment, Region: d.Region}
+	writeJSON(w, http.StatusOK, map[string]any{"stacks": fp.Map(rows, func(d drift.DueStack) driftDueStackDTO {
+		return driftDueStackDTO{StackID: d.ID, Path: d.Path, Team: d.Team, Environment: d.Environment, Region: d.Region}
 	})})
 }
 

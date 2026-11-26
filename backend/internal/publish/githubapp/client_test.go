@@ -57,6 +57,7 @@ type fakeGitHub struct {
 	trees      map[string][]TreeEntry
 	pulls      map[string]int // head → number
 	labels     map[int][]string
+	comments   map[int][]string
 	dispatches []map[string]any
 	failNext   map[string][]int // "METHOD path" → statuses to answer first
 	retryAfter string
@@ -66,7 +67,7 @@ func newFake(t *testing.T) (*fakeGitHub, *httptest.Server) {
 	key, _ := appKey(t)
 	f := &fakeGitHub{t: t, key: &key.PublicKey, now: time.Date(2026, 11, 26, 9, 0, 0, 0, time.UTC),
 		refs: map[string]string{"main": "base0000000000000000000000000000000000000"}, blobs: map[string][]byte{},
-		trees: map[string][]TreeEntry{}, pulls: map[string]int{}, labels: map[int][]string{}, failNext: map[string][]int{}}
+		trees: map[string][]TreeEntry{}, pulls: map[string]int{}, labels: map[int][]string{}, comments: map[int][]string{}, failNext: map[string][]int{}}
 	srv := httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(srv.Close)
 	return f, srv
@@ -247,6 +248,11 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 			f.labels[n] = append(f.labels[n], l.(string))
 		}
 		reply(http.StatusOK, nil)
+	case r.Method == http.MethodPost && strings.HasPrefix(p, "/issues/") && strings.HasSuffix(p, "/comments"):
+		var n int
+		_, _ = fmt.Sscanf(p, "/issues/%d/comments", &n)
+		f.comments[n] = append(f.comments[n], body["body"].(string))
+		reply(http.StatusCreated, map[string]any{"id": 1})
 	case r.Method == http.MethodPost && strings.HasPrefix(p, "/actions/workflows/"):
 		f.dispatches = append(f.dispatches, body)
 		reply(http.StatusNoContent, nil)
@@ -648,5 +654,23 @@ func TestRetryDelay(t *testing.T) {
 	}
 	if !Retryable(403, http.Header{"X-Ratelimit-Remaining": {"0"}}) || Retryable(403, http.Header{}) || Retryable(422, nil) {
 		t.Error("Retryable classification is wrong")
+	}
+}
+
+func TestCommentOnPullRequestIsSentOnce(t *testing.T) {
+	f, srv := newFake(t)
+	c, sl := newClient(t, srv, f)
+	var _ publish.Commenter = c
+	ctx := context.Background()
+	if err := c.CommentOnPullRequest(ctx, 7, "TTL warning"); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(f.comments[7], []string{"TTL warning"}) {
+		t.Fatalf("comments = %v", f.comments)
+	}
+	// A server error is not retried: a second POST could duplicate the comment.
+	f.failNext["POST /repos/acme/infra/issues/7/comments"] = []int{500}
+	if err := c.CommentOnPullRequest(ctx, 7, "again"); !IsStatus(err, 500) || len(sl.d) != 0 || len(f.comments[7]) != 1 {
+		t.Fatalf("err = %v, sleeps = %v, comments = %v", err, sl.d, f.comments[7])
 	}
 }
