@@ -17,6 +17,7 @@ type BudgetAdminService interface {
 	Set(ctx context.Context, by identity.Principal, team, month string, in budgets.SetInput, correlationID string) (budgets.Setting, error)
 	List(ctx context.Context, by identity.Principal, team, month string) ([]budgets.Setting, error)
 	RecordActual(ctx context.Context, by identity.Principal, in budgets.ActualInput, correlationID string) (budgets.Setting, error)
+	RecordCommitted(ctx context.Context, by identity.Principal, in budgets.CommittedInput, correlationID string) (budgets.CommittedWrite, error)
 }
 
 // BudgetAdminHandler serves the admin budget routes under /v1/teams/{slug}/budgets, and
@@ -44,36 +45,41 @@ type budgetActualsRoutes struct{ h *BudgetAdminHandler }
 // Routes implements RouteRegistrar.
 func (b budgetActualsRoutes) Routes(r chi.Router) {
 	r.With(requireRoute(auth.RouteBudgetActuals)).Post("/budget-actuals", b.h.recordActual)
+	r.With(requireRoute(auth.RouteBudgetActuals)).Post("/budget-committed", b.h.recordCommitted)
 }
 
 type overrideDTO struct {
-	GrantedBy string    `json:"granted_by"`
-	Reason    string    `json:"reason"`
-	ExpiresAt time.Time `json:"expires_at"`
+	GrantedBy   string    `json:"granted_by"`
+	Reason      string    `json:"reason"`
+	ExpiresAt   time.Time `json:"expires_at"`
+	MaxDeltaUSD float64   `json:"max_delta_usd"`
 }
 
 type budgetDTO struct {
-	ID              string       `json:"id"`
-	Team            string       `json:"team"`
-	Environment     *string      `json:"environment"` // null = every environment
-	Month           string       `json:"month"`       // YYYY-MM
-	Currency        string       `json:"currency"`
-	LimitUSD        float64      `json:"limit_usd"`
-	SpentUSD        float64      `json:"spent_usd"`
-	ActualUSD       *float64     `json:"actual_usd"`
-	UsedUSD         float64      `json:"used_usd"`
-	UtilisationPct  float64      `json:"utilisation_pct"`
-	HardBlock       bool         `json:"hard_block"`
-	AlertThresholds []int        `json:"alert_thresholds"`
-	Override        *overrideDTO `json:"override"`
-	UpdatedBy       *string      `json:"updated_by"`
-	UpdatedAt       time.Time    `json:"updated_at"`
+	ID              string   `json:"id"`
+	Team            string   `json:"team"`
+	Environment     *string  `json:"environment"` // null = every environment
+	Month           string   `json:"month"`       // YYYY-MM
+	Currency        string   `json:"currency"`
+	LimitUSD        float64  `json:"limit_usd"`
+	SpentUSD        float64  `json:"spent_usd"`
+	ActualUSD       *float64 `json:"actual_usd"`
+	UsedUSD         float64  `json:"used_usd"`
+	UtilisationPct  float64  `json:"utilisation_pct"`
+	HardBlock       bool     `json:"hard_block"`
+	AlertThresholds []int    `json:"alert_thresholds"`
+	// SingleChangeCapUSD denies one stack costing more per month than this, whatever the headroom.
+	SingleChangeCapUSD float64      `json:"single_change_cap_usd"`
+	Override           *overrideDTO `json:"override"`
+	UpdatedBy          *string      `json:"updated_by"`
+	UpdatedAt          time.Time    `json:"updated_at"`
 }
 
 func toBudgetDTO(s budgets.Setting) budgetDTO {
 	d := budgetDTO{ID: s.ID.String(), Team: s.Team, Month: s.Month.Format("2006-01"), Currency: budgets.Currency,
 		LimitUSD: s.LimitUSD, SpentUSD: s.SpentUSD, ActualUSD: s.ActualUSD, UsedUSD: s.UsedUSD(),
-		UtilisationPct: s.Utilisation(), HardBlock: s.HardBlock, AlertThresholds: s.AlertThresholds, UpdatedAt: s.UpdatedAt.UTC()}
+		UtilisationPct: s.Utilisation(), HardBlock: s.HardBlock, AlertThresholds: s.AlertThresholds,
+		SingleChangeCapUSD: s.SingleChangeCapUSD, UpdatedAt: s.UpdatedAt.UTC()}
 	if s.Environment != "" {
 		env := s.Environment
 		d.Environment = &env
@@ -83,7 +89,7 @@ func toBudgetDTO(s budgets.Setting) budgetDTO {
 		d.UpdatedBy = &by
 	}
 	if o := s.Override; o != nil {
-		d.Override = &overrideDTO{GrantedBy: o.GrantedBy, Reason: o.Reason, ExpiresAt: o.ExpiresAt.UTC()}
+		d.Override = &overrideDTO{GrantedBy: o.GrantedBy, Reason: o.Reason, ExpiresAt: o.ExpiresAt.UTC(), MaxDeltaUSD: o.MaxDeltaUSD}
 	}
 	return d
 }
@@ -142,4 +148,23 @@ func (h *BudgetAdminHandler) recordActual(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, toBudgetDTO(s))
+}
+
+func (h *BudgetAdminHandler) recordCommitted(w http.ResponseWriter, r *http.Request) {
+	p, err := identity.FromContext(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	var in budgets.CommittedInput
+	if err := decodeBody(r, &in); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	c, err := h.svc.RecordCommitted(r.Context(), p, in, RequestIDFrom(r.Context()))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"stack_path": c.Stack.Path(), "monthly_usd": float64(c.MonthlyCents) / 100})
 }
