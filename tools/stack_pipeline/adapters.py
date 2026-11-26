@@ -63,7 +63,9 @@ class GitCli:
 
     def head_commit(self, git_dir: Path) -> str | None:
         """HEAD of the repository at git_dir (an explicit --git-dir, so git never walks up)."""
-        result = self._git("--git-dir", str(git_dir), "rev-parse", "--verify", "HEAD^{commit}", check=False)
+        # Resolved against the caller's cwd: git itself runs in repo_root.
+        resolved = str(Path(git_dir).resolve())
+        result = self._git("--git-dir", resolved, "rev-parse", "--verify", "HEAD^{commit}", check=False)
         return result.stdout.strip() if result.returncode == 0 else None
 
     def publish_tag(self, mirror: Path, sha: str, tag: str) -> None:

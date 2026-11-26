@@ -145,6 +145,15 @@ class TestCli:
         assert main(["--repo-root", str(tmp_path), "verify-modules", str(root), "--repo-url", REPO]) == 0
         assert "installed at" in capsys.readouterr().out
 
+    def test_verify_modules_with_relative_stack_dir(self, tmp_path, make_stack, capsys, monkeypatch):
+        """As in CI: cwd is the stack root, the stack is '.', and --repo-root is elsewhere."""
+        sha = _repo(tmp_path / "checkout")
+        root = self._stack(tmp_path, make_stack, sha, SRC)
+        (tmp_path / "checkout").rename(root / ".terraform" / "modules" / "bucket")
+        monkeypatch.chdir(root)
+        assert main(["--repo-root", str(tmp_path), "verify-modules", ".", "--repo-url", REPO]) == 0
+        assert "installed at" in capsys.readouterr().out
+
     def test_verify_modules_wrong_source(self, tmp_path, make_stack, capsys):
         root = self._stack(tmp_path, make_stack, SHA, SRC.replace("v1.0.0", "v9.9.9"))
         assert main(["--repo-root", str(tmp_path), "verify-modules", str(root), "--repo-url", REPO]) == 1
