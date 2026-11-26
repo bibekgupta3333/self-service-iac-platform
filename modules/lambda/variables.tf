@@ -275,6 +275,7 @@ variable "extra_policy_jsons" {
   description = <<-EOT
     Additional IAM policy documents for the execution role, keyed by a stable name (for example { orders-consumer = <sqs consumer_policy_json> }).
     Allow statements may not use NotAction or NotResource, and their actions may not be "*", "<service>:*", or any other wildcard except read prefixes such as s3:Get* or sqs:List*.
+    They may not allow iam:PassRole, or any iam: action on Resource "*".
   EOT
   type        = map(string)
   default     = {}
@@ -298,5 +299,24 @@ variable "extra_policy_jsons" {
       ]), false)
     ])
     error_message = "extra_policy_jsons must be valid IAM policy JSON whose Allow statements use explicit actions (no \"*\", \"<service>:*\", NotAction or NotResource)."
+  }
+
+  # The execution role must not hand roles to services (iam:PassRole is how a
+  # workload escalates beyond its own permissions), and IAM actions must name
+  # the IAM resources they touch. The permissions boundary stays the backstop.
+  # Same rule as modules/ecs-service.
+  validation {
+    condition = alltrue([
+      for doc in values(var.extra_policy_jsons) : try(alltrue([
+        for s in flatten([jsondecode(doc).Statement]) : try(s.Effect, "") != "Allow" || (
+          !anytrue([for a in flatten([try(s.Action, [])]) : lower(a) == "iam:passrole"]) &&
+          !(
+            anytrue([for a in flatten([try(s.Action, [])]) : startswith(lower(a), "iam:")]) &&
+            contains(flatten([try(s.Resource, [])]), "*")
+          )
+        )
+      ]), false)
+    ])
+    error_message = "extra_policy_jsons may not allow iam:PassRole, or any iam: action on Resource \"*\"."
   }
 }

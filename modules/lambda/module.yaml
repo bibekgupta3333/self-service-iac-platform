@@ -2,14 +2,14 @@ apiVersion: iacp.dev/v1
 kind: Module
 metadata:
   name: lambda
-  version: 1.0.0
+  version: 2.0.0
   displayName: Lambda Function
   description: Lambda function with a least-privilege role, KMS-encrypted logs and environment, X-Ray tracing and an optional SQS trigger.
   category: compute
   maturity: beta
   owners:
     - "@bibekgupta3333/platform"
-  documentation: https://github.com/bibekgupta3333/self-service-iac-platform/tree/modules/lambda/v1.0.0/modules/lambda
+  documentation: https://github.com/bibekgupta3333/self-service-iac-platform/tree/modules/lambda/v2.0.0/modules/lambda
 
 compatibility:
   terraform: ">= 1.10, < 2.0"

@@ -8,7 +8,7 @@ registry (see [docs/04-module-registry.md](../../docs/04-module-registry.md)).
 
 ```hcl
 module "worker" {
-  source = "git::https://github.com/bibekgupta3333/self-service-iac-platform.git//modules/lambda?ref=modules/lambda/v1.0.0"
+  source = "git::https://github.com/bibekgupta3333/self-service-iac-platform.git//modules/lambda?ref=modules/lambda/v2.0.0"
 
   name        = "order-worker"
   team        = "payments"     # injected by the platform
@@ -41,7 +41,7 @@ together on LocalStack and deploys a small inline Python handler.
 
 | Control | Implementation |
 |---|---|
-| Least privilege | Inline role policy limited to the function's own log group, its KMS key, X-Ray, the trigger queue and its key, and the dead-letter target and its key. `extra_policy_jsons` rejects `*`, `<service>:*`, other non-read wildcards, `NotAction` and `NotResource` in Allow statements. |
+| Least privilege | Inline role policy limited to the function's own log group, its KMS key, X-Ray, the trigger queue and its key, and the dead-letter target and its key. `extra_policy_jsons` rejects `*`, `<service>:*`, other non-read wildcards, `NotAction` and `NotResource` in Allow statements, and `iam:PassRole` or any `iam:` action on `Resource "*"` (same rule as `ecs-service`). |
 | IAM guardrails | The role lives under `/iacp/` (the platform's `iam:PassRole` is limited to that path) and always has a permissions boundary: `permissions_boundary_arn`, or the account's `iacp-boundary` policy by default. |
 | Confused deputy | The trust policy only lets `lambda.amazonaws.com` assume the role for the owning account (`aws:SourceAccount`). |
 | Encryption | Environment variables and the log group use a KMS key (module-created with rotation unless `kms_key_arn` is set). The key grants CloudWatch Logs access to this log group only. |
@@ -86,7 +86,7 @@ window (never on FIFO queues).
 | `dead_letter_target_arn` | SQS queue or SNS topic ARN for failed asynchronous invocations. | `string` | `null` | no |
 | `dead_letter_target_kms_key_arn` | KMS key of the dead-letter target; the role gets `kms:GenerateDataKey` and `kms:Decrypt`. Requires `dead_letter_target_arn`. | `string` | `null` | no |
 | `permissions_boundary_arn` | Permissions boundary for the role. Null uses `arn:<partition>:iam::<account>:policy/iacp-boundary`; a boundary is always attached. | `string` | `null` | no |
-| `extra_policy_jsons` | Up to 10 additional IAM policy documents keyed by a stable name (`^[a-z0-9][a-z0-9-]{0,39}$`). Allow statements may not use `*`, `<service>:*`, non-read wildcards, `NotAction` or `NotResource`. | `map(string)` | `{}` | no |
+| `extra_policy_jsons` | Up to 10 additional IAM policy documents keyed by a stable name (`^[a-z0-9][a-z0-9-]{0,39}$`). Allow statements may not use `*`, `<service>:*`, non-read wildcards, `NotAction` or `NotResource`, may not allow `iam:PassRole`, and may not allow an `iam:` action on `Resource "*"`. | `map(string)` | `{}` | no |
 
 ## Outputs
 
@@ -99,7 +99,7 @@ window (never on FIFO queues).
 | `invoke_arn` | ARN used by API Gateway and other services to invoke the function. |
 | `log_group_name` | CloudWatch log group name. |
 | `kms_key_arn` | ARN of the KMS key encrypting environment variables and logs. |
-| `iacp_metadata` | `{ module = "lambda", version = "1.0.0" }` for inventory and drift correlation. |
+| `iacp_metadata` | `{ module = "lambda", version = "2.0.0" }` for inventory and drift correlation. |
 
 ## Resources
 
