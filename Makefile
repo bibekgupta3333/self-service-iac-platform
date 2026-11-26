@@ -15,7 +15,7 @@ export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION AWS_ENDPOINT_U
 unexport AWS_PROFILE AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
 
 .PHONY: help up down ps fmt fmt-check validate tflint checkov policy-test lint \
-        module-test integration-test validate-manifests go-test go-integration generator-update api py-test test diagrams
+        module-test integration-test validate-manifests module-gate go-test go-integration generator-update api py-test test diagrams
 
 help: ## Show available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -57,7 +57,7 @@ policy-test: ## Unit-test OPA policies and verify conftest fixtures
 	opa test policies/opa
 	policies/fixtures/verify.sh
 
-lint: fmt-check validate validate-manifests tflint checkov policy-test ## All static checks
+lint: fmt-check validate validate-manifests module-gate tflint checkov policy-test ## All static checks
 
 ## ---- tests ----
 module-test: ## terraform test every module against LocalStack (needs `make up`)
@@ -88,6 +88,9 @@ integration-test: ## Terratest suite in tests/ against LocalStack (needs `make u
 
 validate-manifests: ## Validate every modules/*/module.yaml against the schema and variables.tf
 	$(PYTHON) -m tools.manifest_validator modules/
+
+module-gate: ## SemVer interface-diff gate: every module vs its last modules/<name>/vX.Y.Z tag
+	$(PYTHON) -m tools.module_release gate --all
 
 py-test: ## Python tooling tests (exit code 5 = no tests collected is OK)
 	@$(PYTHON) -m pytest -q tools policies; rc=$$?; \
