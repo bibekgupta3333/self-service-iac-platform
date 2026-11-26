@@ -1,4 +1,5 @@
 import { isApiError } from "@/lib/api/errors";
+import { loginUrl } from "@/lib/auth/provider";
 
 /** ErrorPanel shows a failed API call with the backend's request id for support. */
 export function ErrorPanel({ error, title = "Something went wrong" }: { error: unknown; title?: string }) {
@@ -11,6 +12,15 @@ export function ErrorPanel({ error, title = "Something went wrong" }: { error: u
         <p className="mt-2">
           Is the API running? Start it with <code className="font-mono">make up &amp;&amp; make api</code>, or set{" "}
           <code className="font-mono">IACP_API_URL</code>.
+        </p>
+      )}
+      {api?.problem.status === 401 && (
+        <p className="mt-2">
+          Your session is missing or has expired.{" "}
+          <a href={loginUrl("/")} className="underline">
+            Sign in with GitHub
+          </a>
+          .
         </p>
       )}
       {api?.requestId && (

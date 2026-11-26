@@ -4,7 +4,7 @@ import { notFound } from "next/navigation";
 
 import { ErrorPanel } from "@/components/ErrorPanel";
 import { RequestForm } from "@/components/request/RequestForm";
-import { serverApi } from "@/lib/api/factory";
+import { serverApi } from "@/lib/api/server";
 import { attempt, isNotFound } from "@/lib/api/result";
 
 export const dynamic = "force-dynamic";

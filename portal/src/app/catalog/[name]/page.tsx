@@ -5,7 +5,7 @@ import { notFound } from "next/navigation";
 import { Badge } from "@/components/Badge";
 import { ErrorPanel } from "@/components/ErrorPanel";
 import { InputsTable } from "@/components/InputsTable";
-import { serverApi } from "@/lib/api/factory";
+import { serverApi } from "@/lib/api/server";
 import { attempt, isNotFound } from "@/lib/api/result";
 import type { ModuleVersion } from "@/lib/api/types";
 import { catalogStatusTone, formatDateTime, shortSha } from "@/lib/format";
