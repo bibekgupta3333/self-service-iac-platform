@@ -42,6 +42,9 @@ type Deps struct {
 	// PipelineHandlers are GitHub Actions callbacks outside /internal (POST /v1/runs);
 	// they also use the Internal authenticator, never the user one.
 	PipelineHandlers []RouteRegistrar
+	// Webhooks authenticate each delivery themselves (HMAC signature), so they are mounted
+	// under /v1 without the user or machine authenticator.
+	Webhooks []RouteRegistrar
 }
 
 var probeMethods = []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
@@ -86,6 +89,9 @@ func NewRouter(d Deps) http.Handler {
 				h.Routes(in)
 			}
 		})
+		for _, h := range d.Webhooks {
+			h.Routes(v1)
+		}
 		v1.Group(func(pipeline chi.Router) {
 			pipeline.Use(requireAuth(internal))
 			for _, h := range d.PipelineHandlers {

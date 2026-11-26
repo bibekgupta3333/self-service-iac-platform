@@ -54,6 +54,8 @@ type requestDTO struct {
 	CreatedAt     time.Time         `json:"created_at"`
 	UpdatedAt     time.Time         `json:"updated_at"`
 	CompletedAt   *time.Time        `json:"completed_at"`
+	GitHub        *requests.PRLink  `json:"github"`
+	FailureReason string            `json:"failure_reason,omitempty"`
 	Links         requestLinks      `json:"links"`
 	Allowed       []requests.Event  `json:"allowed_events"`
 }
@@ -63,7 +65,7 @@ func toRequestDTO(r *requests.Request, withSpec bool) requestDTO {
 	d := requestDTO{
 		ID: r.ID, ShortID: r.ShortID, Kind: r.Kind, Status: r.Status, Stack: r.Stack, QueuedBehind: r.QueuedBehind,
 		Justification: r.Justification, CreatedBy: r.CreatedBy, CreatedAt: r.CreatedAt.UTC(),
-		UpdatedAt: r.UpdatedAt.UTC(), CompletedAt: r.CompletedAt,
+		UpdatedAt: r.UpdatedAt.UTC(), CompletedAt: r.CompletedAt, GitHub: r.PR, FailureReason: r.FailureReason,
 		Links:   requestLinks{Self: self, Events: self + "/events"},
 		Allowed: requests.AllowedEvents(r.Status),
 	}
