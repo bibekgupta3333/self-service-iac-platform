@@ -280,6 +280,14 @@ def check_lock(path: str, text: str, providers: Iterable[str] = ALLOWED_PROVIDER
     except HclScanError as exc:
         return [Violation(path, 1, "unreadable", f"the lock file cannot be scanned ({exc})")]
     found: list[Violation] = []
+    # Terraform decodes HCL string escapes and templates, this scanner does not: "h1:...\u003d" or
+    # an interpolation would be a different hash to Terraform than to the pin check. A lock file
+    # written by `terraform init` has neither, so refuse them outright.
+    for marker, what in (("\\", "a backslash escape"), ("${", "a ${ template"), ("%{", "a %{ template")):
+        if marker in text:
+            line = text[:text.index(marker)].count("\n") + 1
+            found.append(Violation(path, line, "lock", f"the lock file contains {what}, which Terraform decodes but the pin "
+                                   "check does not; `terraform init` never writes one"))
     for b in blocks:
         if b.depth != 0:
             continue
@@ -292,7 +300,8 @@ def check_lock(path: str, text: str, providers: Iterable[str] = ALLOWED_PROVIDER
 
 
 _LOCK_VERSION = re.compile(r'(?m)^[ \t]*version[ \t]*=[ \t]*"([^"\n]*)"')
-_LOCK_HASH = re.compile(r'"((?:h1|zh):[A-Za-z0-9+/=]+)"')
+_LOCK_HASHES = re.compile(r'(?s)\bhashes[ \t]*=[ \t]*\[(.*?)\]')
+_LOCK_STRING = re.compile(r'"([^"\n]*)"')
 
 PinTable = Mapping[tuple[str, str], frozenset[str]]
 
@@ -303,7 +312,11 @@ def lock_entries(text: str) -> list[tuple[str, str, frozenset[str]]]:
     for b in parse_blocks(text):
         if b.depth == 0 and b.kind == "provider" and b.labels:
             m = _LOCK_VERSION.search(b.body)
-            out.append((_normalise_source(b.labels[0]), m.group(1) if m else "", frozenset(_LOCK_HASH.findall(b.body))))
+            listed = _LOCK_HASHES.search(b.body)
+            # Every quoted string in the list counts, valid hash or not: one that is not a plain hash
+            # is then simply not in the allow-list, instead of vanishing from the comparison.
+            hashes = frozenset(_LOCK_STRING.findall(listed.group(1))) if listed else frozenset()
+            out.append((_normalise_source(b.labels[0]), m.group(1) if m else "", hashes))
     return out
 
 

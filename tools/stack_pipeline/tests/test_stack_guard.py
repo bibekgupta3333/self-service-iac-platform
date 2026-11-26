@@ -339,3 +339,52 @@ class TestCommandLockFrom:
         repo = Path(__file__).resolve().parents[3]
         for root in (p for p in (repo / "environments").glob("*/*/*") if p.is_dir()):
             assert main(["check-stack", str(root), "--lock-from", str(repo)]) == 0, root
+
+
+class TestEscapedHashes:
+    """The reviewed PoC: Terraform decodes HCL escapes in the lock file, a regex over the raw text does not."""
+
+    def pins(self):
+        return lock_allowlist([lock_text()])
+
+    def poisoned(self, forged='h1:forged\\u003d'):
+        # one hash the base knows, plus the attacker's package hash with its trailing "=" written as an escape
+        return ('provider "registry.terraform.io/hashicorp/aws" {\n  version = "5.100.0"\n  constraints = "~> 5.80"\n'
+                f'  hashes = [\n    "zh:1111",\n    "{forged}",\n  ]\n}}\n')
+
+    def test_the_escaped_hash_is_refused_by_the_pin_check_alone(self):
+        (v,) = check_lock_pins("l", self.poisoned(), self.pins())
+        assert v.rule == "lock" and "does not know" in v.message
+
+    def test_the_escaped_hash_is_refused_by_check_lock(self):
+        found = check_lock("l", self.poisoned())
+        assert [v.rule for v in found] == ["lock"] and "backslash" in found[0].message and found[0].line == 6
+
+    def test_check_stack_refuses_it_twice(self):
+        found = check_stack({**GOOD, ".terraform.lock.hcl": self.poisoned()}, pins=self.pins())
+        assert [v.rule for v in found] == ["lock", "lock"]
+
+    @pytest.mark.parametrize("forged", ["h1:forged\\x3d", "h1:\\u0066orged=", "h1:${var.h}", "h1:%{ if true }x%{ endif }",
+                                        "h1:forged\\n", "h1:\\\\"])
+    def test_every_escape_and_template_form_is_refused(self, forged):
+        assert check_stack({**GOOD, ".terraform.lock.hcl": self.poisoned(forged)}, pins=self.pins()) != []
+        assert check_lock("l", self.poisoned(forged)) != []
+
+    def test_a_plain_non_hash_string_in_the_list_is_refused_too(self):
+        found = check_lock_pins("l", self.poisoned("not a hash at all"), self.pins())
+        assert [v.rule for v in found] == ["lock"]
+
+    def test_a_clean_lock_is_unaffected(self):
+        assert check_lock("l", lock_text()) == []
+        assert check_stack({**GOOD, ".terraform.lock.hcl": lock_text()}, pins=self.pins()) == []
+
+    def test_the_command_refuses_the_poisoned_lock(self, tmp_path, capsys):
+        base = tmp_path / "base" / "environments" / "development" / "platform" / "smoke"
+        base.mkdir(parents=True)
+        (base / ".terraform.lock.hcl").write_text(lock_text(), encoding="utf-8")
+        root = tmp_path / "environments" / "staging" / "payments" / "orders"
+        root.mkdir(parents=True)
+        for name, text in {**GOOD, ".terraform.lock.hcl": self.poisoned()}.items():
+            (root / name).write_text(text, encoding="utf-8")
+        assert main(["check-stack", str(root), "--lock-from", str(tmp_path / "base")]) == 1
+        assert "[lock]" in capsys.readouterr().out
