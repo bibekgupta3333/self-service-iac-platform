@@ -53,7 +53,13 @@ class App:
         """Modules whose declared version has no tag yet."""
         return [n for n in names if not self.git.tags(git_tag(n, self.gate.declared_version(n)))]
 
-    def detect(self, base: str | None, head: str, include_untagged: bool) -> list[str]:
+    def unreleased(self, names: Sequence[str], released_tags: frozenset[str]) -> list[str]:
+        """Modules whose declared version is tagged but has no GitHub release in ``released_tags``."""
+        tags = {n: git_tag(n, self.gate.declared_version(n)) for n in names}
+        return [n for n, tag in tags.items() if self.git.tags(tag) and tag not in released_tags]
+
+    def detect(self, base: str | None, head: str, include_untagged: bool,
+               released_tags: frozenset[str] | None = None) -> list[str]:
         names = self.workspace.module_names()
         if base and base != ZERO_SHA and self.git.has_ref(base):
             changed = set(modules_in_paths(self.git.changed_paths(base, head))) & set(names)
@@ -61,6 +67,8 @@ class App:
             changed = set(names)
         if include_untagged:
             changed |= set(self.untagged(names))
+        if released_tags is not None:
+            changed |= set(self.unreleased(names, released_tags))
         return sorted(changed)
 
 
@@ -93,6 +101,9 @@ def build_parser() -> argparse.ArgumentParser:
     detect.add_argument("--head", default="HEAD")
     detect.add_argument("--include-untagged", action="store_true",
                         help="also include modules whose declared version is not tagged yet")
+    detect.add_argument("--released-tags", type=Path, default=None,
+                        help="file with one released tag per line (gh release list); also include modules "
+                             "whose declared version is tagged but has no release")
 
     info = sub.add_parser("info", help="print version=, tag=, prerelease= and tag_exists= lines")
     info.add_argument("module")
@@ -124,7 +135,11 @@ def _gate(app: App, args: argparse.Namespace) -> int:
 
 
 def _detect(app: App, args: argparse.Namespace) -> int:
-    print(json.dumps(app.detect(args.base, args.head, args.include_untagged)))
+    released = None
+    if args.released_tags is not None:
+        lines = args.released_tags.read_text(encoding="utf-8").splitlines()
+        released = frozenset(line.strip() for line in lines if line.strip())
+    print(json.dumps(app.detect(args.base, args.head, args.include_untagged, released)))
     return 0
 
 

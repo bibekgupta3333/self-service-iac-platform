@@ -219,6 +219,18 @@ class TestCli:
         assert run(released_repo, "detect", "--base", "HEAD", "--include-untagged") == 0
         assert json.loads(capsys.readouterr().out) == ["other"]
 
+    def test_detect_tagged_but_unreleased(self, released_repo, tmp_path, capsys):
+        released_repo.add_module("other")
+        released_repo.commit()
+        released_repo.tag("modules/other/v1.0.0")
+        released = tmp_path / "released.txt"
+        released.write_text("modules/demo/v1.0.0\n\n")
+        assert run(released_repo, "detect", "--base", "HEAD", "--released-tags", str(released)) == 0
+        assert json.loads(capsys.readouterr().out) == ["other"]
+        released.write_text("modules/demo/v1.0.0\nmodules/other/v1.0.0\n")
+        assert run(released_repo, "detect", "--base", "HEAD", "--released-tags", str(released)) == 0
+        assert json.loads(capsys.readouterr().out) == []
+
     def test_info(self, released_repo, capsys):
         assert run(released_repo, "info", "demo") == 0
         out = capsys.readouterr().out.splitlines()
