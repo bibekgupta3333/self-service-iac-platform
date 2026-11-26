@@ -39,14 +39,16 @@ Every lifecycle action is a **request** (`requests.kind` ∈ `create`, `update`,
 | Stack status | Meaning |
 |---|---|
 | `provisioning` | First `create` request in flight |
-| `active` | Last apply succeeded, no known drift |
-| `drifted` | Nightly check found differences |
+| `active` | Last apply succeeded |
+| `drifted` | Legacy: no code sets it any more; drift is `stacks.health` (below) and never changes the lifecycle |
 | `updating` | An `update`/`upgrade`/`rollback` request is `applying` |
 | `destroying` | A `destroy` request is `approved` or `applying` |
 | `destroyed` | Destroy applied; directory removed; row retained for audit |
 | `failed` | Last apply failed; stack is locked to remediation requests only |
 
 The `apply.yml` run reports drive these statuses (docs/03 §4.1, WBS 5.3): the first accepted report of an approved request moves the stack to `provisioning`, `updating` or `destroying`; a succeeded run sets `active` (or `destroyed` after a destroy) and records outputs and the applied commit; a failed or cancelled run sets `failed`. Each move is audited as `stack.status_changed`. A failed post-apply smoke test does not fail the apply: the stack is `active` with `health = degraded` (shown by `GET /v1/stacks/{id}`), the team is told, and nothing is destroyed automatically. The platform lock stays visible on the stack (`lock`): the API releases it when the request ends, and if `apply.yml` reports that its own release failed, that is audited with the lock's current state and never changes the request, so an operator sees whether the stack is still held and until when.
+
+`stacks.health` is separate from the lifecycle status, and a drift check moves health only: an `active` stack stays `active` and takes update and destroy requests while its health is `drifted`. Health has one column and two writers, with explicit rules in the pure `drift.NextHealth` ([ADR-0013](adr/0013-drift-in-stack-health.md)): a drift finding sets `drifted`; a clean scan only clears `drifted` to `healthy` and never touches `unknown` or `degraded` (a refresh-only scan runs no smoke test); a scan error changes nothing; an apply sets health from its smoke result (`healthy`, `degraded`, or `unknown` when none ran), which also clears `drifted` because an apply re-asserts configuration. The one lossy path is `degraded` → drift finding → `drifted` → clean scan → `healthy`: the smoke failure is forgotten until the next apply's smoke test.
 
 Transitions are implemented in `backend/internal/request/fsm.go` as a table-driven state machine; every transition is a single Postgres transaction that updates the row, writes `audit_events`, and enqueues follow-up work (outbox pattern → SQS).
 
@@ -224,31 +226,33 @@ PR plans run with `-lock=false` (read-only) and drift checks too; only `apply.ym
 
 **Design.**
 
-1. EventBridge Scheduler triggers the worker nightly; the worker shards active stacks (≤ 256 per dispatch) and calls `workflow_dispatch` on `drift.yml` via the GitHub App. A cron in `drift.yml` is the fallback.
-2. Nightly at 02:00 UTC, per stack, `terraform plan -refresh-only -lock=false -detailed-exitcode` with `iacp-plan`:
-   - exit `0` → no drift; `stacks.last_drift_check_at` updated.
-   - exit `2` → drift; `resource_drift` summarised into `drift.json`.
-   - exit `1` → error; recorded as `drift_check_failed` (not drift).
-3. `drift.yml` reports via `POST /v1/runs`; the API writes a `drift_reports` row (`stack_id`, `run_id`, `drifted_resources` JSONB, `severity`), moves the stack `active → drifted`, and notifies the owning team (Slack/email) with a link to the drift view (`GET /v1/drift`).
-4. Severity: `high` if drift touches security attributes (policies, encryption, public access, security group rules) per a list in `policies/opa/drift_severity.rego`; otherwise `medium`.
+1. `drift.yml` runs nightly at 02:00 UTC (`schedule`) or by `workflow_dispatch`. The worker-driven dispatch with sharding (EventBridge Scheduler, at most 256 stacks per dispatch) is not built; the workflow's own schedule is the trigger today, and `GET /v1/internal/drift/stacks` already answers with at most 256 stacks, least recently checked first.
+2. Per stack, `terraform plan -refresh-only -lock=false -detailed-exitcode` (LocalStack today, `iacp-plan` later):
+   - exit `0` → clean; `stacks.last_drift_check_at` updated. A clean scan only clears `drifted` to `healthy`: it leaves `unknown` and `degraded` as they are, because a refresh-only scan runs no smoke test.
+   - exit `2` → drift; the drifted resources (address, type, actions, changed attribute names) are summarised. An exit `2` with no drifted resource, where only output values changed, is clean.
+   - exit `1` → error; recorded as `result = error` (a failed check, not drift). Health and `last_drift_check_at` stay as they were.
+3. `drift.yml` reports through `POST /v1/internal/drift` (`drift` route class). The API stores a `drift_reports` row (`stack_id`, `pipeline_run_id`, `result`, resource counts, `changed`, `plan_hash`, `status = open` for drift), sets `stacks.health = drifted` through the pure table `drift.NextHealth` (never `stacks.status`), and audits `drift.detected`, `drift.check_failed` or, when a clean scan closes open reports, `drift.cleared`. A stack that is not settled (`provisioning`, `updating`, `destroying`, `failed`, `destroyed`) takes no report (`409 stack_not_checkable`), nor does a stack a request holds the lock of; `GET /v1/internal/drift/stacks` leaves both out. Terraform's failure text never enters the audit log: an error report stores one line, the first `Error:` line of terraform's log (box characters stripped), credential-redacted and capped at 200 characters, or a fixed message when the log has none; source snippets and provider detail are dropped. The audit event carries only the report id.
+4. Report states (`drift.Allowed`, pure): `open` → `reconciled` | `ignored` | `codified`, then final. A clean scan closes every open report of the stack as `reconciled` with no resolver. Resolving a report closes the stack's other open reports with the same status. The target report and the stack's open reports are locked together in id order before a reconcile request is opened, and exactly those reports are updated, so two concurrent resolutions of one stack's reports serialize (one wins, none deadlocks) and a report recorded meanwhile stays open for its own decision. A reconcile that fails after a concurrent clean scan skipped its row leaves that report open until the next clean scan closes it. The open-request refusal (`stack_busy`) runs inside the request's own transaction under the stack lock. A report from a run older than the newest recorded one is stored but moves no health and closes nothing.
+5. Not built yet: severity (`high` if drift touches security attributes, `policies/opa/drift_severity.rego`), notification of the owning team, the cross-team list `GET /v1/drift`, the on-demand check, the `pending_changes` second plan and the production auto-reconcile.
 
-**Resolution options (portal):**
+**Resolution options** (`POST /v1/drift/{id}/resolve`, [03 §6.6](03-data-model-and-api.md#66-drift); matrix rows in [07 §7](07-security-and-policy.md)):
 
 | Option | What happens | Who |
 |---|---|---|
-| **Reconcile** (default) | `reconcile` request: normal plan/apply re-asserts Git config | developer (dev/staging), maintainer (prod) |
-| **Codify** | `update` request that changes module inputs to match reality (generated from drift diff when the drifted attribute maps to an input); otherwise not offered | maintainer |
-| **Ignore** | Suppress notification for this report; stays `drifted` | maintainer, with reason |
+| **Reconcile** | Opens an `update` request for the same stack from the spec of the request that last applied (`stacks.last_applied_request_id`; never an unapplied draft or an update under review), through the ordinary request path: same RBAC, queued behind the stack lock, a PR, plan and review, then apply, which re-asserts the configuration in the repository. Idempotent per report (key `drift-reconcile-<report id>`). The report becomes `reconciled` as soon as the request exists; if the request fails, the next nightly scan opens a fresh report. A reconcile while any request is open for the stack is `409 stack_busy` (that request re-asserts the configuration when it applies); of a stack nothing has applied to, `409 no_recorded_spec`. | developer (any environment: it is an update request) |
+| **Codify** | Records that the live values are intended. **Manual follow-up:** the platform does not generate the update from the drift diff, so the operator submits an `update` request that sets the module inputs; the next scan that finds the configuration matching closes the finding, and one that still finds a difference opens a new report. | developer |
+| **Ignore** | Accepts the finding. Needs a justification of at least 8 characters, stored on the report and in the audit event. The stack stays `drifted` until a clean scan. A later scan with the same difference (same `plan_hash`) as the stack's newest report is stored as an ignored copy, not an open report, and the finding stays ignored; a different difference, or the same one coming back after a clean scan, opens a new report. | maintainer |
 
-High-severity drift in production pages the on-call and auto-opens a `reconcile` request that waits in `plan_ready` for approval.
+A platform admin counts as admin in every team. Every resolution is audited as `drift.resolved` with the action, the reason and the opened request.
 
-**Data touched.** `drift_reports`, `stacks.status`, `stacks.last_drift_check_at`, `pipeline_runs`, `audit_events` (`drift.detected`, `drift.resolved`).
+**Data touched.** `drift_reports`, `stacks.health`, `stacks.last_drift_check_at`, `pipeline_runs` (kind `drift`), `requests` (reconcile), `audit_events` (`drift.detected`, `drift.check_failed`, `drift.cleared`, `drift.resolved`). `iacp_app` can insert reports and update only their resolution columns; findings are immutable and reports are never deleted.
 
 **Edge cases.**
-- *Stack has unapplied changes on `main`* (e.g. after a failed apply): refresh-only isolates real-world drift from pending config changes; the worker additionally runs a full plan and labels the report `pending_changes`.
-- *Provider-side noise* (attributes that always diff): handled in the module with `lifecycle { ignore_changes }` and a module patch release, not by suppressing reports.
-- *Stack locked by an in-flight request*: drift check is skipped and rescheduled; plans are read-only but results would be misleading mid-change.
-- *Resource deleted out of band*: shown as drift with action `delete`; reconcile recreates it (data-bearing resources are flagged `high`).
+- *Stack has unapplied changes on `main`* (e.g. after a failed apply): refresh-only isolates real-world drift from pending config changes. The `pending_changes` label from a second, full plan is not built yet.
+- *Provider-side noise* (attributes that always diff): handled in the module with `lifecycle { ignore_changes }` and a module patch release, not by suppressing reports. Measured today: right after a clean apply, the `s3` module's `aws_s3_bucket` refreshes `policy`, `versioning`, `lifecycle_rule` and `server_side_encryption_configuration` (inline attributes filled in by the separate sub-resources), so it shows as drifted once state persists between runs.
+- *Stack locked by an in-flight request*: the stack is not listed for a scan, and a report for a stack that became busy meanwhile is refused with `stack_not_checkable` and skipped by the workflow with a notice.
+- *Resource deleted out of band*: shown as drift with action `delete`; reconcile recreates it.
+- *Hermetic state (ADR-0009)*: every scheduled scan is clean today; see [05 §4.4](05-automation-pipeline.md#44-driftyml).
 
 **Runbook — mass drift alert (> 10 stacks in one night).**
 1. Check CloudTrail for a common principal or a provider upgrade in the pipeline image.

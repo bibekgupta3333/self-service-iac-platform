@@ -12,9 +12,10 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .adapters import AwsCliTagReader, FileSystemStackRepository, GitCli, GitDiff
-from .api_client import ApiError, FreshCredentials, IacpApiClient, TokenSource
+from .api_client import STACK_PATH_RE, ApiError, FreshCredentials, IacpApiClient, TokenSource
 from .convergence import plan_problem, residual_changes
 from .cost import fold_cost, parse_infracost, redact_plan
+from .drift import MAX_CHANGED, DriftOutcome, build_outcome, outcome_from_dict
 from .detection import DEFAULT_MAX_STACKS, DetectionError, DetectionPolicy, DetectionResult, StackDetector
 from .models import StackMetadataError, StackRef
 from .module_install import MANIFEST, ModuleInstallVerifier, parse_manifest
@@ -36,6 +37,8 @@ from .report import (
     summary_status,
 )
 
+DRIFT_MAX_STACKS = 256  # one drift.yml dispatch (docs/06 section 4)
+MAX_LOG_BYTES = 1_000_000  # how much of terraform's log `drift scan --error-file` reads
 API_URL_ENV = "IACP_API_URL"
 AUDIENCE_ENV = "IACP_OIDC_AUDIENCE"
 
@@ -175,6 +178,27 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--warn-on-error", action="store_true",
                         help="report failures are ::warning:: annotations and exit 0 (the report never fails the job)")
     report.add_argument("--dry-run", action="store_true", help="print the payload instead of sending it")
+
+    drift = sub.add_parser("drift", help="nightly drift check: list stacks, summarise a refresh-only plan, report it")
+    drift_sub = drift.add_subparsers(dest="drift_action", required=True)
+    d_list = drift_sub.add_parser("list", help="matrix of the active stack roots under environments/ (JSON)")
+    d_list.add_argument("--paths", default="", help="JSON array of stack paths to check instead of all (workflow_dispatch input)")
+    d_list.add_argument("--max-stacks", type=int, default=DRIFT_MAX_STACKS,
+                        help="matrix limit; the least recently listed beyond it wait for the next run")
+    d_list.add_argument("--github-output", type=str, default=os.environ.get("GITHUB_OUTPUT"),
+                        help="append matrix= and count= here (default: $GITHUB_OUTPUT)")
+    d_scan = drift_sub.add_parser("scan", help="classify one stack's `plan -refresh-only -detailed-exitcode` and write the result file")
+    d_scan.add_argument("stack_dir", type=Path)
+    d_scan.add_argument("--exit-code", type=int, required=True, help="terraform's exit code (0, 1 or 2)")
+    d_scan.add_argument("--plan", type=Path, help="terraform show -json of the refresh-only plan (needed for exit 0 and 2)")
+    d_scan.add_argument("--error-message", default="", help="what failed, for exit 1 (only its `Error:` line is kept)")
+    d_scan.add_argument("--error-file", type=Path,
+                        help="terraform's whole log for exit 1; only its first `Error:` line is kept, redacted and capped")
+    d_scan.add_argument("--out", type=Path, required=True, help="result file (plan values never reach it)")
+    d_report = drift_sub.add_parser("report", help="POST every scan result under --results-dir to $IACP_API_URL/v1/internal/drift")
+    d_report.add_argument("--results-dir", type=Path, required=True, help="directory of result files written by `drift scan`")
+    _api_arguments(d_report)
+    d_report.add_argument("--dry-run", action="store_true", help="print the payloads instead of sending them")
 
     lock = sub.add_parser("lock", help="claim or release the platform stack lock (/v1/internal/stacks/{id}/lock)")
     lock.add_argument("action", choices=("acquire", "release"))
@@ -491,6 +515,129 @@ def run_smoke(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+def run_drift(args: argparse.Namespace) -> int:
+    return {"list": _drift_list, "scan": _drift_scan, "report": _drift_report}[args.drift_action](args)
+
+
+def _drift_list(args: argparse.Namespace) -> int:
+    """Every active stack root under environments/ (or the dispatched subset), as a matrix.
+
+    A stack file that says it is not active (a destroyed stack keeps an empty marked root)
+    is left out. With more than --max-stacks stacks the matrix is cut (alphabetical) and a
+    warning says so.
+    """
+    repo = FileSystemStackRepository(args.repo_root)
+    active = {m.ref.path: m for ref in repo.all_refs() if (m := repo.load(ref)) is not None and m.lifecycle == "active"}
+    wanted = _drift_paths(args.paths)
+    if wanted is not None:
+        unknown = sorted(set(wanted) - set(active))
+        if unknown:
+            raise ValueError(f"not an active stack root: {', '.join(unknown)}")
+        active = {p: active[p] for p in wanted}
+    stacks = [active[p] for p in sorted(active)]
+    if len(stacks) > args.max_stacks:
+        print(f"::warning title=Drift matrix cut::{len(stacks)} active stacks, checking the first {args.max_stacks}")
+        stacks = stacks[: args.max_stacks]
+    matrix = [m.matrix_entry() for m in stacks]
+    print(json.dumps({"count": len(matrix), "stacks": [m["path"] for m in matrix]}))
+    _write_outputs(Path(args.github_output) if args.github_output else None,
+                   {"matrix": json.dumps(matrix, separators=(",", ":")), "count": str(len(matrix))})
+    return 0
+
+
+def _drift_paths(raw: str) -> list[str] | None:
+    """The dispatch input: a JSON array of stack paths, or None when empty. Checked before use,
+    and never echoed (a dispatcher could put a workflow command in it)."""
+    if not raw.strip():
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        raise ValueError("stacks must be a JSON array of stack paths") from None
+    if not isinstance(value, list) or not value or not all(isinstance(p, str) and STACK_PATH_RE.match(p) for p in value):
+        raise ValueError("stacks must be a non-empty JSON array of environments/<env>/<team>/<stack> paths")
+    return list(dict.fromkeys(value))
+
+
+def _drift_scan(args: argparse.Namespace) -> int:
+    meta = FileSystemStackRepository(args.repo_root).load_dir(args.stack_dir)
+    plan = _read_json(args.plan)
+    # The whole log is read (bounded) rather than a pre-cut window: the summary is the first
+    # `Error:` line wherever it is, and nothing else of the log is kept.
+    log = _read_text(args.error_file) if args.error_file is not None else None
+    message = (log or "")[:MAX_LOG_BYTES] if log is not None else args.error_message
+    outcome = build_outcome(meta.ref.path, args.exit_code, plan if isinstance(plan, dict) else None, message)
+    errs = outcome.problems()
+    if errs:
+        raise ValueError("drift result is invalid: " + "; ".join(errs))
+    args.out.write_text(json.dumps(outcome.to_dict(), indent=2) + "\n", encoding="utf-8")
+    print(f"{meta.ref.path}: {_describe(outcome)}")
+    if outcome.result == "error":
+        print(f"::warning title=Drift check failed::{annotation(f'{meta.ref.path}: {outcome.error}')}")
+    return 0
+
+
+def _describe(o: DriftOutcome) -> str:
+    if o.result == "drifted":
+        s = o.summary
+        shown = f", first {MAX_CHANGED} listed" if s["drifted"] > MAX_CHANGED else ""
+        return f"drifted ({s['drifted']} resources: {s['updated']} updated, {s['deleted']} deleted{shown})"
+    return o.result if o.result == "clean" else f"error ({o.error})"
+
+
+def _drift_report(args: argparse.Namespace) -> int:
+    """Report each scan result for a stack the API lists as due. The API is asked once, then
+    each report is sent with its own OIDC token. A stack the API does not list (it became
+    busy, locked or inactive since the scan) is skipped: its result describes a state that
+    is mid-change. A rejected report fails the job after every other one was sent."""
+    outcomes = _load_outcomes(args.results_dir)
+    if args.dry_run:
+        gh = GitHubRun.from_env(os.environ)
+        print(json.dumps([o.to_payload(gh) for o in outcomes], indent=2))
+        return 0
+    if _unconfigured(args, "drift reports"):
+        return 0
+    gh = GitHubRun.from_env(os.environ)
+    payloads = {o.stack_path: o.to_payload(gh) for o in outcomes}  # everything is valid before anything is sent
+    client = _client(args, os.environ)
+    due = {s.path for s in client.drift_stacks(DRIFT_MAX_STACKS)}
+    failed = 0
+    for path in sorted(payloads):
+        if path not in due:
+            print(f"::notice title=Drift result skipped::{path} is not due according to the API (busy, locked or inactive)")
+            continue
+        try:
+            body = client.post_drift(payloads[path]).body
+        except ApiError as exc:
+            if exc.code == "stack_not_checkable":  # became busy between the list and the report
+                print(f"::notice title=Drift result skipped::{path}: {annotation(str(exc))}")
+                continue
+            failed += 1
+            print(f"::error title=Drift report rejected::{annotation(f'{path}: {exc}')}")
+            continue
+        print(f"reported {path}: {body.get('result')} -> report {body.get('report_id')}"
+              f"{' (replay)' if body.get('replayed') else ''}, resolution status {body.get('status')}")
+    for path in sorted(due - set(payloads)):
+        print(f"::warning title=No drift result::{path} is due but produced no scan result")
+    return 1 if failed else 0
+
+
+def _load_outcomes(directory: Path) -> list[DriftOutcome]:
+    """Every ``*.json`` result under directory (not recursive), validated strictly. A file that
+    is not a valid result fails the command: it crossed a job boundary and is never trusted.
+    Two files for one stack are refused."""
+    outcomes: dict[str, DriftOutcome] = {}
+    for file in sorted(Path(directory).glob("*.json")):
+        raw = _read_json(file)
+        if raw is None:
+            raise ReportError(f"{file.name} is not valid JSON")
+        outcome = outcome_from_dict(raw)
+        if outcome.stack_path in outcomes:
+            raise ReportError(f"two drift results for {outcome.stack_path}")
+        outcomes[outcome.stack_path] = outcome
+    return list(outcomes.values())
+
+
 def _build_report(args: argparse.Namespace, env: Mapping[str, str]) -> RunReport:
     """Assemble the report from the stack file, the pipeline's files and the runner env."""
     meta = FileSystemStackRepository(args.repo_root).load_dir(args.stack_dir)
@@ -664,6 +811,7 @@ COMMANDS = {
     "converged": run_converged,
     "report": run_report,
     "lock": run_lock,
+    "drift": run_drift,
 }
 
 

@@ -29,6 +29,8 @@ RUNS_PATH = "/v1/runs"
 LOCK_PATH = "/v1/internal/stacks/{stack_id}/lock"
 REQUEST_BY_PATH = "/v1/internal/requests/by-path"
 BUDGET_CONTEXT_PATH = "/v1/internal/budget-context"
+DRIFT_PATH = "/v1/internal/drift"
+DRIFT_STACKS_PATH = "/v1/internal/drift/stacks"
 USER_AGENT = "iacp-stack-pipeline"
 
 
@@ -191,6 +193,14 @@ HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True)
+class DueStack:
+    """A stack GET /v1/internal/drift/stacks says to check."""
+
+    path: str
+    stack_id: str
+
+
+@dataclass(frozen=True)
 class ResolvedRequest:
     """The request that holds a stack's lock and is ready to apply (GET /v1/internal/requests/by-path)."""
 
@@ -244,6 +254,26 @@ class IacpApiClient:
         if not isinstance(iacp, dict) or not isinstance(iacp.get("context"), dict):
             raise ApiError(f"GET {BUDGET_CONTEXT_PATH}: the response is not a policy context")
         return body
+    def drift_stacks(self, limit: int = 256) -> list[DueStack]:
+        """GET /v1/internal/drift/stacks: the stacks the API wants checked now (settled, not
+        locked by a request). An answer that is not a list of valid stack paths is an ApiError:
+        it decides which reports are accepted, so it fails closed."""
+        body = self._call("GET", DRIFT_STACKS_PATH + "?" + urllib.parse.urlencode({"limit": int(limit)}), None, ok=(200,)).body
+        rows = body.get("stacks")
+        if not isinstance(rows, list):
+            raise ApiError(f"GET {DRIFT_STACKS_PATH}: response carried no stacks list")
+        out: list[DueStack] = []
+        for row in rows:
+            path = row.get("path") if isinstance(row, dict) else None
+            if not isinstance(path, str) or not STACK_PATH_RE.match(path):
+                raise ApiError(f"GET {DRIFT_STACKS_PATH}: response carried a malformed stack path")
+            out.append(DueStack(path=path, stack_id=str(row.get("stack_id", ""))))
+        return out
+
+    def post_drift(self, payload: Mapping[str, Any]) -> ApiResponse:
+        """POST /v1/internal/drift. Retried on 429/5xx: a report is keyed by its workflow run
+        and stack, so a replay returns the stored report (``replayed: true``)."""
+        return self._call("POST", DRIFT_PATH, payload, ok=(200,))
 
     def resolve_request(self, stack_path: str, head_sha: str = "", *, merge_wait_attempts: int = 6,
                         merge_wait_seconds: float = 5.0) -> ResolvedRequest:
