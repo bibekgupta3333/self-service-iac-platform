@@ -12,7 +12,7 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
   - `githubapp` adapter: App JWT → cached, repository-scoped installation token; atomic commits with the git data API; idempotent PR, labels, `workflow_dispatch`; timeouts, same-host redirects only, retries on 5xx/429 honouring `Retry-After`.
   - `localgit` adapter (ADR-0009): commits to a local clone with git plumbing via `os/exec` argument arrays and records fake PRs, so the flow runs without a registered App.
   - `IACP_PUBLISHER=none|local|github` (default `none`), App settings, `IACP_GITHUB_WEBHOOK_SECRET`, `IACP_PORTAL_URL`, `IACP_LOCALSTACK_ENDPOINT`, `IACP_WORKER_POLL_INTERVAL`; half configuration fails at startup.
-  - Migration 0006: `webhook_deliveries` and `outbox` with least-privilege `iacp_app` grants.
+  - Migration 0008: `webhook_deliveries` and `outbox` with least-privilege `iacp_app` grants.
   - `internal/outbox`: Postgres job queue and in-process worker (SKIP LOCKED, lease, backoff, dead jobs).
   - Request creation enqueues `request.publish`; `internal/prflow` renders, commits, opens and labels the PR, then records `pr_opened` in a second transaction (fencing-token checked). Failures are audited per attempt and the last one fails the request.
   - State machine: `pr_merged` (approved → applying) and `publish_failed` (draft → failed). Terminal transitions release the stack lock in the same transaction and publish the promoted request.

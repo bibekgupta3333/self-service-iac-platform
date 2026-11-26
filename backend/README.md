@@ -73,10 +73,10 @@ together apply each migration once.
 | `0002_audit.sql` | append-only `audit_events`: link-check trigger, UPDATE/DELETE/TRUNCATE rejection, `iacp_app` INSERT/SELECT grant |
 | `0003_seed_local.sql` | `iacp-bot` system user and the `development` environment (LocalStack account `000000000000`) |
 | `0004_app_role_grants.sql` | runtime grants for `iacp_app`: DML on platform tables, INSERT/SELECT only on `audit_events`, nothing on `goose_db_version` |
-| `0006_webhooks_outbox.sql` | `webhook_deliveries` (delivery id primary key) and `outbox` (job queue: `available_at`, `locked_until`, `attempts`, `dedupe_key`); `iacp_app` gets SELECT/INSERT/DELETE and SELECT/INSERT/UPDATE respectively |
 | `0005_pipeline_runs.sql` | `pipeline_kind`, `pipeline_status`, `pipeline_runs` (one row per run, attempt and stack, `stack_id NOT NULL`; one `stages` entry per stage name); `iacp_app` gets SELECT/INSERT/UPDATE only |
 | `0006_oidc_jti.sql` | `oidc_jti` (used GitHub OIDC token ids until `exp` + leeway, shared by replicas); `iacp_app` gets SELECT/INSERT/DELETE only, no UPDATE |
 | `0007_budgets.sql` | `budgets` (team monthly budget, optionally per environment; `spent_usd` 0 until cost data lands in WBS 8.5) |
+| `0008_webhooks_outbox.sql` | `webhook_deliveries` (delivery id primary key) and `outbox` (job queue: `available_at`, `locked_until`, `attempts`, `dedupe_key`); `iacp_app` gets SELECT/INSERT/DELETE and SELECT/INSERT/UPDATE respectively |
 
 ### Database roles
 
@@ -359,7 +359,7 @@ outbox worker ─────────► Applier → ApplyGitHubEvent / Reco
   this is what stops a replayed body from moving a request. Events not allowed in the current
   status are audited as `request.github_event_ignored`. An event that arrives before the PR is
   recorded is retried through the outbox instead of being dropped.
-- **Queue**: the `outbox` table (migration 0006) and an in-process worker goroutine
+- **Queue**: the `outbox` table (migration 0008) and an in-process worker goroutine
   (`FOR UPDATE SKIP LOCKED`, 2-minute lease, so several API replicas can drain it). Outcome writes
   are guarded by the claim's attempt number, so a worker whose lease ran out cannot complete or
   reschedule a job another worker reclaimed, and each handler runs with a deadline of 3/4 of the

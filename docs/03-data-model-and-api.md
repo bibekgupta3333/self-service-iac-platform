@@ -414,7 +414,7 @@ CREATE TABLE outbox (
 CREATE INDEX outbox_pending_idx ON outbox (available_at, id) WHERE processed_at IS NULL AND dead_at IS NULL;
 CREATE UNIQUE INDEX outbox_dedupe_idx ON outbox (dedupe_key)
     WHERE dedupe_key IS NOT NULL AND processed_at IS NULL AND dead_at IS NULL;
--- iacp_app: webhook_deliveries SELECT/INSERT/DELETE (7-day purge), outbox SELECT/INSERT/UPDATE (migration 0006).
+-- iacp_app: webhook_deliveries SELECT/INSERT/DELETE (7-day purge), outbox SELECT/INSERT/UPDATE (migration 0008).
 ```
 
 `request_kind` extends the four user-facing kinds (create/update/upgrade/destroy) with two platform-initiated kinds: `reconcile` (drift remediation) and `rollback` (revert PR to the last applied spec). Both follow the same state machine.
