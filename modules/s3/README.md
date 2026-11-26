@@ -24,7 +24,7 @@ The module declares no provider. The calling root configures `provider "aws"`.
 | Control | Implementation |
 |---|---|
 | Encryption at rest | SSE-KMS with bucket keys. A dedicated key with rotation is created unless `kms_key_arn` is set. |
-| Encryption in transit | Bucket policy denies any request with `aws:SecureTransport = false`. |
+| Encryption in transit | Bucket policy denies any request with `aws:SecureTransport = false` and any request using TLS older than 1.2 (`s3:TlsVersion`). |
 | No public access | All four public access block flags on. `BucketOwnerEnforced` disables ACLs. |
 | Recoverability | Versioning on (forced in production). Noncurrent versions expire after `noncurrent_version_expiration_days`. |
 | Least privilege | No roles are created. Consumers attach `read_policy_json` or `write_policy_json`. |
@@ -40,12 +40,14 @@ The module declares no provider. The calling root configures `provider "aws"`.
 | `environment` | `development`, `staging` or `production`. Injected by the platform. | `string` | n/a | yes |
 | `stack` | Owning stack name, used for the `iacp:stack` tag. Injected by the platform. | `string` | n/a | yes |
 | `tags` | Additional tags. Keys starting with `iacp:` are reserved. At most 30. | `map(string)` | `{}` | no |
-| `versioning_enabled` | Keep object versions. Always enabled in production. | `bool` | `true` | no |
+| `versioning_enabled` | Keep object versions. Always enabled in production. `false` creates an unversioned bucket (`Disabled`); a bucket that was versioned cannot go back to unversioned. | `bool` | `true` | no |
 | `kms_key_arn` | Existing KMS key ARN. If null, a dedicated key is created. Aliases are not accepted. Must be known at plan time (for example an output of another stack). | `string` | `null` | no |
 | `noncurrent_version_expiration_days` | Days after which noncurrent versions expire (1-3650). | `number` | `90` | no |
 | `transition_to_ia_days` | Days after which current objects move to STANDARD_IA (>= 30). Null disables. | `number` | `null` | no |
 | `force_destroy` | Allow destroy while objects exist. Not allowed in production. | `bool` | `false` | no |
-| `access_logging` | Server access logging: `{ target_bucket = string, target_prefix = optional(string) }`. The prefix defaults to `s3/<bucket name>/`. Null disables logging. The target bucket must allow log delivery. | `object` | `null` | no |
+| `access_logging` | Server access logging: `{ target_bucket = string, target_prefix = optional(string) }`. The prefix defaults to `s3/<bucket name>/`. Null disables logging. The target bucket must allow log delivery, and in real AWS it must use SSE-S3 (server access logs cannot be delivered to an SSE-KMS bucket). | `object` | `null` | no |
+| `key_service_principals` | AWS service principals (for example `logging.s3.amazonaws.com`) allowed to use the module-created key for this account (`aws:SourceAccount`). Ignored with `kms_key_arn`. | `list(string)` | `[]` | no |
+| `additional_policy_statements` | Up to 10 extra bucket policy statements `{ sid, effect, actions, principal_type, principal_identifiers, resources = optional, conditions = optional }`. `resources` defaults to the bucket and its objects. Allow statements must name specific principals. | `list(object)` | `[]` | no |
 
 ## Outputs
 
