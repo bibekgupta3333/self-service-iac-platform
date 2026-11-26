@@ -95,7 +95,7 @@ policies/
 │   ├── lib/iacp.rego                  # lib.iacp: pure helpers (selection, tags, environment, exceptions, messages)
 │   ├── main.rego                      # main: aggregates every iacp.* package for `conftest test -p policies/opa`
 │   ├── tags.rego                      # iacp.tags        (required iacp:* tags; iacp.tags.mismatch vs context)
-│   ├── encryption.rego                # iacp.encryption  (S3 SSE-KMS, SQS SSE / CMK outside dev, KMS rotation)
+│   ├── encryption.rego                # iacp.encryption  (S3 SSE-KMS, SQS and SNS SSE / CMK outside dev, DynamoDB CMK outside dev, KMS rotation)
 │   ├── s3_public.rego                 # iacp.s3          (public access block, public ACLs, public bucket policies)
 │   ├── iam.rego                       # iacp.iam         (Action "*", NotAction/NotResource, write or sensitive actions on all resources, admin managed policies)
 │   ├── placement.rego                 # iacp.placement   (allowed regions; instance sizes are planned)
@@ -231,6 +231,21 @@ deny contains m if {
 ```
 
 ### 6.4 Encryption required
+
+Implemented in `policies/opa/encryption.rego`. "Customer-managed" means a key ID, ARN or alias that is not an AWS-managed `alias/aws/*` key, or a key created in the same plan. Outside development includes plans without a stack context (fail closed).
+
+| Rule ID | Denies |
+|---------|--------|
+| `iacp.encryption.s3_kms` | a bucket (new or unchanged) without an SSE-KMS default encryption rule |
+| `iacp.encryption.s3_cmk` | outside development, a bucket whose SSE-KMS rule uses the AWS-managed `aws/s3` key |
+| `iacp.encryption.sqs_sse` | a queue with neither `kms_master_key_id` nor SQS-managed SSE |
+| `iacp.encryption.sqs_kms` | outside development, a queue without a customer-managed key |
+| `iacp.encryption.sns_sse` | a topic without `kms_master_key_id` |
+| `iacp.encryption.sns_kms` | outside development, a topic on the AWS-managed `aws/sns` key (CloudWatch alarms cannot publish to it) |
+| `iacp.encryption.dynamodb_cmk` | outside development, a table on the AWS owned or AWS-managed `aws/dynamodb` key. The provider computes `kms_key_arn` when it is not set, so a computed key only counts when the configuration sets `kms_key_arn` |
+| `iacp.encryption.kms_rotation` | a KMS key with rotation off |
+
+The original design sketch follows; the rule IDs above are authoritative.
 
 ```rego
 # policies/opa/encryption.rego
