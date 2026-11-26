@@ -59,7 +59,7 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 - GitHub Actions OIDC verifier (WBS 4.10), `backend/internal/auth`:
   - RS256 only, cached JWKS with refetch on an unknown `kid` (rate limited), `iss`/`aud`/`exp`/`nbf`/`iat` with leeway, and `repository`/`repository_owner`/`repository_id`/`ref`/`job_workflow_ref` allow-lists
   - configured with `IACP_OIDC_AUDIENCE` and `IACP_OIDC_REPOSITORY` (plus optional overrides); accepted on `/v1/internal/*` next to the shared token
-- `POST /v1/runs` records run reports in the new `pipeline_runs` table (migration `0005`), checking the fencing token, the reporting run id and the workflow allowed for each pipeline.
+- `POST /v1/runs` records run reports in the new `pipeline_runs` table (migration `0005`), checking the fencing token, the reporting run id and commit, and the workflow and trigger allowed for each pipeline. Replayed stage reports replace their entry instead of duplicating it, and reports lock the stack row before the lock row so they cannot deadlock with lock release.
 
 ### Security
 - The backend fails closed: it binds to loopback by default, refuses to start without `IACP_AUTH_MODE`, keeps internal endpoints behind a constant-time token check, and enforces team membership on request creation.
@@ -67,6 +67,9 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 - The local stack binds LocalStack and Postgres to loopback only. Images are pinned by digest.
 - `make` forces LocalStack dummy credentials and unexports `AWS_PROFILE` and session tokens.
 - Machine endpoints fail closed: with neither OIDC nor `IACP_INTERNAL_TOKEN` configured they reject every call, a half OIDC configuration stops the API from starting, and a genuine token from a workflow outside the allow-list gets `403 workflow_not_allowed`.
+- OIDC callers are scoped per route class: lock routes accept only `apply.yml`/`ttl-reaper.yml` on main, catalog indexing only `module-release.yml` on main, so a pull-request token only reaches `/v1/runs`. Each pipeline also has an `event_name` allow-list (`pull_request_target` and `workflow_run` never qualify), and run reports must carry the token's `sha`.
+- The JWKS endpoint must be https (loopback excepted) and redirects are not followed. Fetches are shared (singleflight) and detached from the caller, so a disconnecting client cannot block key refreshes.
+- When `IACP_OIDC_REPOSITORY_ID` is set every token must carry it; the API warns when it is unset.
 - `iacp_app` can only SELECT, INSERT and UPDATE `pipeline_runs`.
 
 ### Changed
