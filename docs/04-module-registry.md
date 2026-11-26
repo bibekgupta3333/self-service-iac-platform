@@ -293,15 +293,25 @@ Enforcement in `module-release.yml`:
    |---|---|
    | Variable or output removed (a rename is a removal plus an addition) | MAJOR |
    | New variable without a default | MAJOR |
-   | Variable type changed (compared after removing whitespace) | MAJOR |
+   | Variable type changed (compared after removing whitespace outside string literals) | MAJOR |
    | Default removed, so the variable becomes required | MAJOR |
    | `nullable` turned off | MAJOR |
-   | Validation `condition` added or changed (it may reject values that were valid before) | MAJOR |
+   | Validation `condition` added or changed (it may reject values that were valid before; string literals are compared verbatim) | MAJOR |
+   | Output marked `sensitive = true` (consumers that re-export it must mark theirs sensitive) | MAJOR |
+   | Lowest allowed **major** version raised in `required_version` or a `required_providers` constraint | MAJOR |
+   | A Terraform or provider constraint changed in a way the gate cannot read | MAJOR |
    | New optional variable, new output | MINOR |
-   | Default added or changed, `nullable` turned on, validation removed | MINOR |
-   | Any other change to the module directory (descriptions, `error_message`, resources, README) | PATCH |
+   | Default added or changed, `nullable` turned on, validation removed, output no longer `sensitive` | MINOR |
+   | Lowest allowed **minor** version raised in a Terraform or provider constraint; new required provider | MINOR |
+   | Any other change to the module directory (descriptions, `error_message`, resources, README, a lowered or unchanged constraint floor) | PATCH |
 
-   Changes only under `tests/` or `examples/` need no new version. The required bump is the largest of these. The gate then compares `metadata.version` with the last tag: it fails when the declared bump is smaller than required, when the version is lower than the last release, and when the module changed but the version did not. With no previous tag (first release) the gate passes. Prerelease tags are never used as the comparison base. For a `0.x` module, a breaking change needs only a MINOR bump (SemVer item 4).
+   **Constraint floors.** The gate reads `required_version` and every `required_providers` entry (keyed by `source`) from the `terraform {}` block. The floor of a constraint is the highest lower bound among its comma-separated parts: `>=`, `=`, `~>` and a bare version set a lower bound, `> X.Y.Z` is treated as `>= X.Y.Z`, and `<`, `<=` and `!=` do not raise it. No constraint means 0.0.0. Only the floors are compared, so `">= 5.60, < 6.0"` to `"~> 5.60"` is not a change, and raising only the ceiling (`< 6.0` to `< 7.0`) is PATCH. The gate reads the `.tf` files, not `module.yaml` `compatibility`; the manifest validator keeps the two in step.
+
+   Changes only under `tests/` or `examples/` need no new version. The required bump is the largest of these. The gate then compares `metadata.version` with the last tag: it fails when the declared bump is smaller than required, when the version is lower than the last release, and when the module changed but the version did not. With no previous tag (first release) the gate passes. For a `0.x` module, a breaking change needs only a MINOR bump (SemVer item 4).
+
+   **Prereleases.** Prerelease tags are never the comparison base for the bump; the last final release is. But when the declared version is already tagged (prereleases included) and the module changed since that tag, the gate fails, so `2.0.0-rc.1` cannot be edited after it is tagged. A prerelease lower than an existing prerelease of the same version (`rc.0` after `rc.1`) also fails.
+
+   **Reviewer checklist** until the upgrade-plan test (check 2) lands: the gate classifies a changed default as MINOR, because it cannot tell whether the new default alters existing resources. If it does, the change is MAJOR by the table above ("Tighten a default..."), and the reviewer must ask for a major bump or for a new input that keeps the old behaviour.
 2. **Upgrade plan test** (planned, not yet in the workflow) — apply `examples/complete` at the previous tag against LocalStack, switch source to HEAD, run `terraform plan -detailed-exitcode`. Any `delete` or `replace` action fails a MINOR/PATCH release.
 3. **CHANGELOG / upgrade notes check** (planned) — `CHANGELOG.md` must contain a section for the new version. MAJOR releases must contain a `### Migration` subsection and `module.yaml` `upgrade.notes`; its text is copied to `module_versions.upgrade_notes`. Today the release notes come from the CHANGELOG section when it exists, and otherwise from a generated interface-diff summary.
 
@@ -390,8 +400,8 @@ Indexing is idempotent on `(module, version)`; re-indexing the same version with
 **Current implementation (local-first, ADR-0009).** The flow above is the target. What runs today:
 
 - Static checks, `terraform test`, the manifest validator and Terratest run on every PR in `ci.yml`. `module-release.yml` in PR mode runs only the interface-diff gate (check 1 of section 5.2), for modules the PR changes and for modules whose declared version is not tagged yet. Its single required check is `semver gate result`.
-- On a push to `main`, `module-release.yml` runs the gate again and, for each such module, creates the tag `modules/<name>/v<version>` if it does not exist, pointing at the pushed commit. It uses the workflow `GITHUB_TOKEN` with `contents: write` until the GitHub App exists (WBS 4.8). An existing tag is never moved. It then creates a GitHub release whose notes are the module's CHANGELOG section, or a generated interface-diff summary. Because untagged versions are always included, a failed or skipped run is picked up by the next push.
-- The index call (`python -m tools.module_release index`) sends the parsed `module.yaml` inline, matching `catalog.IndexCommand` (see [03](03-data-model-and-api.md)), with the shared bearer token. A 201 means indexed and a 200 means already indexed. The step is skipped with a notice while the `IACP_API_URL` variable and the `IACP_INTERNAL_TOKEN` secret are not configured, which is the case until a hosted API exists.
+- On a push to `main`, `module-release.yml` runs the gate again and, for each such module, creates the tag `modules/<name>/v<version>` if it does not exist, pointing at the pushed commit. It uses the workflow `GITHUB_TOKEN` with `contents: write` until the GitHub App exists (WBS 4.8). An existing tag is never moved. It then creates a GitHub release whose notes are the module's CHANGELOG section, or a generated interface-diff summary against the last final release below the declared version. Modules whose declared version is untagged, or tagged without a GitHub release, are always included, so a run that failed before or at `gh release create` is picked up by the next push to `main` that touches the release paths (or by re-running the workflow).
+- The index call (`python -m tools.module_release index`) sends the parsed `module.yaml` inline, matching `catalog.IndexCommand` (see [03](03-data-model-and-api.md)), with the shared bearer token. A 201 means indexed and a 200 means already indexed. The client refuses redirects (it would otherwise replay the bearer token to the new location) and treats any status other than 200 or 201 as a failure. The step is skipped with a notice while neither the `IACP_API_URL` variable nor the `IACP_INTERNAL_TOKEN` secret is configured, which is the case until a hosted API exists; setting only one of them fails the step. A failed index call is not retried by the next push; until the reconciliation job (step 7) exists, re-run the release job.
 
 ## 10. Package catalogue
 
