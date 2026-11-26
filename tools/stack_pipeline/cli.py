@@ -9,15 +9,30 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from .adapters import FileSystemStackRepository, GitCli, GitDiff
+from .api_client import ApiError, IacpApiClient, TokenSource
 from .detection import DEFAULT_MAX_STACKS, DetectionError, DetectionPolicy, DetectionResult, StackDetector
 from .models import StackMetadataError
 from .module_install import MANIFEST, ModuleInstallVerifier, parse_manifest
 from .module_pins import DEFAULT_REPO_URL, DEFAULT_TRUSTED_REF, ModulePinVerifier, PinError, Resolution, insteadof_config
 from .plan_summary import render_markdown, summarize
 from .policy_context import build_context
+from .report import (
+    GitHubRun,
+    ReportError,
+    RunReport,
+    error_block,
+    plan_block,
+    policy_block,
+    redact_outputs,
+    stage_status,
+    summary_status,
+)
+
+API_URL_ENV = "IACP_API_URL"
+AUDIENCE_ENV = "IACP_OIDC_AUDIENCE"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -80,7 +95,46 @@ def build_parser() -> argparse.ArgumentParser:
     installed = sub.add_parser("verify-modules", help="after init: match installed modules to the pins one to one")
     installed.add_argument("stack_dir", type=Path)
     installed.add_argument("--repo-url", default=DEFAULT_REPO_URL, help="module repository URL used in stack sources")
+    report = sub.add_parser("report", help="POST one stage report to $IACP_API_URL/v1/runs")
+    report.add_argument("stack_dir", type=Path)
+    report.add_argument("--pipeline", required=True, choices=("validate", "apply", "drift", "ttl_destroy"))
+    report.add_argument("--stage", required=True, help="stage name; a passed 'summary' finishes the run")
+    report.add_argument("--status", help="in_progress|passed|failed|cancelled or a GitHub outcome "
+                                         "(default: from --summary, failed when it is missing)")
+    report.add_argument("--summary", type=Path, help="`summary --json-out` document: plan and policy blocks")
+    report.add_argument("--outputs", type=Path, help="`terraform output -json`; sensitive values are redacted")
+    report.add_argument("--terraform-exit-code", type=int)
+    report.add_argument("--error-message", default="", help="error.message for a failed stage")
+    report.add_argument("--error-class", default="permanent", choices=("transient", "permanent"))
+    report.add_argument("--request-short-id", default="", help="default: request_id in iacp.stack.json")
+    report.add_argument("--fencing-token", type=int,
+                        help="the stack lock's token (default for validate: fencing_token in iacp.stack.json)")
+    _api_arguments(report)
+    report.add_argument("--warn-on-error", action="store_true",
+                        help="report failures are ::warning:: annotations and exit 0 (the report never fails the job)")
+    report.add_argument("--dry-run", action="store_true", help="print the payload instead of sending it")
+
+    lock = sub.add_parser("lock", help="claim or release the platform stack lock (/v1/internal/stacks/{id}/lock)")
+    lock.add_argument("action", choices=("acquire", "release"))
+    lock.add_argument("--stack-id", required=True, help="stack UUID")
+    lock.add_argument("--request-id", required=True, help="request UUID")
+    lock.add_argument("--fencing-token", type=int, help="token from acquire (release only)")
+    _api_arguments(lock)
+    lock.add_argument(
+        "--github-output",
+        type=str,
+        default=os.environ.get("GITHUB_OUTPUT"),
+        help="append claimed= and fencing_token= here (default: $GITHUB_OUTPUT)",
+    )
     return parser
+
+
+def _api_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--api-url", default=os.environ.get(API_URL_ENV, ""), help=f"default: ${API_URL_ENV}")
+    parser.add_argument("--audience", default=os.environ.get(AUDIENCE_ENV, ""),
+                        help=f"GitHub OIDC audience (default: ${AUDIENCE_ENV}); without OIDC, $IACP_INTERNAL_TOKEN is used")
+    parser.add_argument("--skip-if-unconfigured", action="store_true",
+                        help=f"exit 0 with a ::notice:: when ${API_URL_ENV} is empty (the local-first default)")
 
 
 # ---- small I/O helpers (the CLI is the adapter layer) ------------------------------
@@ -192,14 +246,118 @@ def run_verify_modules(args: argparse.Namespace) -> int:
     return 0
 
 
-COMMANDS = {"detect": run_detect, "context": run_context, "summary": run_summary, "verify-pins": run_verify_pins, "verify-modules": run_verify_modules}
+def _build_report(args: argparse.Namespace, env: Mapping[str, str]) -> RunReport:
+    """Assemble the report from the stack file, the pipeline's files and the runner env."""
+    meta = FileSystemStackRepository(args.repo_root).load_dir(args.stack_dir)
+    summary = _read_json(args.summary)
+    summary = summary if isinstance(summary, dict) else None
+    outputs = _read_json(args.outputs)
+    if args.outputs is not None and not isinstance(outputs, dict):
+        raise ReportError(f"{args.outputs} is missing or is not a terraform output -json object")
+    token = args.fencing_token
+    if token is None and args.pipeline == "validate":
+        token = meta.fencing_token
+    status = stage_status(args.status) if args.status else summary_status(summary)
+    return RunReport(
+        pipeline=args.pipeline,
+        stack_path=meta.ref.path,
+        stage=args.stage,
+        status=status,
+        github=GitHubRun.from_env(env),
+        request_short_id=args.request_short_id or meta.request_id,
+        fencing_token=token,
+        plan=plan_block(summary) if summary else None,
+        policy=policy_block(summary) if summary else None,
+        outputs=redact_outputs(outputs) if isinstance(outputs, dict) else None,
+        terraform_exit_code=args.terraform_exit_code,
+        error=error_block(args.error_message, args.error_class),
+    )
+
+
+def _client(args: argparse.Namespace, env: Mapping[str, str]) -> IacpApiClient:
+    credential = TokenSource(env, stdout=sys.stdout).credential(args.audience)
+    if credential is None:
+        raise ApiError(
+            f"no credential for {args.api_url}: grant the job id-token: write and set {AUDIENCE_ENV}, "
+            "or provide IACP_INTERNAL_TOKEN"
+        )
+    return IacpApiClient(args.api_url, credential)
+
+
+def _unconfigured(args: argparse.Namespace, what: str) -> bool:
+    """True (after a notice) when the API URL is empty and the caller asked to skip."""
+    if args.api_url.strip():
+        return False
+    if not args.skip_if_unconfigured:
+        raise ValueError(f"{API_URL_ENV} is not set; pass --api-url or --skip-if-unconfigured")
+    print(f"::notice title=Platform API not configured::{what} skipped: {API_URL_ENV} is empty (local-first, ADR-0009)")
+    return True
+
+
+def run_report(args: argparse.Namespace) -> int:
+    env = os.environ
+    try:
+        payload = _build_report(args, env).to_payload()
+        if args.dry_run:
+            print(json.dumps(payload, indent=2))
+            return 0
+        if _unconfigured(args, f"run report {args.pipeline}/{args.stage}"):
+            return 0
+        resp = _client(args, env).post_run(payload)
+    except (ReportError, ApiError, StackMetadataError, ValueError) as exc:
+        if not args.warn_on_error:
+            raise
+        print(f"::warning title=Run report not sent::{exc}")
+        return 0
+    body = resp.body
+    print(f"reported {args.pipeline}/{args.stage}={payload['status']}: run {body.get('run_id')} "
+          f"is {body.get('run_status')} (request status {body.get('request_status')})")
+    return 0
+
+
+def run_lock(args: argparse.Namespace) -> int:
+    out = Path(args.github_output) if args.github_output else None
+    if _unconfigured(args, f"stack lock {args.action}"):
+        _write_outputs(out, {"claimed": "false"})
+        return 0
+    client = _client(args, os.environ)
+    if args.action == "acquire":
+        claim = client.acquire_lock(args.stack_id, args.request_id)
+        _write_outputs(out, {"claimed": "true", "fencing_token": str(claim.fencing_token)})
+        print(f"stack lock {claim.outcome} for request {claim.request_id}: fencing token {claim.fencing_token}, "
+              f"expires {claim.expires_at}")
+        return 0
+    if args.fencing_token is None or args.fencing_token <= 0:
+        raise ValueError("lock release needs --fencing-token")
+    body = client.release_lock(args.stack_id, args.request_id, args.fencing_token).body
+    promoted = (body.get("promoted") or {}).get("request_id")
+    print(f"stack lock released (token {args.fencing_token}); promoted: {promoted or 'none'}")
+    return 0
+
+
+def _write_outputs(path: Path | None, values: Mapping[str, str]) -> None:
+    if path is None:
+        return
+    with path.open("a", encoding="utf-8") as fh:
+        fh.writelines(f"{k}={v}\n" for k, v in values.items())
+
+
+COMMANDS = {
+    "detect": run_detect,
+    "context": run_context,
+    "summary": run_summary,
+    "verify-pins": run_verify_pins,
+    "verify-modules": run_verify_modules,
+    "report": run_report,
+    "lock": run_lock,
+}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return COMMANDS[args.command](args)
-    except (DetectionError, StackMetadataError, PinError) as exc:
+    except (DetectionError, StackMetadataError, PinError, ReportError, ApiError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
