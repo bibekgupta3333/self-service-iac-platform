@@ -104,12 +104,22 @@ class FakeCatalog:
                     "body": json.loads(self.rfile.read(length) or b"{}"),
                 })
                 status, body = fake.replies.pop(0) if fake.replies else (201, {"module": "demo"})
+                location = body.pop("_location", None)
                 raw = json.dumps(body).encode()
                 self.send_response(status)
+                if location:
+                    self.send_header("Location", location)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(raw)))
                 self.end_headers()
                 self.wfile.write(raw)
+
+            def do_GET(self):  # noqa: N802 (http.server API)
+                fake.requests.append({"path": self.path, "headers": dict(self.headers), "body": None})
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
 
             def log_message(self, *args):
                 pass
@@ -180,6 +190,21 @@ class TestCatalogClient:
         with pytest.raises(CatalogError, match="HTTP 502"):
             client(base, attempts=2).index({})
         assert len(fake.requests) == 2
+
+    @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+    def test_redirects_are_refused(self, catalog, status):
+        fake, base = catalog
+        fake.replies = [(status, {"_location": f"{base}/elsewhere"})]
+        with pytest.raises(CatalogError, match=f"HTTP {status} redirect to .*/elsewhere.* refused") as exc:
+            client(base).index({})
+        assert exc.value.status == status
+        assert [r["path"] for r in fake.requests] == ["/v1/internal/catalog/index"]  # not followed
+
+    def test_unexpected_success_status_is_an_error(self, catalog):
+        fake, base = catalog
+        fake.replies = [(202, {})]
+        with pytest.raises(CatalogError, match="unexpected HTTP 202"):
+            client(base).index({})
 
     def test_connection_refused(self):
         with pytest.raises(CatalogError, match="catalog index failed"):

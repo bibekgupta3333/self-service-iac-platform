@@ -84,6 +84,19 @@ def index_url(base_url: str) -> str:
     return base_url.strip().rstrip("/") + INDEX_PATH
 
 
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: urllib would replay the bearer token to the new
+    location (possibly another host or plain http). The 3xx surfaces as an HTTPError."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001 (urllib API)
+        return None
+
+
+def build_opener() -> urllib.request.OpenerDirector:
+    """An opener that refuses redirects."""
+    return urllib.request.build_opener(_RefuseRedirects())
+
+
 @dataclass(frozen=True)
 class IndexResult:
     created: bool
@@ -114,7 +127,7 @@ class CatalogClient:
         self.timeout = timeout
         self.attempts = max(1, attempts)
         self.backoff = backoff
-        self._opener = opener or urllib.request.build_opener()
+        self._opener = opener or build_opener()
         self._sleep = sleep
 
     def _request(self, payload: Mapping[str, Any]) -> urllib.request.Request:
@@ -137,9 +150,15 @@ class CatalogClient:
             try:
                 with self._opener.open(self._request(payload), timeout=self.timeout) as resp:
                     raw = resp.read().decode("utf-8")
+                    if resp.status not in (200, 201):
+                        raise CatalogError(f"catalog index failed: unexpected HTTP {resp.status}", resp.status, raw)
                     return IndexResult(created=resp.status == 201, status=resp.status, body=_json(raw))
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode("utf-8", errors="replace")
+                if 300 <= exc.code < 400:
+                    location = exc.headers.get("Location", "") if exc.headers else ""
+                    raise CatalogError(f"catalog index failed: HTTP {exc.code} redirect to {location!r} "
+                                       "refused; set IACP_API_URL to the final URL", exc.code, body) from exc
                 last_error = CatalogError(f"catalog index failed: HTTP {exc.code}: {_detail(body)}", exc.code, body)
                 if exc.code not in self.RETRYABLE:
                     raise last_error from exc
