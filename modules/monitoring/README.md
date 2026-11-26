@@ -81,7 +81,9 @@ period and one evaluation period.
 ## Dashboard widgets
 
 `dashboard_widgets` is an ordered list. A widget is either a metric graph
-(`metrics`) or a text panel (`markdown`), never both. Metrics are rendered in
+(`metrics`) or a text panel (`markdown`, at most 2,000 characters per widget
+and 10,000 in total, which keeps the dashboard body well inside CloudWatch's
+size limit), never both. Metrics are rendered in
 CloudWatch's array form (`[namespace, metric, dim, value, …, {stat, label}]`)
 for the stack's region. Widgets have no x/y position, so CloudWatch places
 them in order on its 24-column grid. The dashboard is only created when there

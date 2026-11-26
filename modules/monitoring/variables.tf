@@ -123,7 +123,7 @@ variable "subscriptions" {
 variable "dashboard_widgets" {
   description = <<-EOT
     Dashboard widgets, in order (at most 100). A widget is either a metric graph (metrics: a list of
-    { namespace, metric_name, dimensions, stat, label }) or a text panel (markdown), never both.
+    { namespace, metric_name, dimensions, stat, label }) or a text panel (markdown, at most 2,000 characters each and 10,000 in total), never both.
     view: timeSeries (default), singleValue, bar or pie. period: 60 or a multiple of 60 seconds (default 300).
     width: 1-24 grid columns (default 12). height: 1-24 rows (default 6).
     An alarm status widget for every alarm this module creates is appended automatically.
@@ -154,6 +154,17 @@ variable "dashboard_widgets" {
       length(w.title) >= 1 && length(w.title) <= 256 && (w.markdown == null) == (length(w.metrics) > 0) && length(w.metrics) <= 50
     ])
     error_message = "At most 100 widgets; each needs a 1-256 character title and either 1-50 metrics or markdown, not both."
+  }
+
+  validation {
+    # Keeps the rendered dashboard body well inside CloudWatch's size limit,
+    # so an oversize panel fails at plan time instead of at PutDashboard.
+    condition = alltrue([
+      for w in var.dashboard_widgets : w.markdown == null || try(length(w.markdown) <= 2000, false)
+      ]) && sum(concat([0], [
+        for w in var.dashboard_widgets : w.markdown == null ? 0 : length(w.markdown)
+    ])) <= 10000
+    error_message = "Each widget's markdown may be at most 2,000 characters, and all markdown together at most 10,000."
   }
 
   validation {

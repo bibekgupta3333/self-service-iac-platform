@@ -72,7 +72,7 @@ inputs:
       type: array
       maxItems: 100
       default: []
-      description: Dashboard widgets in order, each a metric graph or a markdown text panel. An alarm status widget is appended automatically.
+      description: Dashboard widgets in order, each a metric graph or a markdown text panel (at most 2,000 characters each, 10,000 in total). An alarm status widget is appended automatically.
       x-iacp-group: Dashboard
       items:
         type: object
@@ -98,7 +98,7 @@ inputs:
                   default: {}
                 stat: { type: string, pattern: "^(SampleCount|Average|Sum|Minimum|Maximum|p[0-9]{1,2}(\\.[0-9]{1,2})?|p100)$", default: Average }
                 label: { type: [string, "null"] }
-          markdown: { type: [string, "null"] }
+          markdown: { type: [string, "null"], maxLength: 2000 }
           view: { type: string, enum: [timeSeries, singleValue, bar, pie], default: timeSeries }
           stacked: { type: boolean, default: false }
           period: { type: integer, minimum: 60, multipleOf: 60, default: 300 }
