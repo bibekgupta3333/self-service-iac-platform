@@ -34,11 +34,11 @@ Trust boundaries: (A) browser ↔ portal/API; (B) GitHub ↔ API (webhooks, call
 
 | Component | S — Spoofing | T — Tampering | R — Repudiation | I — Information disclosure | D — Denial of service | E — Elevation of privilege |
 |---|---|---|---|---|---|---|
-| **Portal / API** | Stolen session → impersonation. *M:* GitHub OAuth + PKCE, 15-min JWT, HttpOnly/SameSite cookies, CSRF token, re-auth for prod destroy; org SSO enforced on GitHub. | Request body tampering to bypass schema. *M:* server-side JSON Schema validation, reserved inputs not overridable, generator is pure + golden-tested. | User denies requesting a change. *M:* audit event per action with actor, IP, request ID; PR authored by bot but co-authored-by trailer + request link. | IDOR across teams. *M:* RBAC middleware on every route, team scoping in SQL (`WHERE team_id = ANY($teams)`), 404 for invisible resources. | Request floods. *M:* WAF rate rules, per-user rate limits, `POST /requests` quota, SQS buffering. | Developer escalates to maintainer to self-approve prod. *M:* roles derived from GitHub teams only, sync every 15 min + on webhook; author cannot approve own PR (branch protection). |
+| **Portal / API** | Stolen session → impersonation. *M:* GitHub OAuth + PKCE, 15-min JWT, HttpOnly/SameSite cookies, CSRF token, re-auth for prod destroy; org SSO enforced on GitHub. | Request body tampering to bypass schema. *M:* server-side JSON Schema validation, reserved inputs not overridable, generator is pure + golden-tested. | User denies requesting a change. *M:* audit event per action with actor, IP, request ID; PR authored by bot but co-authored-by trailer + request link. | IDOR across teams. *M:* RBAC middleware on every route, team scoping in SQL (`WHERE team_id = ANY($teams)`), 404 for invisible resources. | Request floods. *M:* WAF rate rules, per-user rate limits, `POST /requests` quota, SQS buffering. Metrics endpoint as a probe or cardinality bomb. *M:* `/metrics` answers only direct loopback peers or `IACP_METRICS_TOKEN` holders, and labels by route pattern, never the raw path. | Developer escalates to maintainer to self-approve prod. *M:* roles derived from GitHub teams only, sync every 15 min + on webhook; author cannot approve own PR (branch protection). |
 | **Webhook ingester** | Forged webhook advancing state (e.g. fake approval). *M:* HMAC-SHA256 signature, constant-time compare; state transitions re-verified via GitHub API (review state, merge SHA) before acting. | Replay of old delivery. *M:* `X-GitHub-Delivery` dedupe; optimistic status checks. | — | Payload logs leaking data. *M:* log only IDs, not bodies. | Webhook storm. *M:* 202 + SQS, WAF rate limit, IP allowlist from GitHub meta. | — |
 | **Pipeline callbacks** | Forged plan result ("all green"). *M:* GitHub OIDC JWT verified (iss, aud, repository_id, job_workflow_ref allowlist, run_id match), fencing token. | Altered plan hash. *M:* hash also recomputed in `apply.yml` from fresh plan; API only stores, apply compares to value bound at approval. | — | — | — | Callback from PR workflow claiming apply. *M:* per-endpoint `job_workflow_ref` + `ref=refs/heads/main` requirement. |
 | **GitHub App** | Key theft → bot impersonation. *M:* private key in Secrets Manager (KMS CMK), only api/worker task roles can read, rotated 90 d, App permissions minimal (contents:write, pull_requests:write, actions:write, checks:read, metadata:read, members:read). | Bot pushes directly to `main`. *M:* branch protection applies to the App (no bypass list), required checks + CODEOWNERS. | — | Repo read exposure. *M:* App installed on `acme/self-service-iac-platform` only. | GitHub rate limits. *M:* backoff, ETags, budget alarms. | App merges its own PRs. *M:* App has no `administration` permission; required human review. |
-| **GitHub Actions workflows** | Fork PR assumes AWS role. *M:* private repo, forking disabled; trust policy pins `repository_id` + `job_workflow_ref`; plan role only for PRs. | Malicious PR edits workflow to run apply. *M:* `job_workflow_ref` must be `@refs/heads/main` for apply; CODEOWNERS on `.github/**` = platform-security; workflows pinned actions by SHA. | — | Secrets in logs / plan output. *M:* `sensitive` outputs, `::add-mask::`, plan JSON redaction step before upload, no `TF_LOG` in CI. | Runner exhaustion. *M:* concurrency groups, path filters, timeouts (plan 20 min, apply 60 min). | PR changes modules to exfiltrate via plan (`external` data source, `local-exec`). *M:* TFLint/OPA deny `data.external`, `provisioner`, `http` data source with non-allowlisted hosts; plan role read-only with deny on data-plane reads. |
+| **GitHub Actions workflows** | Captured OIDC token replayed against the API. *M:* `jti` claimed once until `exp` + leeway in `oidc_jti` (shared by replicas); a second use is a 401. Fork PR assumes AWS role. *M:* private repo, forking disabled; trust policy pins `repository_id` + `job_workflow_ref`; plan role only for PRs. | Malicious PR edits workflow to run apply. *M:* `job_workflow_ref` must be `@refs/heads/main` for apply; CODEOWNERS on `.github/**` = platform-security; workflows pinned actions by SHA. | — | Secrets in logs / plan output. *M:* `sensitive` outputs, `::add-mask::`, plan JSON redaction step before upload, no `TF_LOG` in CI. | Runner exhaustion. *M:* concurrency groups, path filters, timeouts (plan 20 min, apply 60 min). | PR changes modules to exfiltrate via plan (`external` data source, `local-exec`). *M:* TFLint/OPA deny `data.external`, `provisioner`, `http` data source with non-allowlisted hosts; plan role read-only with deny on data-plane reads. |
 | **Terraform execution / workload accounts** | Role assumed outside pipeline. *M:* OIDC-only trust; EventBridge alert on `AssumeRole*` of `iacp-apply` without OIDC. | Console changes (drift). *M:* humans read-only via SSO; nightly drift; SCPs. | Who applied what. *M:* session name `apply-<run_id>-<stack_id>`, per-account CloudTrail trails → Object Lock archive. | Over-broad resource policies. *M:* OPA/Checkov (no public S3, no `*` principals), Access Analyzer. | Accidental mass destroy. *M:* OPA denies destroy of stateful resources in prod without explicit flag + maintainer; `prevent_destroy` in modules for data stores. | Created role with admin rights. *M:* `iacp-boundary` required by SCP and apply role; `iam:PassRole` restricted to `/iacp/` path. |
 | **State bucket** | Other principals read state. *M:* bucket policy per-env prefix, `aws:PrincipalOrgID`, KMS key policy with encryption-context per env. | State corruption / rollback attack. *M:* versioning, Object Ownership enforced, CRR, delete denied on `.tfstate`. | — | State contains secrets. *M:* SSE-KMS CMK, humans have no decrypt, modules use Secrets Manager refs / `manage_master_user_password`. | Lock contention. *M:* S3 lockfile + platform lock queue. | — |
 | **Module registry (git tags)** | Spoofed module source. *M:* modules only from `github.com/acme/self-service-iac-platform` (OPA + TFLint rule on `source`); tag protection rules on `modules/*/v*`. | Tag moved to malicious commit. *M:* tag protection; generator records tag→SHA and `apply.yml` verifies SHA; release only via `module-release.yml`. | Who released. *M:* release audit event + signed tags (gitsign). | — | — | Module adds IAM wildcard. *M:* module PR review by owners + security, Checkov on examples, OPA on every consumer plan. |
@@ -74,7 +74,7 @@ Review cadence: IAM Access Analyzer unused-access findings reviewed monthly; `ia
 | Control | Implementation |
 |---|---|
 | Actions pinned by SHA | Every `uses:` references a full 40-char commit SHA with a version comment, e.g. `actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2`, `aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2`. Org policy: "Allow select actions" allowlist; `pin-github-action` check in CI fails on tag refs. Dependabot updates SHAs via PR. |
-| Workflow integrity | `.github/**` CODEOWNERS = `@acme/platform-security`; `permissions: {}` at top, granted per job; `id-token: write` only on AWS/callback jobs; `pull_request` (not `pull_request_target`) for untrusted code. |
+| Workflow integrity | `.github/CODEOWNERS` is generated from `.github/teams.yaml` by `python -m tools.codeowners` (team stack roots `environments/<env>/<team>/` → `@acme/<team>`, per-environment overrides such as production → `@acme/<team>-maintainers`; platform owners on `modules/`, `policies/`, `.github/`); CI runs `--check` and fails on drift or on a stack whose team is not declared. The branch ruleset and Environment protection payloads live in `.github/rulesets/` and are applied by the repo owner with `gh api` (WBS 2.5). `.github/**` CODEOWNERS = `@acme/platform-security`; `permissions: {}` at top, granted per job; `id-token: write` only on AWS/callback jobs; `pull_request` (not `pull_request_target`) for untrusted code. |
 | Module ref pinning | Generated `source` always `?ref=modules/<name>/vX.Y.Z`; tag protection prevents move/delete; `iacp.stack.json` stores tag→SHA; `apply.yml` runs `git rev-parse` and fails on mismatch. OPA denies non-tag refs and non-`acme/self-service-iac-platform` sources. |
 | Provider lockfile | Each generated stack commits `.terraform.lock.hcl` produced by `terraform providers lock -platform=linux_amd64 -platform=linux_arm64 -platform=darwin_arm64`; CI runs `terraform init -lockfile=readonly`. Provider versions constrained by `module.yaml` ranges. |
 | Provider mirror | Optional: `provider_installation { network_mirror { url = "https://tf-mirror.iacp.acme.internal/" } }` backed by S3 for availability and vetting. |
@@ -98,10 +98,11 @@ policies/
 │   ├── iam.rego                       # iacp.iam         (Action "*", NotAction/NotResource, write or sensitive actions on all resources, admin managed policies)
 │   ├── placement.rego                 # iacp.placement   (allowed regions; instance sizes are planned)
 │   ├── forbidden.rego                 # iacp.forbidden   (pinned module source, force_destroy outside development, data external/http, provisioners)
+│   ├── modules.rego                   # iacp.modules     (module calls pinned to a yanked version, from the API context)
 │   ├── budget.rego                    # iacp.budget      (planned; input = infracost JSON)
 │   ├── prod_approval.rego             # iacp.approval    (planned; pre-apply gate)
 │   └── *_test.rego                    # opa test cases; CI gate: coverage >= 90 %
-├── fixtures/                          # sample plan JSONs + verify.sh (outside opa/: opa test loads JSON as data)
+├── fixtures/                          # sample plan JSONs, context.json / context-yanked.json + verify.sh (outside opa/: opa test loads JSON as data)
 └── checkov/
     ├── __init__.py                    # makes the dir loadable by --external-checks-dir policies/checkov
     ├── iacp_aws_001_required_tags.py  # IACP_AWS_001
@@ -137,6 +138,7 @@ conftest test infracost.json --policy policies/opa --data context.json --namespa
       "allowed_regions": ["us-east-1", "us-west-2"],
       "budget": { "limit_usd": 2000.0, "spent_usd": 1450.10, "hard_block": true },
       "budget_override": null,
+      "yanked_module_versions": [ { "module": "s3", "version": "1.1.0", "tag": "modules/s3/v1.1.0" } ],
       "exceptions": [
         { "rule_id": "iacp.encryption.sqs_kms", "resource_address": "module.legacy_queue.aws_sqs_queue.this",
           "expires_at": "2026-12-31T00:00:00Z" }
@@ -146,6 +148,8 @@ conftest test infracost.json --policy policies/opa --data context.json --namespa
   }
 }
 ```
+
+The API serves this document from `GET /v1/internal/budget-context` ([03 §6.9](03-data-model-and-api.md#69-pipeline-runs-actions-callbacks)) to `pr-validate.yml` and `apply.yml` (route class `budget_context`). Until the workflows call it (WBS 5.2/5.6), CI builds a reduced context from `iacp.stack.json` with `tools.stack_pipeline context`, which has no budget and no yanked versions.
 
 Rules emit `deny` (blocking) and `warn` (comment only). Each message is prefixed by a stable rule ID used by exceptions and metrics.
 
@@ -513,7 +517,18 @@ Implemented in `policies/opa/forbidden.rego` (none of these can be waived):
 
 The data-source and provisioner rules read `configuration` rather than `resource_changes`, so a data source that is fully known at plan time (and therefore absent from `resource_changes`) is still caught. Denying `null_resource` / `terraform_data` outright is planned but not enforced; such resources only become dangerous with a provisioner, which is denied.
 
-Policy tests (`opa test policies/opa -v --coverage`) run in `ci.yml` on every PR and push to `main`; the coverage gate is 90 % (currently about 99.9 %). `policies/fixtures/verify.sh` runs conftest with a stack context against a compliant plan (no denies or warnings allowed) and a non-compliant plan that must trip every deny and warn rule ID.
+#### Yanked module versions
+
+Implemented in `policies/opa/modules.rego` from `data.iacp.context.yanked_module_versions`:
+
+| Rule ID | Effect |
+|---------|--------|
+| `iacp.modules.yanked` (deny) | a root module call pinned (`?ref=modules/<name>/vX.Y.Z`) to a yanked version while the plan creates or updates resources inside that module (nested modules and instance keys included) |
+| `iacp.modules.yanked_pinned` (warn) | the same pin when the plan leaves the module untouched or only destroys it: plans and destroys on a yanked version keep working ([06 §2](06-lifecycle-management.md)), but the stack should take the upgrade request |
+
+Without the API context nothing is listed as yanked, so the rule is inert. The deny can be waived with a time-boxed exception for `module.<name>`.
+
+Policy tests (`opa test policies/opa -v --coverage`) run in `ci.yml` on every PR and push to `main`; the coverage gate is 90 % (currently about 99.9 %). `policies/fixtures/verify.sh` runs conftest with a stack context against a compliant plan (no denies or warnings allowed) and a non-compliant plan that must trip every deny and warn rule ID, then reruns the compliant plan with `context-yanked.json` (its pinned `modules/s3/v1.2.0` listed as yanked), which must be denied by `iacp.modules.yanked` alone.
 
 ### 6.10 Custom Checkov checks
 

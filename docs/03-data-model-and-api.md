@@ -43,6 +43,7 @@ Related: [01-system-architecture.md](01-system-architecture.md) · [04-module-re
 | `locks` | Platform-level per-stack mutation lock with fencing token. | stack, request |
 | `audit_events` | Append-only, hash-chained log of every action. | actor, subject |
 | `webhook_deliveries` | De-duplication of GitHub webhook deliveries. | |
+| `oidc_jti` | GitHub OIDC token ids already used, kept until `exp` + leeway (replay protection, shared by replicas). | |
 | `idempotency_keys` | Stored responses for idempotent POSTs. | user |
 | `outbox` | Transactional outbox for side effects published to SQS. | request / stack |
 
@@ -371,6 +372,14 @@ CREATE TABLE webhook_deliveries (
 );
 CREATE INDEX webhook_deliveries_received_idx ON webhook_deliveries (received_at);  -- purge > 7 days
 
+-- Replay protection for GitHub OIDC tokens (migration 0006). iacp_app: SELECT, INSERT, DELETE (no UPDATE).
+CREATE TABLE oidc_jti (
+    jti        text        PRIMARY KEY CHECK (length(jti) BETWEEN 1 AND 128),
+    expires_at timestamptz NOT NULL,           -- token exp + verifier leeway
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX oidc_jti_expiry_idx ON oidc_jti (expires_at);                       -- expired rows purged on each claim
+
 CREATE TABLE idempotency_keys (
     user_id        uuid        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     key            text        NOT NULL CHECK (length(key) BETWEEN 8 AND 128),
@@ -577,6 +586,7 @@ stateDiagram-v2
 - **Rate limits:** 600 req/min per user, 60 req/min for `POST /requests`; headers `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`.
 - **Correlation:** `X-Request-Id` echoed/generated; appears in logs and audit events.
 - **Versioning:** URI major version (`/v1`); additive changes only within a major.
+- **Metrics:** `GET /metrics` (outside `/v1`) serves Prometheus text format: `iacp_http_requests_total` and `iacp_http_request_duration_seconds` labelled by method, **chi route pattern** (never the raw path; unmatched paths share `route="unmatched"`) and status, plus `iacp_db_pool_connections{state}`. It shares the API listener and answers only direct loopback peers (no `Forwarded` / `X-Forwarded-*` headers) or callers presenting `IACP_METRICS_TOKEN`; anything else gets `403 metrics_forbidden`.
 
 ## 6. REST API reference
 
@@ -874,7 +884,7 @@ Called only by GitHub Actions jobs with `Authorization: Bearer <GitHub OIDC JWT>
 |---|---|---|---|
 | POST | `/runs` | `pr-validate.yml`, `apply.yml`, `ttl-reaper.yml` | Report run status and stage results (validating, plan summary, policy, cost, apply outcome, outputs). Creates/updates `pipeline_runs`, `plan_summaries`, `cost_estimates`. |
 | GET | `/internal/requests/by-path?stack_path=&head_sha=` | `apply.yml` (before `terraform init`) | Confirms the per-stack lock row for the merge commit; returns `request_short_id`, `approved_plan_hash`, `fencing_token`, approvals (for the pre-apply OPA gate). `409 stack_locked` → job waits/retries. |
-| GET | `/internal/budget-context?stack_path=` | `pr-validate.yml`, `apply.yml` | OPA input: environment, team, allowed regions, budget (`limit_usd`, `spent_usd`, active override), approved policy exceptions. |
+| GET | `/internal/budget-context?stack_path=` | `pr-validate.yml`, `apply.yml` | OPA input (`conftest --data`): environment, team, allowed regions, budget (`limit_usd`, `spent_usd`, active override), approved policy exceptions, yanked module versions. |
 | POST | `/drift` | `drift.yml` | Drift result per stack (see [6.6](#66-drift)). |
 | POST | `/internal/catalog/index` | `module-release.yml` | Index a released module version (see [6.2](#62-catalog-modules-and-versions)). |
 | GET | `/internal/stacks/{id}/lock` | worker, `apply.yml` | Current platform lock: `stack_id`, `request_id`, `holder`, `fencing_token`, `acquired_at`, `expires_at`; `404` when unlocked. |
@@ -884,15 +894,16 @@ Called only by GitHub Actions jobs with `Authorization: Bearer <GitHub OIDC JWT>
 
 Machine endpoints accept the GitHub OIDC JWT, and, as a fallback while workflows migrate, the shared `IACP_INTERNAL_TOKEN`. Neither configured means every call is rejected.
 
-Verification order: JWKS signature (RS256 only; https JWKS endpoint, redirects never followed) → `iss == https://token.actions.githubusercontent.com` → `aud` → `exp`/`nbf`/`iat` (30 s leeway) → `repository`, `repository_owner` and, when `IACP_OIDC_REPOSITORY_ID` is configured (required in production), `repository_id == 87654321` → `ref` and `job_workflow_ref` in the global allowlist (`403 workflow_not_allowed`) → the **route class** policy below → for `/runs`, the per-pipeline rules: the report's `run_id` + `run_attempt` and `head_sha` equal the token's `run_id`, `run_attempt` and `sha` (`403 run_mismatch`) → fencing token current. Replays rejected via `jti` cache (1 h) — not implemented yet.
+Verification order: JWKS signature (RS256 only; https JWKS endpoint, redirects never followed) → `iss == https://token.actions.githubusercontent.com` → `aud` → `exp`/`nbf`/`iat` (30 s leeway) → `repository`, `repository_owner` and, when `IACP_OIDC_REPOSITORY_ID` is configured (required in production), `repository_id == 87654321` → `ref` and `job_workflow_ref` in the global allowlist (`403 workflow_not_allowed`) → the **route class** policy below → for `/runs`, the per-pipeline rules: the report's `run_id` + `run_attempt` and `head_sha` equal the token's `run_id`, `run_attempt` and `sha` (`403 run_mismatch`) → fencing token current. Replays: after every check above, the token's `jti` is claimed until its `exp` plus the leeway; a second use in that window gets the generic `401` (workflows request a fresh token per call). The claim is a primary-key insert into `oidc_jti`, atomic across replicas; `IACP_OIDC_REPLAY_STORE=memory` swaps in a bounded per-process cache for single-instance setups. A token without `jti` is rejected.
 
-Route classes (`backend/internal/auth/routes.go`, pure table enforced by middleware). A pull-request token (`pr-validate.yml` on `refs/pull/*/merge`, whose workflow file the PR author controls) can only reach `/runs`. Callers using the shared internal token are not workflow-scoped.
+Route classes (`backend/internal/auth/routes.go`, pure table enforced by middleware). A pull-request token (`pr-validate.yml` on `refs/pull/*/merge`, whose workflow file the PR author controls) can only reach `/runs` and the read-only budget context. Callers using the shared internal token are not workflow-scoped.
 
 | Route class | Routes | Workflow files | Ref | `event_name` |
 |---|---|---|---|---|
 | locks | `/internal/stacks/{id}/lock*` | `apply.yml`, `ttl-reaper.yml` | `refs/heads/main` (ref and workflow definition) | `push`, `workflow_dispatch`, `schedule` |
 | catalog_index | `/internal/catalog/index` | `module-release.yml` | `refs/heads/main` | `push`, `workflow_dispatch` |
 | runs | `/runs` | `pr-validate.yml`, `apply.yml`, `drift.yml`, `ttl-reaper.yml` | per pipeline | `pull_request`, `push`, `workflow_dispatch`, `schedule` |
+| budget_context | `/internal/budget-context` (read-only) | `pr-validate.yml`, `apply.yml` | global allow-list (PR merge ref for `pr-validate.yml`, main otherwise) | `pull_request`, `push`, `workflow_dispatch` |
 
 Per pipeline on `/runs`: `validate` ← `pr-validate.yml` on `pull_request`; `apply` ← `apply.yml` on main via `push`/`workflow_dispatch`; `drift` ← `drift.yml` on main via `schedule`/`workflow_dispatch`; `ttl_destroy` ← `ttl-reaper.yml` on main via `schedule`/`workflow_dispatch`. `pull_request_target` and `workflow_run` never qualify.
 
@@ -939,6 +950,25 @@ Apply callback adds `"outputs": {...}` (sensitive outputs replaced with `"<sensi
 Response `200 {"accepted": true, "run_id": "…", "run_status": "succeeded", "request_status": "plan_ready"}`; `409 stale_fencing_token` aborts the job.
 
 Current implementation (WBS 4.10): `pipeline` is one of `validate`, `apply`, `drift`, `ttl_destroy`; `status` is `in_progress`, `passed`, `failed` or `cancelled`. `fencing_token` and `request_short_id` are required except for `drift`; `github.head_sha` must be the job's `github.sha`. Each report is recorded in `pipeline_runs.stages` (one row per run id, attempt and stack): a report for a stage already recorded replaces that entry, so retried calls are idempotent, and a run records at most 32 distinct stages (`422 too_many_stages`). A `passed` `summary` stage finishes the run as `succeeded`, a `failed`/`cancelled` stage finishes it as such, and a finished run keeps its status. The report transaction locks the `stacks` row (`FOR KEY SHARE`) before reading the lock, the same order as the lock operations, so reports never deadlock with release or promotion. `request_status` is the request's status as stored; the transitions driven by reports, `plan_summaries` and `cost_estimates` arrive with WBS 5.2/5.3.
+
+`GET /v1/internal/budget-context?stack_path=environments/development/payments/order-events` (pr-validate) → `200`. The body is the conftest `--data` file, read by the policies as `data.iacp.context` ([07 §6.1](07-security-and-policy.md#61-layout-and-evaluation)). Everything is derived from the path, so it also works for a stack the PR is creating. `budget` is the team's row for the current UTC month, the environment-specific row winning over a team-wide one (`scope`), or `null` when none is set; `spent_usd` stays `0` until cost estimates are recorded (WBS 8.5). `budget_override` is `null` and `exceptions` is `[]` until those tables exist. `yanked_module_versions` lists every yanked version, including all versions of a yanked module. `stack=` is accepted as an alias. Errors: `422 invalid_stack_path`, `404 environment_not_found`.
+
+```json
+{
+  "iacp": {
+    "context": {
+      "environment": "development", "team": "payments", "stack": "order-events",
+      "stack_path": "environments/development/payments/order-events",
+      "allowed_regions": ["us-east-1"],
+      "budget": { "month": "2026-11", "limit_usd": 2000.0, "spent_usd": 0, "hard_block": true, "scope": "environment" },
+      "budget_override": null,
+      "exceptions": [],
+      "yanked_module_versions": [ { "module": "s3", "version": "1.1.0", "tag": "modules/s3/v1.1.0" } ],
+      "now": "2026-11-24T10:05:00Z"
+    }
+  }
+}
+```
 
 ### 6.10 GitHub webhooks
 
@@ -1047,7 +1077,7 @@ backend/
 │   ├── notify/                  # Slack, email
 │   ├── queue/                   # SQS producer/consumer, message envelopes, retry/backoff
 │   ├── worker/                  # consumer loop, handlers registry, reconciler
-│   └── observability/           # slog JSON logger, EMF metrics, OTel tracing
+│   └── observability/           # slog JSON logger, Prometheus /metrics (EMF later), OTel tracing
 ├── pkg/
 │   └── iacpclient/           # generated Go client (used by CLI and tests)
 ├── Dockerfile                   # distroless static, non-root
