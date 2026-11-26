@@ -63,36 +63,66 @@ type StatusSnapshot struct {
 // Any team role may; platform admins hold the admin role. Pure.
 func CanView(role Role) bool { return role.AtLeast(RoleViewer) }
 
-// authorizeView loads the request and checks that by is a user with a role in its team.
-// A caller who may not see it gets the same not-found as a request that does not exist.
-func (s *Service) authorizeView(ctx context.Context, by identity.Principal, id uuid.UUID) (*Request, error) {
+// RequestViewer decides which requests a caller may see, from identity.Visibility
+// (requests.Access): the same helper behind GET /v1/requests and GET /v1/stacks, so one
+// caller sees the same set on every route, dev mode's platform admin included.
+type RequestViewer interface {
+	Visible(ctx context.Context, p identity.Principal) (identity.Visibility, error)
+	CanView(ctx context.Context, v identity.Visibility, id uuid.UUID) (bool, error)
+}
+
+// WithAccess makes the status feed authorize through the shared visibility helper. Without
+// it the feed falls back to the caller's role in the request's team (RoleInTeam), which
+// ignores the principal's platform-admin flag; the server always sets it.
+func (s *Service) WithAccess(a RequestViewer) *Service {
+	s.access = a
+	return s
+}
+
+// authorizeView checks that by may see the request. A caller who may not gets the same
+// not-found as a request that does not exist.
+func (s *Service) authorizeView(ctx context.Context, by identity.Principal, id uuid.UUID) error {
 	notFound := apperr.NotFound("request %s not found", id)
 	if by.UserID == uuid.Nil {
-		return nil, notFound
+		return notFound
+	}
+	if s.access != nil {
+		v, err := s.access.Visible(ctx, by)
+		if err != nil {
+			return fmt.Errorf("resolve visible teams: %w", err)
+		}
+		ok, err := s.access.CanView(ctx, v, id)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return notFound
+		}
+		return nil
 	}
 	req, err := s.repo.Get(ctx, id)
 	if err != nil {
-		return nil, fmt.Errorf("get request %s: %w", id, err)
+		return fmt.Errorf("get request %s: %w", id, err)
 	}
 	team, ok := TeamFromStackPath(req.Stack.Path)
 	if !ok {
-		return nil, fmt.Errorf("request %s has a stack path without a team: %q", id, req.Stack.Path)
+		return fmt.Errorf("request %s has a stack path without a team: %q", id, req.Stack.Path)
 	}
 	role, err := s.members.RoleInTeam(ctx, team, by.UserID)
 	if apperr.IsKind(err, apperr.KindNotFound) || (err == nil && !CanView(role)) {
-		return nil, notFound
+		return notFound
 	}
 	if err != nil {
-		return nil, fmt.Errorf("lookup membership of team %s: %w", team, err)
+		return fmt.Errorf("lookup membership of team %s: %w", team, err)
 	}
-	return req, nil
+	return nil
 }
 
 // StatusSnapshot authorizes by for the request and returns its current state with the
 // feed position to resume from. The position is read before the request, so a change that
 // commits in between is replayed by the feed rather than lost.
 func (s *Service) StatusSnapshot(ctx context.Context, by identity.Principal, id uuid.UUID) (StatusSnapshot, error) {
-	if _, err := s.authorizeView(ctx, by, id); err != nil {
+	if err := s.authorizeView(ctx, by, id); err != nil {
 		return StatusSnapshot{}, err
 	}
 	seq, err := s.repo.LatestStatusSeq(ctx, id)
@@ -109,7 +139,7 @@ func (s *Service) StatusSnapshot(ctx context.Context, by identity.Principal, id 
 // StatusEventsAfter authorizes by again (membership can change while a stream is open)
 // and returns up to limit status events with Seq > after, oldest first.
 func (s *Service) StatusEventsAfter(ctx context.Context, by identity.Principal, id uuid.UUID, after int64, limit int) ([]StatusEvent, error) {
-	if _, err := s.authorizeView(ctx, by, id); err != nil {
+	if err := s.authorizeView(ctx, by, id); err != nil {
 		return nil, err
 	}
 	events, err := s.repo.StatusEventsAfter(ctx, id, after, limit)

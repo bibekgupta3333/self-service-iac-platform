@@ -64,6 +64,49 @@ func TestParseStatusEvent(t *testing.T) {
 	}
 }
 
+// fakeViewer is a RequestViewer with a fixed answer.
+type fakeViewer struct {
+	v   identity.Visibility
+	ok  bool
+	err error
+}
+
+func (f fakeViewer) Visible(context.Context, identity.Principal) (identity.Visibility, error) {
+	return f.v, f.err
+}
+
+func (f fakeViewer) CanView(context.Context, identity.Visibility, uuid.UUID) (bool, error) {
+	return f.ok, f.err
+}
+
+// With the shared visibility helper the feed ignores memberships: what the helper says wins,
+// so a platform admin without a membership row (dev mode) is served and a member the helper
+// does not list is not.
+func TestStatusFeedUsesTheSharedVisibility(t *testing.T) {
+	repo := newMemRepo()
+	res, err := newSvc(repo, fakeVersions{}).Create(context.Background(), dev, createCmd(validInput(), "key-vis-000001"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, ctx := res.Request.ID, context.Background()
+
+	admin := newSvcWithMembers(repo, fakeVersions{}, fakeMembers{}).WithAccess(fakeViewer{v: identity.Visibility{All: true}, ok: true})
+	if _, err := admin.StatusSnapshot(ctx, dev, id); err != nil {
+		t.Fatalf("a caller the helper lets see it: %v", err)
+	}
+	if _, err := admin.StatusEventsAfter(ctx, dev, id, 0, 10); err != nil {
+		t.Fatal(err)
+	}
+	member := newSvcWithMembers(repo, fakeVersions{}, fakeMembers{dev.UserID: RoleAdmin}).WithAccess(fakeViewer{ok: false})
+	if _, err := member.StatusSnapshot(ctx, dev, id); !apperr.IsKind(err, apperr.KindNotFound) {
+		t.Fatalf("a caller the helper hides: %v", err)
+	}
+	broken := newSvcWithMembers(repo, fakeVersions{}, fakeMembers{}).WithAccess(fakeViewer{err: context.DeadlineExceeded})
+	if _, err := broken.StatusEventsAfter(ctx, dev, id, 0, 10); err == nil || apperr.IsKind(err, apperr.KindNotFound) {
+		t.Fatalf("a lookup failure must not look like not-found: %v", err)
+	}
+}
+
 func TestCanView(t *testing.T) {
 	for role, want := range map[Role]bool{RoleNone: false, RoleViewer: true, RoleDeveloper: true, RoleMaintainer: true,
 		RoleAdmin: true, Role("bogus"): false} {

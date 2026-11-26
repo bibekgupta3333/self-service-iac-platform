@@ -181,6 +181,8 @@ type Service struct {
 	ids      platform.IDGenerator
 	// publishing enqueues request.publish jobs for requests holding the stack lock.
 	publishing bool
+	// access scopes the status feed to the caller's visible teams (WithAccess).
+	access RequestViewer
 }
 
 // Memberships resolves a user's role in a team (users.is_platform_admin counts as admin).

@@ -25,7 +25,7 @@ func TestVisibilityAndFilters(t *testing.T) {
 			VALUES ($1, $2, $3, CASE WHEN $4 THEN now() END) RETURNING id`, gh, login, admin, disabled).Scan(&id); err != nil {
 			t.Fatal(err)
 		}
-		return identity.Principal{UserID: id, Login: login, Type: identity.ActorUser}
+		return identity.Principal{UserID: id, Login: login, Type: identity.ActorUser, PlatformAdmin: admin}
 	}
 	c := cast{user(1, "pay", false, false), user(2, "sea", false, false), user(3, "root", true, false),
 		user(4, "gone", false, true), user(5, "nobody", false, false)}
@@ -72,7 +72,7 @@ func TestVisibilityAndFilters(t *testing.T) {
 		}
 	}
 
-	svc := NewService(NewPostgresRepository(pool))
+	svc := NewService(NewPostgresRepository(pool), identity.NewUserStore(pool))
 	ids := func(p identity.Principal, q Query) []uuid.UUID {
 		t.Helper()
 		rows, _, err := svc.List(ctx, p, q)

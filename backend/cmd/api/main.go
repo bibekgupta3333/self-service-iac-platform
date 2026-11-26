@@ -83,6 +83,9 @@ func run() error {
 	requestRepo := requests.NewPostgresRepository(pool, auditWriter)
 	lockSvc := locks.NewService(locks.NewPostgresRepository(pool, auditWriter), clock, locks.DefaultLease)
 	requestSvc := requests.NewService(requestRepo, catalogSvc, requestRepo, lockSvc, clock, ids)
+	users := identity.NewUserStore(pool)
+	access := requests.NewAccess(pool, users)
+	requestSvc.WithAccess(access) // the status stream sees the same teams as GET /v1/requests
 
 	pub, err := newPublisher(ctx, cfg, clock)
 	if err != nil {
@@ -130,9 +133,9 @@ func run() error {
 		Ready:    pool,
 		Catalog:  httpapi.NewCatalogHandler(catalogSvc),
 		Public: []httpapi.RouteRegistrar{
-			httpapi.NewRequestHandler(requestSvc, requests.NewAccess(pool, identity.NewUserStore(pool))),
+			httpapi.NewRequestHandler(requestSvc, access),
 			httpapi.NewRequestEventsHandler(requestSvc, httpapi.StreamOptions{Stop: ctx.Done(), Session: ua.Streams}),
-			httpapi.NewStackHandler(stacks.NewService(stacks.NewPostgresRepository(pool))),
+			httpapi.NewStackHandler(stacks.NewService(stacks.NewPostgresRepository(pool), users)),
 			httpapi.NewAuditHandler(audit.NewVerifier(pool)),
 			ua.Handler,
 		},

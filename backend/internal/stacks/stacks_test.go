@@ -53,7 +53,7 @@ func (f *fakeRepo) List(_ context.Context, flt Filter) ([]Stack, error) {
 	return f.rows[:min(flt.Limit, len(f.rows))], nil
 }
 
-func (f *fakeRepo) Get(_ context.Context, _, id uuid.UUID) (Stack, error) {
+func (f *fakeRepo) Get(_ context.Context, _ identity.Visibility, id uuid.UUID) (Stack, error) {
 	for _, s := range f.rows {
 		if s.ID == id {
 			return s, nil
@@ -61,6 +61,18 @@ func (f *fakeRepo) Get(_ context.Context, _, id uuid.UUID) (Stack, error) {
 	}
 	return Stack{}, apperr.NotFound("stack %s not found", id)
 }
+
+// fakeTeams returns a fixed visibility, or an error.
+type fakeTeams struct {
+	v   identity.Visibility
+	err error
+}
+
+func (f fakeTeams) VisibleTeams(context.Context, identity.Principal) (identity.Visibility, error) {
+	return f.v, f.err
+}
+
+var team1 = uuid.MustParse("11111111-1111-1111-1111-111111111111")
 
 var user = identity.Principal{UserID: uuid.MustParse("33333333-3333-3333-3333-333333333333"), Type: identity.ActorUser}
 
@@ -71,14 +83,14 @@ func TestListPaginatesAndScopesToTheViewer(t *testing.T) {
 		rows = append(rows, Stack{ID: uuid.New(), Name: "s", CreatedAt: at.Add(-time.Duration(i) * time.Minute)})
 	}
 	repo := &fakeRepo{rows: rows}
-	svc := NewService(repo)
+	svc := NewService(repo, fakeTeams{v: identity.Visibility{TeamIDs: []uuid.UUID{team1}}})
 
 	page, next, err := svc.List(context.Background(), user, Query{Limit: 2, Team: "payments"})
 	if err != nil || len(page) != 2 || next == nil || next.ID != rows[1].ID || !next.CreatedAt.Equal(rows[1].CreatedAt) {
 		t.Fatalf("page = %d, next = %+v, err = %v", len(page), next, err)
 	}
-	if f := repo.filters[0]; f.Viewer != user.UserID || f.Limit != 3 || f.Team != "payments" {
-		t.Fatalf("the repository must get the viewer and limit+1: %+v", f)
+	if f := repo.filters[0]; f.Visibility.All || len(f.Visibility.TeamIDs) != 1 || f.Visibility.TeamIDs[0] != team1 || f.Limit != 3 || f.Team != "payments" {
+		t.Fatalf("the repository must get the visibility and limit+1: %+v", f)
 	}
 	if page, next, err = svc.List(context.Background(), user, Query{Limit: 5}); err != nil || len(page) != 5 || next != nil {
 		t.Fatalf("last page: %d, %+v, %v", len(page), next, err)
@@ -86,7 +98,7 @@ func TestListPaginatesAndScopesToTheViewer(t *testing.T) {
 }
 
 func TestOnlyUsersSeeStacks(t *testing.T) {
-	svc := NewService(&fakeRepo{})
+	svc := NewService(&fakeRepo{}, fakeTeams{v: identity.Visibility{All: true}})
 	machine := identity.Principal{Login: "apply.yml", Type: identity.ActorGitHubActions}
 	if _, _, err := svc.List(context.Background(), machine, Query{}); !apperr.IsKind(err, apperr.KindUnauthenticated) {
 		t.Fatalf("list: %v", err)
@@ -96,5 +108,15 @@ func TestOnlyUsersSeeStacks(t *testing.T) {
 	}
 	if _, err := svc.Get(context.Background(), user, uuid.New()); !apperr.IsKind(err, apperr.KindNotFound) {
 		t.Fatalf("an unknown or hidden stack is not found: %v", err)
+	}
+}
+
+func TestAVisibilityFailureIsNotAnEmptyList(t *testing.T) {
+	svc := NewService(&fakeRepo{rows: []Stack{{ID: uuid.New()}}}, fakeTeams{err: context.DeadlineExceeded})
+	if _, _, err := svc.List(context.Background(), user, Query{}); err == nil || apperr.IsKind(err, apperr.KindNotFound) {
+		t.Fatalf("list: %v", err)
+	}
+	if _, err := svc.Get(context.Background(), user, uuid.New()); err == nil {
+		t.Fatal("get must fail when visibility cannot be resolved")
 	}
 }
