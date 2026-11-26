@@ -31,6 +31,9 @@ type userAuth struct {
 	Public  []httpapi.RouteRegistrar
 	Roles   httpapi.RoleLookup
 	Denials httpapi.EventRecorder
+	// Proxies are the trusted reverse proxies (IACP_TRUSTED_PROXIES); the router uses them
+	// too, so every audited client address follows one rule.
+	Proxies httpapi.TrustedProxies
 	// Streams lets open event streams notice that their session ended (github mode only).
 	Streams httpapi.StreamSession
 }
@@ -42,7 +45,11 @@ func newUserAuth(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, clo
 	auditWriter *audit.Writer, logger *slog.Logger) (userAuth, error) {
 	users := identity.NewUserStore(pool)
 	recorder := audit.NewRecorder(db.NewTxRunner(pool), auditWriter)
-	out := userAuth{Roles: users, Denials: recorder}
+	proxies, err := httpapi.ParseTrustedProxies(cfg.TrustedProxies)
+	if err != nil {
+		return userAuth{}, fmt.Errorf("IACP_TRUSTED_PROXIES: %w", err)
+	}
+	out := userAuth{Roles: users, Denials: recorder, Proxies: proxies}
 
 	switch cfg.AuthMode {
 	case config.AuthModeDev:
@@ -53,7 +60,7 @@ func newUserAuth(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, clo
 		p.PlatformAdmin = true
 		slog.Warn("dev authentication enabled: every caller acts as the local user", "login", p.Login)
 		out.Authenticator = httpapi.DevAuthenticator{Principal: p}
-		out.Handler = &httpapi.AuthHandler{Profiles: users, Mode: string(config.AuthModeDev)}
+		out.Handler = &httpapi.AuthHandler{Profiles: users, Mode: string(config.AuthModeDev), Proxies: proxies}
 		return out, nil
 
 	case config.AuthModeGitHub:
@@ -79,7 +86,7 @@ func newUserAuth(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, clo
 		sessionAuth := httpapi.NewSessionAuthenticator(sessions, g.SecureCookies())
 		out.Authenticator, out.Streams = sessionAuth, sessionAuth
 		out.Handler = &httpapi.AuthHandler{Login: login, Sessions: sessions, Profiles: users, Audit: recorder,
-			Secure: g.SecureCookies(), Mode: string(config.AuthModeGitHub),
+			Secure: g.SecureCookies(), Mode: string(config.AuthModeGitHub), Proxies: proxies,
 			LoginLimiter: ratelimit.New(loginsPerMinute, time.Minute, 10_000, clock)}
 		out.Public = []httpapi.RouteRegistrar{out.Handler.Public()}
 		go sweepAuth(ctx, sessions, states, clock, logger)

@@ -60,6 +60,9 @@ type Deps struct {
 	DenialAudit EventRecorder
 	// DenialLimiter bounds denial audit events per user (nil: DenialAuditPerMinute).
 	DenialLimiter *ratelimit.Limiter
+	// TrustedProxies are the reverse proxies whose X-Forwarded-For is believed when the
+	// client address is audited (IACP_TRUSTED_PROXIES); the zero value trusts none.
+	TrustedProxies TrustedProxies
 }
 
 // MetricsSource records requests and serves the exposition (observability.Metrics).
@@ -149,7 +152,7 @@ func NewRouter(d Deps) http.Handler {
 		v1.Group(func(user chi.Router) {
 			user.Use(requireAuth(d.Auth))
 			if d.DenialAudit != nil {
-				user.Use(auditDenials(d.DenialAudit, d.DenialLimiter))
+				user.Use(auditDenials(d.DenialAudit, d.DenialLimiter, d.TrustedProxies))
 			}
 			user.Use(authorize(d.Policies, d.Roles))
 			if d.Catalog != nil {

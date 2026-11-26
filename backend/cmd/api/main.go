@@ -143,6 +143,7 @@ func run() error {
 		Policies:       httpapi.DefaultPolicies(),
 		Roles:          ua.Roles,
 		DenialAudit:    ua.Denials,
+		TrustedProxies: ua.Proxies,
 		InternalHandlers: []httpapi.RouteRegistrar{
 			httpapi.NewLockHandler(lockSvc),
 			httpapi.NewRequestLookupHandler(requestSvc),
