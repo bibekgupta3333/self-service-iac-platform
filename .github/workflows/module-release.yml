@@ -38,6 +38,10 @@ concurrency:
 env:
   PYTHON_VERSION: "3.12"
 
+defaults:
+  run:
+    shell: bash # bash --noprofile --norc -eo pipefail {0}: a failing command in a pipeline fails the step
+
 jobs:
   detect:
     name: detect changed modules
