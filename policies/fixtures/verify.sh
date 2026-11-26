@@ -15,8 +15,16 @@ policy="$here/../opa"
 context="$here/context.json"
 
 expected_denies=(
+  iacp.ecr.immutable_tags
+  iacp.ecr.scan_on_push
   iacp.encryption.dynamodb_cmk
+  iacp.encryption.ecr_kms
+  iacp.encryption.elasticache_at_rest
+  iacp.encryption.elasticache_cmk
+  iacp.encryption.elasticache_transit
   iacp.encryption.kms_rotation
+  iacp.encryption.rds_cmk
+  iacp.encryption.rds_storage
   iacp.encryption.s3_cmk
   iacp.encryption.s3_kms
   iacp.encryption.sns_kms
@@ -31,6 +39,8 @@ expected_denies=(
   iacp.iam.not_resource
   iacp.iam.wildcard_action
   iacp.iam.wildcard_resource
+  iacp.network.ecs_public_ip
+  iacp.network.rds_public
   iacp.placement.region
   iacp.placement.region_missing
   iacp.s3.no_public

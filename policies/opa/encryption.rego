@@ -3,7 +3,11 @@
 # description: |
 #   S3 buckets must use SSE-KMS, and SQS queues and SNS topics must be
 #   encrypted; outside development all three need a customer-managed key (not
-#   alias/aws/*), and so do DynamoDB tables. KMS keys must rotate.
+#   alias/aws/*), and so do DynamoDB tables. RDS storage and ElastiCache data
+#   must be encrypted at rest (with a customer-managed key outside
+#   development), ElastiCache must require TLS in transit, and ECR
+#   repositories outside development must use KMS with a customer-managed key.
+#   KMS keys must rotate.
 package iacp.encryption
 
 import data.lib.iacp as f
@@ -127,6 +131,118 @@ deny contains m if {
 		"iacp.encryption.sqs_kms", q.address,
 		sprintf("queue in environment %q is not encrypted with a customer-managed KMS key", [f.environment_of(q)]),
 		"set kms_master_key_id to a customer-managed key; SQS-managed SSE and alias/aws/sqs are only allowed in development",
+	)
+}
+
+# --- RDS ---------------------------------------------------------------------
+
+rds_types := {"aws_db_instance", "aws_rds_cluster"}
+
+rds_storage contains db if {
+	some db in f.changed
+	db.type in rds_types
+}
+
+# configured_cmk(rc): rc's kms_key_id is a customer-managed key, or is computed
+# at apply time from a configured expression (a key created in the same plan).
+# RDS also reports kms_key_id as computed when it is omitted (AWS then picks
+# aws/rds), so an unknown value only counts when the configuration sets it.
+configured_cmk(rc) if customer_managed_key(object.get(f.after(rc), "kms_key_id", null))
+
+configured_cmk(rc) if {
+	unknown_at(rc, ["kms_key_id"])
+	f.config_expr(rc, "kms_key_id") != {}
+}
+
+deny contains m if {
+	some db in rds_storage
+	not f.flag(db, "storage_encrypted")
+	not f.exempt("iacp.encryption.rds_storage", db.address)
+	m := f.msg(
+		"iacp.encryption.rds_storage", db.address,
+		"database storage is not encrypted",
+		"set storage_encrypted = true with kms_key_id set to a customer-managed key (the postgres module does this)",
+	)
+}
+
+deny contains m if {
+	some db in rds_storage
+	f.environment_of(db) != "development"
+	f.flag(db, "storage_encrypted")
+	not configured_cmk(db)
+	not f.exempt("iacp.encryption.rds_cmk", db.address)
+	m := f.msg(
+		"iacp.encryption.rds_cmk", db.address,
+		sprintf("database in environment %q is encrypted with the AWS-managed aws/rds key", [f.environment_of(db)]),
+		"set kms_key_id to a customer-managed KMS key",
+	)
+}
+
+# --- ElastiCache ---------------------------------------------------------------
+
+deny contains m if {
+	some rg in f.changed_of_type("aws_elasticache_replication_group")
+	not f.flag(rg, "at_rest_encryption_enabled")
+	not f.exempt("iacp.encryption.elasticache_at_rest", rg.address)
+	m := f.msg(
+		"iacp.encryption.elasticache_at_rest", rg.address,
+		"cache data is not encrypted at rest",
+		"set at_rest_encryption_enabled = true with kms_key_id set to a customer-managed key (the redis module does this)",
+	)
+}
+
+deny contains m if {
+	some rg in f.changed_of_type("aws_elasticache_replication_group")
+	f.environment_of(rg) != "development"
+	f.flag(rg, "at_rest_encryption_enabled")
+	not configured_cmk(rg)
+	not f.exempt("iacp.encryption.elasticache_cmk", rg.address)
+	m := f.msg(
+		"iacp.encryption.elasticache_cmk", rg.address,
+		sprintf("cache in environment %q is encrypted with the AWS-managed key", [f.environment_of(rg)]),
+		"set kms_key_id to a customer-managed KMS key",
+	)
+}
+
+deny contains m if {
+	some rg in f.changed_of_type("aws_elasticache_replication_group")
+	not f.flag(rg, "transit_encryption_enabled")
+	not f.exempt("iacp.encryption.elasticache_transit", rg.address)
+	m := f.msg(
+		"iacp.encryption.elasticache_transit", rg.address,
+		"cache accepts connections without TLS",
+		`set transit_encryption_enabled = true (and transit_encryption_mode = "required")`,
+	)
+}
+
+# --- ECR -----------------------------------------------------------------------
+
+# ecr_cmk(repo): KMS encryption with a customer-managed kms_key. KMS without a
+# kms_key means the AWS-managed aws/ecr key, which the provider reports as
+# computed, so an unknown kms_key only counts when the configuration sets it.
+ecr_cmk(repo) if {
+	some c in f.after(repo).encryption_configuration
+	c.encryption_type == "KMS"
+	customer_managed_key(object.get(c, "kms_key", null))
+}
+
+ecr_cmk(repo) if {
+	some i, c in f.after(repo).encryption_configuration
+	c.encryption_type == "KMS"
+	unknown_at(repo, ["encryption_configuration", i, "kms_key"])
+	some block in f.config_expr(repo, "encryption_configuration")
+	object.get(block, "kms_key", {}) != {}
+}
+
+deny contains m if {
+	some repo in f.changed_of_type("aws_ecr_repository")
+	f.environment_of(repo) != "development"
+	not ecr_cmk(repo)
+	not f.exempt("iacp.encryption.ecr_kms", repo.address)
+	m := f.msg(
+		"iacp.encryption.ecr_kms", repo.address,
+		sprintf("repository in environment %q is not encrypted with a customer-managed KMS key", [f.environment_of(repo)]),
+		`add encryption_configuration { encryption_type = "KMS", kms_key = <customer-managed key> } (the ecs-service module does this)`,
 	)
 }
 

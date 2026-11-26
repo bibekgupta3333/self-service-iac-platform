@@ -15,7 +15,7 @@ export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION AWS_ENDPOINT_U
 unexport AWS_PROFILE AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
 
 .PHONY: help up down ps fmt fmt-check validate tflint checkov policy-test lint \
-        module-test integration-test validate-manifests module-gate codeowners codeowners-check go-test go-integration generator-update api portal-install portal-dev portal-test py-test test diagrams \
+        module-test example-plans integration-test validate-manifests module-gate codeowners codeowners-check go-test go-integration generator-update api portal-install portal-dev portal-test py-test test diagrams \
         stack-detect stack-plan stack-apply stack-destroy stack-clean
 
 help: ## Show available targets
@@ -57,6 +57,7 @@ policy-test: ## Unit-test OPA policies and verify conftest fixtures
 	opa test policies/opa --coverage --threshold 90 >/dev/null
 	opa test policies/opa
 	policies/fixtures/verify.sh
+	policies/fixtures/verify-example-gate.sh
 
 lint: fmt-check validate validate-manifests module-gate codeowners-check tflint checkov policy-test ## All static checks
 
@@ -95,7 +96,12 @@ stack-clean: ## Remove local state, plan and .terraform from STACK
 	rm -rf $(STACK)/.terraform $(STACK)/tfplan $(STACK)/terraform.tfstate $(STACK)/terraform.tfstate.backup
 
 ## ---- tests ----
-module-test: ## terraform test every module against LocalStack (needs `make up`)
+example-plans: ## Plan every examples/complete and run conftest with its policy-context.json (needs `make up`)
+	@for ctx in modules/*/examples/complete/policy-context.json; do \
+	  policies/example-plan.sh "$${ctx%/examples/complete/policy-context.json}" || exit 1; \
+	done
+
+module-test: ## terraform test every module (LocalStack suites need `make up`; mock_provider suites run offline)
 	@for m in $(MODULES); do \
 	  [ -d "$$m/tests" ] || continue; \
 	  echo "==> test $$m"; \
