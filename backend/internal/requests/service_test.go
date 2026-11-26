@@ -119,6 +119,10 @@ func (m *memRepo) StackHolder(_ context.Context, path string) (StackHolder, erro
 	return StackHolder{}, apperr.NotFound("no stack at %s", path)
 }
 
+func (m *memRepo) OpenRequestKinds(ctx context.Context, stackID uuid.UUID) ([]Kind, error) {
+	return (&memStore{s: m.state}).OpenRequestKinds(ctx, stackID)
+}
+
 func (m *memRepo) LatestSpec(ctx context.Context, stackID uuid.UUID) (json.RawMessage, bool, error) {
 	return (&memStore{s: m.state}).LatestSpec(ctx, stackID)
 }

@@ -78,7 +78,16 @@ func latestSpec(ctx context.Context, q db.DBTX, stackID uuid.UUID) (json.RawMess
 
 // OpenRequestKinds implements Store.
 func (s *pgStore) OpenRequestKinds(ctx context.Context, stackID uuid.UUID) ([]Kind, error) {
-	rows, err := s.tx.Query(ctx, `SELECT kind::text FROM requests WHERE stack_id = $1 AND completed_at IS NULL`, stackID)
+	return openRequestKinds(ctx, s.tx, stackID)
+}
+
+// OpenRequestKinds implements Repository.
+func (r *PostgresRepository) OpenRequestKinds(ctx context.Context, stackID uuid.UUID) ([]Kind, error) {
+	return openRequestKinds(ctx, r.pool, stackID)
+}
+
+func openRequestKinds(ctx context.Context, q db.DBTX, stackID uuid.UUID) ([]Kind, error) {
+	rows, err := q.Query(ctx, `SELECT kind::text FROM requests WHERE stack_id = $1 AND completed_at IS NULL`, stackID)
 	if err != nil {
 		return nil, fmt.Errorf("query open requests: %w", err)
 	}

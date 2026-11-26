@@ -62,15 +62,26 @@ func TestUpgradeAgainstPostgres(t *testing.T) {
 	if err != nil || !again.Replayed || again.Request.ID != up.Request.ID {
 		t.Fatalf("replay = %+v, %v", again, err)
 	}
-	// The upgrade's spec is now the stack's newest: the next major starts from 1.4.0 and
-	// queues behind the upgrade.
+	// While the minor is open, a major would copy its pending spec: stack_busy.
 	major.AcknowledgeBreaking = true
-	next, err := f.svc.Create(ctx, f.user, createCmd(major, "upgrade-major-002"))
+	if _, err := f.svc.Create(ctx, f.user, createCmd(major, "upgrade-major-002")); !hasCode(err, "stack_busy") {
+		t.Fatalf("major while the minor is open: %v", err)
+	}
+	// Once the minor is applied, the major starts from 1.4.0.
+	for _, q := range []string{
+		`UPDATE requests SET status = 'applied', approved_plan_hash = repeat('b', 64), completed_at = now() WHERE id = $1`,
+		`DELETE FROM locks WHERE request_id = $1`,
+	} {
+		if _, err := f.pool.Exec(ctx, q, up.Request.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	next, err := f.svc.Create(ctx, f.user, createCmd(major, "upgrade-major-003"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	stored, err := f.svc.Get(ctx, next.Request.ID)
-	if err != nil || stored.QueuedBehind == nil || *stored.QueuedBehind != up.Request.ID ||
+	if err != nil || stored.QueuedBehind != nil ||
 		!strings.Contains(string(stored.Spec), `"from_version": "1.4.0"`) || !strings.Contains(string(stored.Spec), `"version": "2.0.0"`) {
 		t.Fatalf("major after minor = %+v %s, %v", stored, stored.Spec, err)
 	}

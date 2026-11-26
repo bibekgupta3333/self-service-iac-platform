@@ -164,6 +164,8 @@ type Repository interface {
 	// LatestSpec is Store.LatestSpec outside a transaction: the spec an upgrade starts from
 	// is read and validated against the catalog before the transaction, then re-read there.
 	LatestSpec(ctx context.Context, stackID uuid.UUID) (spec json.RawMessage, ok bool, err error)
+	// OpenRequestKinds is Store.OpenRequestKinds outside a transaction.
+	OpenRequestKinds(ctx context.Context, stackID uuid.UUID) ([]Kind, error)
 	// StatusEventsAfter lists up to limit status changes of a request with Seq > after, oldest first.
 	StatusEventsAfter(ctx context.Context, id uuid.UUID, after int64, limit int) ([]StatusEvent, error)
 	// LatestStatusSeq is the Seq of the request's newest status change (0 when none).
@@ -409,6 +411,15 @@ type upgradePlan struct {
 // outputs still resolve. A move across more than one major is refused, and one across a
 // major needs acknowledge_breaking.
 func (s *Service) prepareUpgrade(ctx context.Context, t StackTarget, in CreateInput) (*upgradePlan, error) {
+	// Checked here as well as in the transaction, so a spec still under review is never
+	// read and the caller learns stack_busy rather than an error about that spec.
+	open, err := s.repo.OpenRequestKinds(ctx, t.ID)
+	if err != nil {
+		return nil, fmt.Errorf("list open requests: %w", err)
+	}
+	if err := CheckStackAllowsKind(in.Kind, t.Status, open); err != nil {
+		return nil, err
+	}
 	raw, ok, err := s.repo.LatestSpec(ctx, t.ID)
 	if err != nil {
 		return nil, fmt.Errorf("load the stack's current spec: %w", err)

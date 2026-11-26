@@ -60,7 +60,10 @@ var editableStatuses = []StackStatus{StackActive, StackDrifted, StackFailed}
 //   - a stack that is provisioning, updating or destroying is mid-flight (stack_busy):
 //     the request must wait until the apply in flight finishes;
 //   - a stack with an open destroy request accepts no further update or destroy
-//     (destroy_pending), because whatever it queued behind would meet an empty stack.
+//     (destroy_pending), because whatever it queued behind would meet an empty stack;
+//   - an upgrade is refused (stack_busy) while another create, update or upgrade is open:
+//     it re-pins the stack's newest spec, and copying a spec that is still under review
+//     would carry that request's pending changes into a "version only" pull request.
 //
 // Anything else queues behind the request that holds the stack lock.
 func CheckStackAllowsKind(kind Kind, status StackStatus, open []Kind) error {
@@ -77,9 +80,15 @@ func CheckStackAllowsKind(kind Kind, status StackStatus, open []Kind) error {
 	case slices.Contains(open, KindDestroy):
 		return apperr.Conflict("destroy_pending",
 			fmt.Sprintf("a destroy request is open for the stack; a %s request cannot follow it", kind))
+	case kind == KindUpgrade && slices.ContainsFunc(open, carriesSpec):
+		return apperr.Conflict("stack_busy",
+			"another create, update or upgrade is open for the stack; wait until it is applied or closed, then upgrade from the result")
 	}
 	return nil
 }
+
+// carriesSpec reports whether a request of kind sets the stack's resource list. Pure.
+func carriesSpec(k Kind) bool { return k == KindCreate || k == KindUpdate || k == KindUpgrade }
 
 // StackStatusWhileApplying is the stack status while a request of kind is applying
 // (docs/03 §4.2). Pure.

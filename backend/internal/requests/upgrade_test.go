@@ -195,10 +195,10 @@ func TestUpgradeRequest(t *testing.T) {
 		t.Fatalf("replay: %+v %v", again, err)
 	}
 
-	// The upgrade is the stack's newest spec, so the next upgrade starts from 1.4.0.
+	// While the upgrade is open, another upgrade would copy its pending spec: stack_busy.
 	next := stackInput(upgradeInput("1.4.0"), created.Stack.ID)
-	if _, err := svc.Create(ctx, dev, createCmd(next, "key-upgrade-0002")); !hasCode(err, "not_an_upgrade") {
-		t.Fatalf("second upgrade to the same version: %v", err)
+	if _, err := svc.Create(ctx, dev, createCmd(next, "key-upgrade-0002")); !hasCode(err, "stack_busy") {
+		t.Fatalf("upgrade while an upgrade is open: %v", err)
 	}
 	if _, ok := repo.state.keys[key(dev.UserID, "key-upgrade-0002")]; ok {
 		t.Fatal("probing a refused upgrade's key must not keep it")
@@ -207,6 +207,51 @@ func TestUpgradeRequest(t *testing.T) {
 	other := stackInput(upgradeInput("1.3.1"), created.Stack.ID)
 	if _, err := svc.Create(ctx, dev, createCmd(other, "key-upgrade-0001")); !hasCode(err, "idempotency_key_reuse") {
 		t.Fatalf("key reuse: %v", err)
+	}
+	// Once it is applied, its spec is the base: the same target is no longer an upgrade.
+	r.Status = StatusApplied
+	if _, err := svc.Create(ctx, dev, createCmd(next, "key-upgrade-0003")); !hasCode(err, "not_an_upgrade") {
+		t.Fatalf("second upgrade to the same version: %v", err)
+	}
+}
+
+// An upgrade re-pins the stack's newest spec. While an update is open that spec is still
+// under review, so the upgrade is refused instead of carrying the update's changes.
+func TestUpgradeWaitsForAnOpenSpecChange(t *testing.T) {
+	ctx := context.Background()
+	_, svc, created := existingStackFixture(t, StackActive)
+	update := stackInput(updateInput(), created.Stack.ID)
+	res, err := svc.Create(ctx, dev, createCmd(update, "key-open-update-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := stackInput(upgradeInput("1.4.0"), created.Stack.ID)
+	_, err = svc.Create(ctx, dev, createCmd(in, "key-upgrade-busy1"))
+	if e, ok := apperr.As(err); !ok || e.Code != "stack_busy" || e.Kind != apperr.KindConflict {
+		t.Fatalf("upgrade behind an open update: %v", err)
+	}
+	// Once the update is closed, the upgrade goes ahead.
+	res.Request.Status = StatusCancelled
+	up, err := svc.Create(ctx, dev, createCmd(in, "key-upgrade-busy2"))
+	if err != nil {
+		t.Fatalf("upgrade after the update was cancelled: %v", err)
+	}
+	if !strings.Contains(string(up.Request.Spec), `"version":"1.4.0"`) {
+		t.Fatalf("spec = %s", up.Request.Spec)
+	}
+}
+
+func TestCheckStackAllowsUpgrade(t *testing.T) {
+	for open, code := range map[Kind]string{KindUpdate: "stack_busy", KindUpgrade: "stack_busy", KindCreate: "stack_busy", KindDestroy: "destroy_pending"} {
+		if err := CheckStackAllowsKind(KindUpgrade, StackActive, []Kind{open}); !hasCode(err, code) {
+			t.Errorf("open %s: %v", open, err)
+		}
+	}
+	if err := CheckStackAllowsKind(KindUpdate, StackActive, []Kind{KindUpdate}); err != nil {
+		t.Fatalf("an update still queues behind an update: %v", err)
+	}
+	if err := CheckStackAllowsKind(KindUpgrade, StackActive, nil); err != nil {
+		t.Fatal(err)
 	}
 }
 
