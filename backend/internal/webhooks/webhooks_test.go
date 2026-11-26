@@ -128,6 +128,11 @@ func TestIngestDedupesAndFiltersRepository(t *testing.T) {
 	if res, err := in.Ingest(ctx, d); err != nil || res.Enqueued || !res.Duplicate {
 		t.Fatalf("redelivery: %+v, %v", res, err)
 	}
+	// GitHub's canonical full_name may differ in case from the configured repository.
+	mixed := NewIngester(repo, platform.FixedClock{}, "ACME/Infra")
+	if res, err := mixed.Ingest(ctx, Delivery{ID: uuid.New(), Event: "pull_request", Body: d.Body}); err != nil || !res.Enqueued {
+		t.Fatalf("case-insensitive repository: %+v, %v", res, err)
+	}
 	other := NewIngester(repo, platform.FixedClock{}, "acme/other")
 	if res, err := other.Ingest(ctx, Delivery{ID: uuid.New(), Event: "pull_request", Body: d.Body}); err != nil || res.Enqueued {
 		t.Fatalf("foreign repository: %+v, %v", res, err)
@@ -135,7 +140,7 @@ func TestIngestDedupesAndFiltersRepository(t *testing.T) {
 	if res, err := in.Ingest(ctx, Delivery{ID: uuid.New(), Event: "ping", Body: []byte(`{}`)}); err != nil || res.Enqueued || res.Duplicate {
 		t.Fatalf("ping: %+v, %v", res, err)
 	}
-	if len(repo.jobs) != 1 || repo.jobs[0].Topic != outbox.TopicGitHubEvent {
+	if len(repo.jobs) != 2 || repo.jobs[0].Topic != outbox.TopicGitHubEvent {
 		t.Fatalf("jobs = %+v", repo.jobs)
 	}
 }

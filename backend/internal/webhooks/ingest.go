@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -61,7 +62,7 @@ func (in *Ingester) Ingest(ctx context.Context, d Delivery) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	if cmd != nil && in.repository != "" && cmd.Repository != in.repository {
+	if cmd != nil && in.repository != "" && !strings.EqualFold(cmd.Repository, in.repository) {
 		cmd = nil // signed by our App, but for a repository the platform does not manage
 	}
 	var res Result
