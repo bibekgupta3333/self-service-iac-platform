@@ -13,7 +13,8 @@
 #               verify module pins, init, verify installed modules
 #               plan (or plan -destroy), show -json, conftest pre-apply gate
 #               report "plan"; plan-hash check against the approved hash
-#               apply, collect outputs, report "apply" and "summary"
+#               apply, collect outputs, smoke test (outputs and iacp:* tags),
+#               report "apply", "smoke" and "summary"
 #               release the lock with its fencing token (always)
 #
 # Only main is ever applied: a push or dispatch from any other ref fails in detect,
@@ -237,6 +238,10 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/bin" conftest
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
+      # Same provider cache and key as pr-validate (WBS 5.4). A cache saved here on
+      # main is also restorable by every PR; init still verifies the providers
+      # against the committed .terraform.lock.hcl. apply runs no TFLint, so it needs
+      # no plugin cache.
       - name: Cache Terraform providers
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -404,6 +409,26 @@ jobs:
             jq -r 'to_entries[] | "- `\(.key)`\(if .value.sensitive then " (sensitive)" else "" end)"' "$RUNNER_TEMP/outputs.json"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # Post-apply smoke test (WBS 5.7) against this job's LocalStack: every declared
+      # output has a value, and every tagged resource carries the iacp:* tags, both
+      # in state and read back with read-only AWS CLI calls. A failure fails the job
+      # and is reported as stage "smoke", which finishes the run as failed. State
+      # stays in the job and is deleted after the check.
+      - id: smoke
+        name: Smoke test
+        if: steps.outputs.outcome == 'success'
+        run: |
+          terraform show -json > "$RUNNER_TEMP/state.json"
+          status=0
+          python -m tools.stack_pipeline --repo-root "$GITHUB_WORKSPACE" smoke . \
+            --plan "$RUNNER_TEMP/plan.json" \
+            --outputs "$RUNNER_TEMP/outputs.json" \
+            --state "$RUNNER_TEMP/state.json" \
+            --markdown-out "$RUNNER_TEMP/smoke.md" || status=$?
+          rm -f "$RUNNER_TEMP/state.json"
+          if [ -f "$RUNNER_TEMP/smoke.md" ]; then cat "$RUNNER_TEMP/smoke.md" >> "$GITHUB_STEP_SUMMARY"; fi
+          exit "$status"
+
       - name: Report apply
         if: always() && steps.apply.outcome != 'skipped'
         uses: ./.github/actions/iacp-report
@@ -415,6 +440,19 @@ jobs:
           stage: ${{ env.DESTROY == 'true' && 'destroy' || 'apply' }}
           status: ${{ steps.apply.outcome }}
           terraform-exit-code: ${{ steps.apply.outputs.exit_code }}
+          fencing-token: ${{ steps.lock.outputs.fencing_token }}
+
+      - name: Report smoke
+        if: always() && steps.smoke.outcome != 'skipped'
+        uses: ./.github/actions/iacp-report
+        with:
+          api-url: ${{ vars.IACP_API_URL }}
+          audience: ${{ vars.IACP_OIDC_AUDIENCE }}
+          pipeline: apply
+          stack-path: ${{ matrix.stack.path }}
+          stage: smoke
+          status: ${{ steps.smoke.outcome }}
+          error-message: ${{ steps.smoke.outcome == 'failure' && 'post-apply smoke test failed; see the job summary' || '' }}
           fencing-token: ${{ steps.lock.outputs.fencing_token }}
 
       # A passed "summary" finishes the run as succeeded; anything else as failed.

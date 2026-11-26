@@ -34,6 +34,11 @@ func TestTransition(t *testing.T) {
 		{StatusApplying, EventApplyRetry, StatusApplying, false},
 		{StatusApproved, EventReviewDismissed, StatusPlanReady, false},
 		{StatusPlanReady, EventReviewDismissed, StatusPlanReady, true},
+		{StatusDraft, EventPublishFailed, StatusFailed, false},
+		{StatusApproved, EventPRMerged, StatusApplying, false},
+		{StatusPROpen, EventPRMerged, StatusPROpen, true},
+		{StatusPlanReady, EventPRMerged, StatusPlanReady, true},
+		{StatusPROpen, EventPublishFailed, StatusPROpen, true},
 		// invalid
 		{StatusDraft, EventApplyStarted, StatusDraft, true},
 		{StatusApplying, EventCancel, StatusApplying, true},
@@ -229,5 +234,53 @@ func TestRequestRetryCountTracked(t *testing.T) {
 	}
 	if r.RetryCount != MaxApplyRetries || r.Fire(EventApplyRetry, time.Now()) == nil {
 		t.Fatalf("entity must enforce the retry budget: %+v", r)
+	}
+}
+
+func TestHeadCheck(t *testing.T) {
+	tests := []struct {
+		name  string
+		known string
+		e     GitHubEvent
+		want  bool
+	}{
+		{"untracked head accepts", "", GitHubEvent{Event: EventPRClosed}, true},
+		{"close at the known head", "h1", GitHubEvent{Event: EventPRClosed, HeadSHA: "h1"}, true},
+		{"close after a lost push is still applied", "h2", GitHubEvent{Event: EventPRClosed, HeadSHA: "h3"}, true},
+		{"merge without a head is still applied", "h1", GitHubEvent{Event: EventPRMerged}, true},
+		{"push continuing the head", "h1", GitHubEvent{Event: EventNewCommit, BeforeSHA: "h1", HeadSHA: "h2"}, true},
+		{"replayed push", "h2", GitHubEvent{Event: EventNewCommit, BeforeSHA: "h1", HeadSHA: "h2"}, false},
+	}
+	for _, tt := range tests {
+		if got := HeadCheck(tt.known, tt.e); got != tt.want {
+			t.Errorf("%s: HeadCheck = %v", tt.name, got)
+		}
+	}
+}
+
+func TestPublishFailureAndMerge(t *testing.T) {
+	t0 := time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC)
+	r := NewDraft(uuid.New(), "req-abc", StackRef{}, KindCreate, nil, "", uuid.New(), t0)
+	if err := r.Fire(EventPublishFailed, t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if r.Status != StatusFailed || r.CompletedAt == nil {
+		t.Fatalf("publish_failed must end the request: %+v", r)
+	}
+
+	m := NewDraft(uuid.New(), "req-def", StackRef{}, KindCreate, nil, "", uuid.New(), t0)
+	for _, e := range []Event{EventPROpened, EventValidationStarted, EventChecksPassed} {
+		if err := m.Fire(e, t0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.Fire(EventPRMerged, t0); err == nil {
+		t.Fatal("an unapproved PR merge must not start apply")
+	}
+	if err := m.Approve(strings.Repeat("a", 64), uuid.New(), t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Fire(EventPRMerged, t0); err != nil || m.Status != StatusApplying || m.ApprovedPlanHash == "" {
+		t.Fatalf("merge of an approved PR: status %s, err %v", m.Status, err)
 	}
 }
