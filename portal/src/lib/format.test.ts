@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   catalogStatusTone,
+  categoriesOf,
   formatDateTime,
   isTerminal,
   requestStatusLabel,
@@ -18,6 +19,15 @@ describe("formatDateTime", () => {
     [undefined, "—"],
     ["not a date", "not a date"],
   ])("%s -> %s", (input, want) => expect(formatDateTime(input)).toBe(want));
+});
+
+describe("categoriesOf", () => {
+  it("lists distinct categories in order", () => {
+    expect(categoriesOf([{ category: "storage" }, { category: "compute" }, { category: "storage" }, { category: "" }])).toEqual([
+      "compute",
+      "storage",
+    ]);
+  });
 });
 
 describe("labels and tones", () => {

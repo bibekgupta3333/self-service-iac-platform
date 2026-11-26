@@ -5,19 +5,21 @@ import { Badge } from "@/components/Badge";
 import { ErrorPanel } from "@/components/ErrorPanel";
 import { serverApi } from "@/lib/api/factory";
 import { attempt } from "@/lib/api/result";
-import { catalogStatusTone } from "@/lib/format";
+import { catalogStatusTone, categoriesOf } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = { title: "Catalog" };
-
-const CATEGORIES = ["storage", "messaging", "compute", "data", "network", "observability"] as const;
 
 type Props = { searchParams: Promise<{ category?: string }> };
 
 export default async function CatalogPage({ searchParams }: Props) {
   const { category } = await searchParams;
-  const selected = CATEGORIES.find((c) => c === category);
-  const result = await attempt(() => serverApi().listModules({ category: selected }));
+  // Load every module once: the filter chips come from the data, so a new category shows up
+  // without a portal change, and filtering happens here.
+  const all = await attempt(() => serverApi().listModules());
+  const categories = all.ok ? categoriesOf(all.data) : [];
+  const selected = categories.find((c) => c === category);
+  const result = all.ok ? { ok: true as const, data: all.data.filter((m) => !selected || m.category === selected) } : all;
 
   return (
     <section aria-labelledby="catalog-title" className="space-y-6">
@@ -30,10 +32,10 @@ export default async function CatalogPage({ searchParams }: Props) {
 
       <nav aria-label="Filter by category">
         <ul className="flex flex-wrap gap-2 text-sm">
-          {[undefined, ...CATEGORIES].map((c) => (
+          {[undefined, ...categories].map((c) => (
             <li key={c ?? "all"}>
               <Link
-                href={c ? `/catalog?category=${c}` : "/catalog"}
+                href={c ? `/catalog?category=${encodeURIComponent(c)}` : "/catalog"}
                 aria-current={c === selected ? "page" : undefined}
                 className={`rounded-full px-3 py-1 ring-1 ring-inset ${
                   c === selected ? "bg-slate-900 text-white ring-slate-900" : "bg-white ring-slate-300 hover:bg-slate-100"

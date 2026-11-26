@@ -15,6 +15,11 @@ export function formatDateTime(iso: string | null | undefined): string {
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`;
 }
 
+/** categoriesOf lists the distinct module categories, sorted. Pure. */
+export function categoriesOf(modules: readonly { category: string }[]): string[] {
+  return [...new Set(modules.map((m) => m.category).filter(Boolean))].sort();
+}
+
 /** shortSha keeps the first 7 characters of a commit SHA. Pure. */
 export const shortSha = (sha: string): string => sha.slice(0, 7);
 
