@@ -127,11 +127,17 @@ jobs:
           DISPATCH_STACK: ${{ inputs.stack_path }}
         run: |
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # Shape check first, and never echo the raw input: a dispatcher could put
+            # a newline and a workflow command in it.
+            if ! [[ "$DISPATCH_STACK" =~ ^environments/[a-z]+/[a-z][a-z0-9-]{1,40}/[a-z][a-z0-9-]{1,40}/?$ ]]; then
+              echo "::error title=stack_path::stack_path must look like environments/<env>/<team>/<stack>"
+              exit 1
+            fi
             # The detector validates the path (fails closed outside a stack root).
             printf '%s/iacp.stack.json\n' "${DISPATCH_STACK%/}" \
               | python -m tools.stack_pipeline detect --files-from - | tee "$RUNNER_TEMP/detect.json"
             if [ "$(jq -r .count "$RUNNER_TEMP/detect.json")" != "1" ]; then
-              echo "::error::$DISPATCH_STACK is not an existing stack root"
+              echo "::error title=stack_path::${DISPATCH_STACK%/} is not an existing stack root"
               exit 1
             fi
           else
