@@ -419,7 +419,7 @@ A single writer (`audit.Writer`, serialised with `pg_advisory_xact_lock`) comput
 
 **Purpose.** Map organisational ownership to what a person can request, approve and see, per team and environment.
 
-**Design.** Identity comes from GitHub OAuth; roles derive from GitHub team membership, synced every 15 minutes and on `membership`/`team` webhooks:
+**Design.** Identity comes from GitHub OAuth; roles derive from GitHub team membership, synced at every login (a periodic and webhook-driven sync is planned; the implemented mapping and matrix are in docs/07 section 7):
 
 | GitHub team convention | The platform role (per team) |
 |---|---|

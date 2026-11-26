@@ -576,7 +576,7 @@ stateDiagram-v2
 ## 5. API conventions
 
 - Base URL `https://api.iacp.acme.internal/v1`. JSON only (`application/json; charset=utf-8`). OpenAPI 3.1 spec in `backend/api/openapi.yaml` is the source of truth; handlers and portal client are generated from it (`oapi-codegen`, `openapi-typescript`).
-- **Auth:** browser sessions use `iacp_session` HttpOnly, Secure, SameSite=Lax cookie holding a short-lived JWT (EdDSA, 15 min) + refresh cookie (8 h). CLI/automation uses `Authorization: Bearer <PAT-style token>` scoped to a team and role (stored hashed). Actions callbacks use `Authorization: Bearer <GitHub OIDC JWT>`. CSRF: double-submit token header `X-CSRF-Token` for cookie-authenticated mutations.
+- **Auth:** browser sessions use an opaque server-side session: `iacp_session` is an HttpOnly, SameSite=Lax cookie (Secure except on plain-http loopback) holding 256 random bits; only its SHA-256 is stored (`sessions`, migration `0010_sessions.sql`). A session lives at most `IACP_AUTH_SESSION_TTL` (8 h) and dies after `IACP_AUTH_SESSION_IDLE_TTL` (1 h) without use; logout, user disablement and deletion revoke it at once. Every login mints a new id (no fixation) and revokes the one the browser presented. Because the session is opaque and checked in the database on every request, there is no JWT or refresh cookie. CLI/automation uses `Authorization: Bearer <PAT-style token>` scoped to a team and role (stored hashed). Actions callbacks use `Authorization: Bearer <GitHub OIDC JWT>`. CSRF: every unsafe method (anything but GET, HEAD, OPTIONS) authenticated by the cookie must carry `X-CSRF-Token`, a per-session token derived as HMAC-SHA256 keyed with the session id, compared in constant time (`403 csrf_token_invalid` otherwise). The token is returned by `GET /v1/me`; a cross-site page cannot read that response.
 - **IDs:** UUIDs; requests also have a human-friendly `short_id`.
 - **Timestamps:** RFC 3339 UTC.
 - **Pagination:** cursor-based. `?limit=50` (max 200) `&cursor=<opaque>`. Response `{"data":[…], "next_cursor":"eyJzZXEiOjEyMzR9"|null}`. Cursor = base64 of the last sort key; stable under inserts.
@@ -596,11 +596,10 @@ RBAC column uses team roles (see [07-security-and-policy.md](07-security-and-pol
 
 | Method | Path | Description | RBAC |
 |---|---|---|---|
-| GET | `/auth/github/login` | Redirect to GitHub OAuth (state + PKCE). | public |
-| GET | `/auth/github/callback` | Exchange code, upsert user, sync teams, set session cookies. | public |
-| POST | `/auth/refresh` | Rotate access token. | session |
-| POST | `/auth/logout` | Revoke refresh token. | session |
-| GET | `/me` | Current user, teams, roles, permissions. | any |
+| GET | `/auth/login?return_to=` | `302` to GitHub (authorization code with `state` and S256 PKCE). Sets the `iacp_oauth_state` cookie that binds the attempt to this browser. `return_to` must be a path or an origin in `IACP_AUTH_REDIRECT_ALLOWLIST`, else the default. Only with `IACP_AUTH_MODE=github`. | public |
+| GET | `/auth/callback?code=&state=` | Checks `state` against the cookie and the single-use stored row, exchanges the code, requires active membership of `IACP_GITHUB_ORG`, upserts the user, syncs teams, issues a new session cookie, `302` to `return_to`. Failures `302` to the default redirect with `?login_error=` (`invalid_state`, `not_org_member`, `user_disabled`, `github_unavailable`, `login_failed`). | public |
+| POST | `/auth/logout` | Revokes the session and clears the cookie; audited as `auth.logout`. `204`. | session + CSRF |
+| GET | `/me` | Current user, teams with roles, `is_platform_admin`, `auth_mode`, and `csrf_token` (cookie sessions). Works in dev mode too (no token). `Cache-Control: no-store`. | any |
 | POST | `/tokens` / GET `/tokens` / DELETE `/tokens/{id}` | Personal API tokens (scoped, max 90 d). | any (own) |
 
 `GET /v1/me`
@@ -614,9 +613,15 @@ RBAC column uses team roles (see [07-security-and-policy.md](07-security-and-pol
   "teams": [
     { "slug": "payments", "role": "developer" },
     { "slug": "checkout", "role": "viewer" }
-  ]
+  ],
+  "auth_mode": "github",
+  "csrf_token": "Qm9n…"
 }
 ```
+
+`/auth/refresh` and `/tokens` are not built: sessions are opaque and slide on use, and personal API tokens remain future work.
+
+**Tables.** `sessions(id_hash PK, user_id, created_at, last_seen_at, expires_at, revoked_at)` and `oauth_login_states(state_hash PK, code_verifier, return_to, created_at, expires_at)`; the callback consumes a state row with `DELETE ... RETURNING`, so a state is single-use. A background sweep deletes dead rows every five minutes.
 
 ### 6.2 Catalog: modules and versions
 
@@ -685,7 +690,7 @@ Stacks are never created or destroyed directly; mutation is always a request.
 
 | Method | Path | Description | RBAC |
 |---|---|---|---|
-| POST | `/requests` | Create request (`kind`: create, update, upgrade, destroy, reconcile, rollback). Requires `Idempotency-Key`. | developer (any env); maintainer to create `destroy` in production. Enforced now from `memberships` (platform admins count as admin); full RBAC middleware arrives with WBS 4.4 |
+| POST | `/requests` | Create request (`kind`: create, update, upgrade, destroy, reconcile, rollback). Requires `Idempotency-Key`. | developer (any env); maintainer to create `destroy` in production. Enforced by the `rbac` matrix from `memberships` (platform admins count as admin); denials are audited as `rbac.denied` |
 | GET | `/requests?team=&status=&kind=&mine=true` | List. | viewer |
 | GET | `/requests/{id}` | Detail incl. PR, pipeline runs, plan, cost, timeline. | viewer |
 | POST | `/requests/{id}/preview` | Dry-run render: returns generated files + diff without opening a PR. | developer |
