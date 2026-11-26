@@ -57,11 +57,56 @@ func TestNextHealth(t *testing.T) {
 	}
 }
 
+// boxedLog is a realistic `terraform plan` log that fails: refresh lines, then a boxed
+// diagnostic whose source snippet and provider detail carry a secret value.
+const boxedLog = "module.db.aws_ssm_parameter.db: Refreshing state... [id=/db/password]\n" +
+	"module.db.aws_kms_key.this: Refreshing state... [id=1234]\n" +
+	"\u2577\n" +
+	"\u2502 Error: reading SSM Parameter (/db/password): operation error SSM: GetParameter, api error ValidationException: bad request\n" +
+	"\u2502 \n" +
+	"\u2502   with module.db.aws_ssm_parameter.db,\n" +
+	"\u2502   on main.tf line 12, in resource \"aws_ssm_parameter\" \"db\":\n" +
+	"\u2502   12:   value = \"hunter2-secret\"\n" +
+	"\u2502 \n" +
+	"\u2502 request body {\"Value\":\"hunter2-secret\"} was rejected\n" +
+	"\u2575\n"
+
+func lastLines(text string, n int) string {
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
+}
+
+func TestSummarizeErrorKeepsOnlyTheErrorLine(t *testing.T) {
+	want := "Error: reading SSM Parameter (/db/password): operation error SSM: GetParameter, api error ValidationException: bad request"
+	// The full log: the first non-empty line is a "Refreshing state" line, and the box
+	// characters are lines of their own; neither may be picked.
+	if got := SummarizeError(boxedLog); got != want {
+		t.Fatalf("full log: %q", got)
+	}
+	// A five-line tail has no Error line at all: only the fixed message is kept, never source
+	// text or provider detail, and the secret never survives.
+	tail := lastLines(boxedLog, 5)
+	if got := SummarizeError(tail); got != GenericFailure {
+		t.Fatalf("5-line tail: %q, want the generic failure", got)
+	}
+	for _, in := range []string{boxedLog, tail, lastLines(boxedLog, 3), lastLines(boxedLog, 8)} {
+		if got := SummarizeError(in); strings.Contains(got, "hunter2") || strings.Contains(got, "value =") {
+			t.Errorf("a value survived: %q", got)
+		}
+	}
+}
+
 func TestSummarizeError(t *testing.T) {
 	tests := []struct{ name, in, want string }{
-		{"empty", "", ""},
-		{"first line only", "Error: creating S3 Bucket: AccessDenied\n  with module.b.aws_s3_bucket.this,\n  on main.tf line 4", "Error: creating S3 Bucket: AccessDenied"},
-		{"box drawing and blank lines", "\n\u2502 Error: boom\n\u2502 detail", "Error: boom"},
+		{"empty", "", GenericFailure},
+		{"no Error line", "just some text\nmore text", GenericFailure},
+		{"box characters only", "\u2577\n\u2502\n\u2575", GenericFailure},
+		{"error line first", "Error: creating S3 Bucket: AccessDenied\n  with module.b.aws_s3_bucket.this,\n  on main.tf line 4", "Error: creating S3 Bucket: AccessDenied"},
+		{"box prefix", "\u2502 Error: boom\n\u2502 detail", "Error: boom"},
+		{"error is not a prefix", "an Error: in the middle", GenericFailure},
 		{"secret assignments", "Error: bad password=hunter2 for token: abc123", "Error: bad password= <redacted> for token: <redacted>"},
 		{"access key id", "Error: key AKIAABCDEFGHIJKLMNOP rejected", "Error: key <redacted> rejected"},
 		{"bearer", "Error: Authorization failed with Bearer abc.def.ghi", "Error: Authorization failed with <redacted>"},
@@ -79,7 +124,7 @@ func TestSummarizeError(t *testing.T) {
 
 func TestSuppresses(t *testing.T) {
 	ign, open := StatusIgnored, StatusOpen
-	e := func(st *Status, hash string) Entry { return Entry{Status: st, PlanHash: hash} }
+	e := func(st *Status, hash string) Entry { return Entry{Result: ResultDrifted, Status: st, PlanHash: hash} }
 	for name, tt := range map[string]struct {
 		e    Entry
 		hash string
