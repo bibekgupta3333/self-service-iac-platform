@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
@@ -140,8 +141,9 @@ def _truncate(text: str, limit: int = MAX_PLAN_TEXT) -> str:
 
 
 def _fence(text: str) -> str:
-    # A fence longer than any backtick run inside the text cannot be closed early.
-    longest = max((len(run) for run in text.split("\n") if set(run) == {"`"}), default=0)
+    # A fence longer than every backtick run anywhere in the text cannot be closed
+    # early, whatever the indentation or trailing spaces of a line.
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
     ticks = "`" * max(3, longest + 1)
     return f"{ticks}text\n{text}\n{ticks}"
 

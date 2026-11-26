@@ -133,6 +133,19 @@ class TestSummary:
         md = render_markdown(PlanSummary("id", "path", steps={"init": "failure"}))
         assert "not produced" in md and "| policy (conftest) | not run |" in md
 
+    @pytest.mark.parametrize(
+        "text,fence",
+        [
+            ("plain", "```text"),
+            ("   ```", "````text"),  # indented closing fence
+            ("```   ", "````text"),  # trailing spaces
+            ("x ````` y", "``````text"),  # backticks mid-line
+        ],
+    )
+    def test_fence_outlasts_backtick_runs(self, text, fence):
+        md = render_markdown(PlanSummary("id", "path", policy=PolicyResult(evaluated=True)), plan_text=text)
+        assert f"\n{fence}\n" in md and md.count(fence[:-4] + "\n") >= 1
+
     def test_plan_text_is_truncated_and_fenced_safely(self):
         text = "```\n" + "x" * 50_000
         md = render_markdown(PlanSummary("id", "path", policy=PolicyResult(evaluated=True)), plan_text=text)
