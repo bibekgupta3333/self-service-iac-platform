@@ -65,9 +65,17 @@ Without a session the header shows "Sign in with GitHub" and a 401 error panel l
 belongs to the portal's origin and the browser sends it back to the proxy, which forwards it.
 The proxy used to drop `Set-Cookie`; it now passes it through in one controlled place:
 `GET /api/iacp/v1/auth/login`, `GET .../auth/callback` and `POST .../auth/logout` only, and only
-cookies named `iacp_session` or `iacp_oauth_state` without a `Domain` attribute
-(`filterSetCookies`). On those paths a `Location` header is accepted only if it is GitHub's
-authorize URL or a path on the portal (`rewriteAuthLocation`). Register the GitHub OAuth app's
+cookies named `iacp_session` or `iacp_oauth_state` (over https the backend prefixes them with
+`__Host-`, and those names are allowed too) without a `Domain` attribute (`filterSetCookies`).
+On those paths a `Location` header is accepted only if it is exactly GitHub's authorize URL
+(`https://github.com/login/oauth/authorize?...`) or a path on the portal that does not start
+with `//`, contain a backslash or a control character (`rewriteAuthLocation`). Every other
+absolute URL is dropped, so a compromised or misconfigured backend cannot make the portal
+redirect a browser to another site, and the backend's `return_to` allow-list
+(`IACP_AUTH_REDIRECT_ALLOWLIST`) can only ever yield portal paths here. The browser would
+follow an absolute portal URL too, but the proxy drops it: configure `return_to` as a path.
+Logout is the one POST that needs no `X-CSRF-Token` at the proxy (a browser with an expired
+session has no token to send); the backend requires it whenever the session is live. Register the GitHub OAuth app's
 callback as `https://<portal>/api/iacp/v1/auth/callback` (locally
 `http://localhost:3000/api/iacp/v1/auth/callback`) and set the backend's
 `IACP_GITHUB_CALLBACK_URL` to the same value; docs/07 section 7 lists the full app settings.

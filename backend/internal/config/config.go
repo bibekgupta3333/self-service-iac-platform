@@ -174,7 +174,10 @@ func Load(lookup LookupFunc) (Config, error) {
 			cfg.AppDBPassword = DevAppDBPassword // matches DefaultAppDatabaseURL
 		}
 	case AuthModeGitHub:
-		// The runtime database password must come from the environment: no dev default.
+		// Unlike dev mode, IACP_APP_DB_PASSWORD gets no default here (it stays empty unless set),
+		// so nothing provisions the dev password on iacp_app. IACP_DATABASE_URL still defaults
+		// to the local compose URL, which embeds that dev password: a real deployment must
+		// set IACP_DATABASE_URL (and IACP_APP_DB_PASSWORD or provision the role itself).
 	case "":
 		errs = append(errs, fmt.Errorf("%sAUTH_MODE must be set explicitly (supported: dev, github)", Prefix))
 	default:

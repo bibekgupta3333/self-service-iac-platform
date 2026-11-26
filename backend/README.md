@@ -265,13 +265,22 @@ Packages: `internal/oauth` (flow, PKCE, redirect policy, `GitHubIdentity` port a
   SameSite=Lax, host-only and Secure unless the callback URL is http on loopback.
 - `dev` mode is unchanged: no cookie or token, and the fixed user passes the route policies as a
   platform admin (its request-create role still comes from `memberships`).
-- Route policies live in `httpapi.DefaultPolicies`. A route without an entry needs
-  authentication only, so new routes must add themselves (for example `GET /v1/stacks` should
-  use `ScopeAnyTeam` with `ActionRead`).
+- Route policies live in `httpapi.DefaultPolicies`. A user route without an entry is refused
+  with 403 and fails `TestEveryUserRouteHasAPolicy` (a `chi.Walk` over the router), so new
+  routes must add themselves (for example `GET /v1/stacks` and `GET /v1/requests/{id}/events`
+  use `ScopeAnyTeam` with `ActionRead`). Probes, the public login routes, machine routes and
+  webhooks are exempt.
+- Read scoping: request list and get are limited to the caller's teams (`identity.Visibility`,
+  `requests.Access`); other read routes should reuse `UserStore.VisibleTeams` and
+  `Visibility.SQLArgs`. A request outside the caller's teams is 404.
+- Cookies are `__Host-` prefixed over https. `POST /v1/auth/logout` is public: with a dead
+  session it clears the cookie and answers 204. Login starts are limited to 30 per minute per
+  remote address and `rbac.denied` audit events to 20 per user per minute (per process).
 - Team mapping, last-admin protection, and the OAuth app settings are in docs/07 section 7.
   Registering the OAuth app is WBS 2.5 and needs the repository owner.
-- Not built: periodic or webhook team sync (needs an org credential, WBS 4.8), rate limiting on
-  the login routes, `/auth/refresh`, personal API tokens.
+- Not built: periodic or webhook team sync (needs an org credential, WBS 4.8; roles go stale
+  for up to the session lifetime, see docs/07), `/auth/refresh`, personal API tokens, a
+  trusted-proxy setting for per-client rate limiting behind the portal.
 
 ## Metrics
 
