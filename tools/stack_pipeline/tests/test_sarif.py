@@ -3,7 +3,7 @@ import json
 import pytest
 
 from tools.stack_pipeline.cli import main
-from tools.stack_pipeline.sarif import SarifError, rebase_sarif, rebase_uri, result_count
+from tools.stack_pipeline.sarif import SarifError, rebase_sarif, rebase_uri, result_count, strip_run_properties
 
 STACK = "environments/development/platform/smoke"
 DL = "/home/runner/work/_temp/checkov-modules"
@@ -145,3 +145,30 @@ class TestSarifCommand:
         argv = ["--repo-root", str(tmp_path), "sarif", str(root), "--in", str(tmp_path / "nope"), "--out", str(tmp_path / "o")]
         assert main(argv) == 2
         assert "missing" in capsys.readouterr().err
+
+
+class TestStripOnly:
+    def test_drops_run_properties_and_keeps_paths(self):
+        uri = {"physicalLocation": {"artifactLocation": {"uri": "modules/s3/a.tf"}}}
+        doc = {"runs": [{"automationDetails": {"id": "forged/"}, "versionControlProvenance": [{"x": 1}],
+                         "results": [{"locations": [uri]}]}]}
+        out = strip_run_properties(doc)
+        assert set(out["runs"][0]) == {"results"}
+        assert out["runs"][0]["results"][0]["locations"] == [uri]
+        assert "automationDetails" in doc["runs"][0]
+
+    @pytest.mark.parametrize("doc", [None, [], {"runs": {}}])
+    def test_not_sarif(self, doc):
+        with pytest.raises(SarifError):
+            strip_run_properties(doc)
+
+    def test_command(self, tmp_path):
+        src, out = tmp_path / "in.sarif", tmp_path / "out.sarif"
+        src.write_text(json.dumps({"runs": [{"automationDetails": {"id": "forged/"}, "results": []}]}))
+        assert main(["--repo-root", str(tmp_path), "sarif", "--strip-only", "--in", str(src), "--out", str(out)]) == 0
+        assert json.loads(out.read_text()) == {"runs": [{"results": []}]}
+
+    def test_stack_dir_is_required_otherwise(self, tmp_path):
+        src = tmp_path / "in.sarif"
+        src.write_text(json.dumps({"runs": []}))
+        assert main(["--repo-root", str(tmp_path), "sarif", "--in", str(src), "--out", str(tmp_path / "o")]) == 2

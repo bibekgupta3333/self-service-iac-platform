@@ -115,9 +115,19 @@ def rebase_sarif(
                 fix(item)
 
     fix(out["runs"])
-    # The SARIF comes from a job that runs PR code. A run's automationDetails.id would
-    # win over the upload's category input, so drop it (and the run's own idea of
-    # the commit) and let the upload job decide both.
+    return strip_run_properties(out)
+
+
+def strip_run_properties(doc: Any) -> dict[str, Any]:
+    """A copy of the SARIF log without the run properties the upload job owns. Pure.
+
+    The SARIF comes from a job that runs PR code. A run's automationDetails.id would
+    win over the upload's category input, so drop it (and the run's own idea of
+    the commit) and let the upload job decide both. Paths are left as they are.
+    """
+    if not isinstance(doc, Mapping) or not isinstance(doc.get("runs"), list):
+        raise SarifError("not a SARIF log: expected an object with a runs array")
+    out = copy.deepcopy(dict(doc))
     for run in out["runs"]:
         if isinstance(run, dict):
             for key in RUN_KEYS_SET_BY_UPLOAD:

@@ -20,7 +20,7 @@ from .module_install import MANIFEST, ModuleInstallVerifier, parse_manifest
 from .module_pins import DEFAULT_REPO_URL, DEFAULT_TRUSTED_REF, ModulePinVerifier, PinError, Resolution, insteadof_config
 from .plan_summary import render_markdown, summarize
 from .policy_context import build_context
-from .sarif import SarifError, rebase_sarif, result_count
+from .sarif import SarifError, rebase_sarif, result_count, strip_run_properties
 from .smoke import SmokeTester
 from .report import (
     GitHubRun,
@@ -111,7 +111,10 @@ def build_parser() -> argparse.ArgumentParser:
     fold.add_argument("--cost", type=Path, required=True, help="infracost breakdown --format json output")
 
     sarif = sub.add_parser("sarif", help="rewrite a stack's TFLint or Checkov SARIF to repository-relative paths")
-    sarif.add_argument("stack_dir", type=Path)
+    sarif.add_argument("stack_dir", type=Path, nargs="?", help="stack root (not used with --strip-only)")
+    sarif.add_argument("--strip-only", action="store_true",
+                       help="keep the paths (already repository-relative) and drop only automationDetails "
+                            "and versionControlProvenance")
     sarif.add_argument("--in", dest="input", type=Path, required=True, help="SARIF written inside the stack root")
     sarif.add_argument("--out", type=Path, required=True)
     sarif.add_argument("--external-dir", action="append", default=[],
@@ -308,10 +311,17 @@ def run_fold_cost(args: argparse.Namespace) -> int:
 
 
 def run_sarif(args: argparse.Namespace) -> int:
-    meta = FileSystemStackRepository(args.repo_root).load_dir(args.stack_dir)
     doc = _read_json(args.input)
     if doc is None:
         raise SarifError(f"{args.input} is missing or is not JSON")
+    if args.strip_only:
+        out = strip_run_properties(doc)
+        args.out.write_text(json.dumps(out, indent=1) + "\n", encoding="utf-8")
+        print(f"{result_count(out)} SARIF result(s), run properties stripped -> {args.out}")
+        return 0
+    if args.stack_dir is None:
+        raise SarifError("a stack directory is required unless --strip-only is given")
+    meta = FileSystemStackRepository(args.repo_root).load_dir(args.stack_dir)
     # Both spellings: a tool may print the resolved path (/private/tmp on macOS).
     dirs = [str(p) for d in args.external_dir for p in dict.fromkeys((Path(d), Path(d).resolve()))]
     out = rebase_sarif(doc, meta.ref.path, dirs, str(Path(args.repo_root).resolve()))
