@@ -102,7 +102,8 @@ func TestCommitFilesOnBranchWithoutTouchingWorktree(t *testing.T) {
 func TestCommitReplacesTheStackRoot(t *testing.T) {
 	dir := scratchRepo(t)
 	ctx := context.Background()
-	for _, f := range []string{"stacks/orders/old.tf", "stacks/orders/main.tf", "stacks/orders-v2/main.tf"} {
+	for _, f := range []string{"stacks/orders/old.tf", "stacks/orders/main.tf", "stacks/orders-v2/main.tf",
+		"stacks/orders/.terraform.lock.hcl", "stacks/orders/sub/stale.tf"} {
 		if err := os.MkdirAll(filepath.Join(dir, filepath.Dir(f)), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -121,7 +122,7 @@ func TestCommitReplacesTheStackRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := gitOut(t, dir, "ls-tree", "-r", "--name-only", "iacp/req-aaaaaa")
-	if got != "README.md\nstacks/orders-v2/main.tf\nstacks/orders/main.tf" {
+	if got != "README.md\nstacks/orders-v2/main.tf\nstacks/orders/.terraform.lock.hcl\nstacks/orders/main.tf" {
 		t.Fatalf("tree = %q", got)
 	}
 }

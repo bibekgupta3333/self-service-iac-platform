@@ -162,9 +162,17 @@ func (p *Publisher) CommitFiles(ctx context.Context, c publish.Commit) (publish.
 	if _, err := p.git(ctx, idx, nil, "read-tree", base); err != nil {
 		return publish.CommitRef{}, err
 	}
-	if c.Root != "" { // full replacement: drop everything under the root, then add the files
-		if _, err := p.git(ctx, idx, nil, "rm", "--cached", "-r", "-q", "--ignore-unmatch", "--", c.Root); err != nil {
-			return publish.CommitRef{}, fmt.Errorf("clear %s: %w", c.Root, err)
+	if c.Root != "" { // full replacement: drop stale files under the root (KeepFiles stay)
+		listing, err := p.git(ctx, nil, nil, "ls-tree", "-r", "--name-only", "-z", base, "--", c.Root)
+		if err != nil {
+			return publish.CommitRef{}, fmt.Errorf("list %s: %w", c.Root, err)
+		}
+		existing := strings.FieldsFunc(listing, func(r rune) bool { return r == 0 })
+		if stale := publish.StaleFiles(existing, c.Root, c.Files); len(stale) > 0 {
+			args := append([]string{"rm", "--cached", "-q", "--"}, stale...)
+			if _, err := p.git(ctx, idx, nil, args...); err != nil {
+				return publish.CommitRef{}, fmt.Errorf("remove stale files under %s: %w", c.Root, err)
+			}
 		}
 	}
 	for _, path := range fp.SortedKeys(c.Files) {

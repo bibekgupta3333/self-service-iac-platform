@@ -50,12 +50,22 @@ func CheckCommit(c Commit) error {
 	return nil
 }
 
-// StaleFiles returns the existing paths under root that the commit does not write, sorted:
-// the files a full replacement of root deletes. Pure.
+// KeepFiles are files directly under a stack root that the generator does not render but
+// that belong to the stack and survive a full replacement. .terraform.lock.hcl is committed
+// with every stack (AGENTS.md rule 4) and CI runs terraform init -lockfile=readonly.
+var KeepFiles = []string{".terraform.lock.hcl"}
+
+// kept reports whether p is a KeepFiles entry directly under root. Pure.
+func kept(p, root string) bool {
+	return slices.ContainsFunc(KeepFiles, func(k string) bool { return p == root+"/"+k })
+}
+
+// StaleFiles returns the existing paths under root that the commit does not write and that
+// are not in KeepFiles, sorted: the files a full replacement of root deletes. Pure.
 func StaleFiles(existing []string, root string, files map[string][]byte) []string {
 	var out []string
 	for _, p := range existing {
-		if _, keep := files[p]; !keep && strings.HasPrefix(p, root+"/") {
+		if _, write := files[p]; !write && strings.HasPrefix(p, root+"/") && !kept(p, root) {
 			out = append(out, p)
 		}
 	}

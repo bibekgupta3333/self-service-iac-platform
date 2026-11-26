@@ -101,7 +101,8 @@ func TestStackFiles(t *testing.T) {
 
 func TestStaleFilesAndCheckCommit(t *testing.T) {
 	files := map[string][]byte{"env/a/main.tf": nil}
-	got := StaleFiles([]string{"env/a/old.tf", "env/a/main.tf", "env/ab/x.tf", "README.md", "env/a/sub/y.tf", "env/a/old.tf"}, "env/a", files)
+	got := StaleFiles([]string{"env/a/old.tf", "env/a/main.tf", "env/ab/x.tf", "README.md", "env/a/sub/y.tf", "env/a/old.tf",
+		"env/a/.terraform.lock.hcl"}, "env/a", files)
 	if !slices.Equal(got, []string{"env/a/old.tf", "env/a/sub/y.tf"}) {
 		t.Fatalf("stale = %v", got)
 	}
