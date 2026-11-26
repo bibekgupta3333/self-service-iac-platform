@@ -58,10 +58,21 @@ func (f *fakeBudgetAdmin) RecordCommitted(_ context.Context, _ identity.Principa
 	return budgets.CommittedWrite{Stack: ref, MonthlyCents: int64(*in.MonthlyUSD * 100)}, nil
 }
 
+// plainUser is the dev principal without platform admin: its team role alone decides.
+func plainUser() identity.Principal {
+	p := devPrincipal
+	p.PlatformAdmin = false
+	return p
+}
+
 func budgetAdminRouter(svc BudgetAdminService, role rbac.Role, policies PolicyTable) http.Handler {
+	return budgetAdminRouterAs(svc, plainUser(), role, policies)
+}
+
+func budgetAdminRouterAs(svc BudgetAdminService, who identity.Principal, role rbac.Role, policies PolicyTable) http.Handler {
 	h := NewBudgetAdminHandler(svc)
 	return NewRouter(Deps{
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DevAuthenticator{Principal: devPrincipal},
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DevAuthenticator{Principal: who},
 		Internal:         AnyAuthenticator{NewOIDCAuthenticator(fakeTokenVerifier{}), NewTokenAuthenticator(testInternalToken, releaseBot)},
 		Ready:            okPinger{},
 		Public:           []RouteRegistrar{h},
@@ -225,5 +236,14 @@ func TestBudgetCommittedRouteClass(t *testing.T) {
 	if rec := do(t, h, "POST", "/v1/internal/budget-committed", `{"stack_path":"x","bogus":1}`,
 		"Authorization", "Bearer "+testInternalToken); rec.Code != 400 {
 		t.Fatalf("unknown field = %d", rec.Code)
+	}
+}
+
+func TestBudgetAdminPlatformAdminPasses(t *testing.T) {
+	// A platform admin counts as admin everywhere, whatever team role the lookup reports.
+	svc := &fakeBudgetAdmin{}
+	h := budgetAdminRouterAs(svc, devPrincipal, rbac.RoleNone, DefaultPolicies())
+	if rec := do(t, h, "GET", "/v1/teams/payments/budgets", ""); rec.Code != 200 {
+		t.Fatalf("platform admin GET = %d: %s", rec.Code, rec.Body)
 	}
 }
