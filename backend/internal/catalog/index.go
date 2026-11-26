@@ -38,7 +38,8 @@ var (
 	moduleNameRe = regexp.MustCompile(`^[a-z][a-z0-9-]{1,40}$`)
 	gitSHARe     = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	outputNameRe = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
-	categories   = []string{"storage", "messaging", "compute", "data", "network", "observability"}
+	// categories mirrors metadata.category in modules/_shared/module.schema.json.
+	categories = []string{"storage", "messaging", "compute", "database", "cache", "network", "observability"}
 )
 
 // ValidateIndex checks cmd and builds the module and version to store. Pure.

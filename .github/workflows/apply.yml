@@ -187,7 +187,7 @@ jobs:
         ports:
           - 4566:4566
         env:
-          SERVICES: s3,sqs,sns,lambda,iam,sts,kms,logs,cloudwatch,secretsmanager,events
+          SERVICES: s3,sqs,sns,lambda,iam,sts,kms,logs,cloudwatch,secretsmanager,events,ec2,dynamodb,dynamodbstreams,kinesis
           AWS_DEFAULT_REGION: us-east-1
         options: >-
           --health-cmd "curl -sf http://localhost:4566/_localstack/health"

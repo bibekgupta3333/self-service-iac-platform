@@ -17,6 +17,7 @@ context="$here/context.json"
 expected_denies=(
   iacp.ecr.immutable_tags
   iacp.ecr.scan_on_push
+  iacp.encryption.dynamodb_cmk
   iacp.encryption.ecr_kms
   iacp.encryption.elasticache_at_rest
   iacp.encryption.elasticache_cmk
@@ -26,6 +27,8 @@ expected_denies=(
   iacp.encryption.rds_storage
   iacp.encryption.s3_cmk
   iacp.encryption.s3_kms
+  iacp.encryption.sns_kms
+  iacp.encryption.sns_sse
   iacp.encryption.sqs_kms
   iacp.encryption.sqs_sse
   iacp.forbidden.data_source

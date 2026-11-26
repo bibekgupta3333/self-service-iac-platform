@@ -178,6 +178,113 @@ test_sqs_unencrypted_denied if {
 	rule_ids(enc.deny) == {"[iacp.encryption.sqs_sse]"} with input as t.plan([q]) with data.iacp.context as t.dev_ctx
 }
 
+# --- SNS -----------------------------------------------------------------------
+
+topic(after) := t.rc("aws_sns_topic", "alarms", after)
+
+test_sns_with_cmk_allowed_in_production if {
+	tp := topic({"kms_master_key_id": cmk})
+	count(enc.deny) == 0 with input as t.plan([tp]) with data.iacp.context as t.prod_ctx
+}
+
+test_sns_with_key_created_in_same_plan_allowed if {
+	tp := t.with_unknown(topic({}), {"kms_master_key_id": true})
+	count(enc.deny) == 0 with input as t.plan([tp]) with data.iacp.context as t.prod_ctx
+}
+
+test_sns_unencrypted_denied_in_development if {
+	some m in enc.deny with input as t.plan([topic({"kms_master_key_id": null})]) with data.iacp.context as t.dev_ctx
+	m == concat("", [
+		"[iacp.encryption.sns_sse] aws_sns_topic.alarms: topic has no server-side encryption. ",
+		"Fix: set kms_master_key_id to a customer-managed key (alias/aws/sns is only allowed in development)",
+	])
+}
+
+test_sns_empty_key_denied if {
+	rule_ids(enc.deny) == {"[iacp.encryption.sns_sse]"} with input as t.plan([topic({"kms_master_key_id": ""})]) with data.iacp.context as t.prod_ctx
+}
+
+test_sns_aws_managed_alias_denied_in_production if {
+	tp := topic({"kms_master_key_id": "alias/aws/sns"})
+	some m in enc.deny with input as t.plan([tp]) with data.iacp.context as t.prod_ctx
+	startswith(m, `[iacp.encryption.sns_kms] aws_sns_topic.alarms: topic in environment "production" uses the AWS-managed aws/sns key.`)
+}
+
+test_sns_aws_managed_alias_arn_denied_without_environment if {
+	tp := topic({"kms_master_key_id": "arn:aws:kms:us-east-1:111111111111:alias/aws/sns"})
+	rule_ids(enc.deny) == {"[iacp.encryption.sns_kms]"} with input as t.plan([tp])
+}
+
+test_sns_aws_managed_alias_allowed_in_development if {
+	count(enc.deny) == 0 with input as t.plan([topic({"kms_master_key_id": "alias/aws/sns"})]) with data.iacp.context as t.dev_ctx
+}
+
+test_sns_unchanged_topic_ignored if {
+	tp := t.with_actions(topic({}), ["no-op"])
+	count(enc.deny) == 0 with input as t.plan([tp]) with data.iacp.context as t.prod_ctx
+}
+
+test_sns_exception_waives_rule if {
+	exc := {"rule_id": "iacp.encryption.sns_kms", "resource_address": "aws_sns_topic.alarms", "expires_at": "2200-01-01T00:00:00Z"}
+	ctx := object.union(t.prod_ctx, {"exceptions": [exc]})
+	count(enc.deny) == 0 with input as t.plan([topic({"kms_master_key_id": "alias/aws/sns"})]) with data.iacp.context as ctx
+}
+
+# --- DynamoDB ------------------------------------------------------------------
+
+table(sse) := t.rc_in("orders", "aws_dynamodb_table", "this", {"name": "orders", "server_side_encryption": sse})
+
+key_ref := {"server_side_encryption": [{"enabled": {"constant_value": true}, "kms_key_arn": {"references": ["local.kms_key_arn"]}}]}
+
+table_config(expressions) := {"configuration": {"root_module": {"module_calls": {"orders": {"module": {"resources": [t.cfg("aws_dynamodb_table", "this", expressions)]}}}}}}
+
+with_config(rcs, expressions) := object.union(t.plan(rcs), table_config(expressions))
+
+test_dynamodb_with_cmk_allowed_in_production if {
+	tb := table([{"enabled": true, "kms_key_arn": cmk}])
+	count(enc.deny) == 0 with input as t.plan([tb]) with data.iacp.context as t.prod_ctx
+}
+
+test_dynamodb_with_configured_key_created_in_same_plan_allowed if {
+	tb := t.with_unknown(table([{"enabled": true}]), {"server_side_encryption": [{"kms_key_arn": true}]})
+	count(enc.deny) == 0 with input as with_config([tb], key_ref) with data.iacp.context as t.prod_ctx
+}
+
+test_dynamodb_unknown_key_without_configured_key_denied if {
+	# enabled = true without kms_key_arn: the provider computes the aws/dynamodb key.
+	tb := t.with_unknown(table([{"enabled": true}]), {"server_side_encryption": [{"kms_key_arn": true}]})
+	no_key := {"server_side_encryption": [{"enabled": {"constant_value": true}}]}
+	rule_ids(enc.deny) == {"[iacp.encryption.dynamodb_cmk]"} with input as with_config([tb], no_key) with data.iacp.context as t.prod_ctx
+}
+
+test_dynamodb_without_sse_block_denied_in_staging if {
+	tb := table([])
+	some m in enc.deny with input as t.plan([tb]) with data.iacp.context as object.union(t.prod_ctx, {"environment": "staging"})
+	m == concat("", [
+		`[iacp.encryption.dynamodb_cmk] module.orders.aws_dynamodb_table.this: table in environment "staging" is not encrypted with a customer-managed KMS key. `,
+		"Fix: add server_side_encryption { enabled = true, kms_key_arn = <customer-managed key> }",
+	])
+}
+
+test_dynamodb_sse_disabled_denied_without_environment if {
+	tb := table([{"enabled": false, "kms_key_arn": ""}])
+	rule_ids(enc.deny) == {"[iacp.encryption.dynamodb_cmk]"} with input as t.plan([tb])
+}
+
+test_dynamodb_aws_managed_key_denied_in_production if {
+	tb := table([{"enabled": true, "kms_key_arn": "arn:aws:kms:us-east-1:111111111111:alias/aws/dynamodb"}])
+	rule_ids(enc.deny) == {"[iacp.encryption.dynamodb_cmk]"} with input as t.plan([tb]) with data.iacp.context as t.prod_ctx
+}
+
+test_dynamodb_aws_owned_key_allowed_in_development if {
+	count(enc.deny) == 0 with input as t.plan([table([])]) with data.iacp.context as t.dev_ctx
+}
+
+test_dynamodb_unchanged_table_ignored if {
+	tb := t.with_actions(table([]), ["no-op"])
+	count(enc.deny) == 0 with input as t.plan([tb]) with data.iacp.context as t.prod_ctx
+}
+
 # --- KMS -----------------------------------------------------------------------
 
 test_kms_rotation_enabled_allowed if {
