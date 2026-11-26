@@ -241,7 +241,7 @@ jobs:
         run: |
           if [ -z "$IACP_API_URL" ]; then
             echo "::notice title=Platform API not configured::stack lock not claimed for $STACK_PATH (local-first, ADR-0009)"
-            echo "claimed=false" >> "$GITHUB_OUTPUT"
+            printf 'attempted=false\nclaimed=false\n' >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [ -z "$LOCK_STACK_ID" ] || [ -z "$LOCK_REQUEST_ID" ]; then
@@ -249,6 +249,7 @@ jobs:
               "unknown. GET /v1/internal/requests/by-path is not implemented yet; dispatch apply.yml with stack_id and request_id."
             exit 1
           fi
+          # Writes attempted=true before the call, then claimed=true and fencing_token.
           python -m tools.stack_pipeline lock acquire --stack-id "$LOCK_STACK_ID" --request-id "$LOCK_REQUEST_ID"
 
       - id: pins
@@ -317,7 +318,10 @@ jobs:
           sed 's/^### pr-validate:/### apply plan:/' "$out/plan.md" >> "$GITHUB_STEP_SUMMARY"
 
       # fail-on-error: a 409 stale_fencing_token (another request took the lock)
-      # aborts the job before anything is applied.
+      # aborts the job before anything is applied. This is also the binding check
+      # between the dispatched stack_id and stack_path: the API resolves the stack
+      # by path and checks the token against that stack's lock, so a lock claimed
+      # on another stack is rejected here, before apply.
       - name: Report plan
         if: always() && steps.summary.outcome == 'success'
         uses: ./.github/actions/iacp-report
@@ -401,6 +405,9 @@ jobs:
           fencing-token: ${{ steps.lock.outputs.fencing_token }}
 
       # A passed "summary" finishes the run as succeeded; anything else as failed.
+      # It must be sent while the lock is still held: the API rejects any report
+      # whose fencing token is no longer current, so it cannot follow the release.
+      # A failed release is reported as its own stage below and fails the job.
       - name: Report summary
         if: always() && steps.lock.outcome == 'success'
         uses: ./.github/actions/iacp-report
@@ -416,12 +423,32 @@ jobs:
           error-message: ${{ job.status != 'success' && format('apply.yml did not finish ({0}); see the workflow run log', job.status) || '' }}
           fencing-token: ${{ steps.lock.outputs.fencing_token }}
 
-      - name: Release the platform stack lock
-        if: always() && steps.lock.outputs.claimed == 'true'
+      # Runs whenever a claim was attempted, even if its response was lost: without
+      # a fencing token, release reads the lock and frees it only if this request
+      # holds it (an unlocked stack or another request's lock is left alone).
+      - id: release
+        name: Release the platform stack lock
+        if: always() && steps.lock.outputs.attempted == 'true'
         env:
           LOCK_STACK_ID: ${{ inputs.stack_id }}
           LOCK_REQUEST_ID: ${{ inputs.request_id }}
           FENCING_TOKEN: ${{ steps.lock.outputs.fencing_token }}
         run: |
-          python -m tools.stack_pipeline lock release \
-            --stack-id "$LOCK_STACK_ID" --request-id "$LOCK_REQUEST_ID" --fencing-token "$FENCING_TOKEN"
+          args=(--stack-id "$LOCK_STACK_ID" --request-id "$LOCK_REQUEST_ID")
+          if [ -n "$FENCING_TOKEN" ]; then args+=(--fencing-token "$FENCING_TOKEN"); fi
+          python -m tools.stack_pipeline lock release "${args[@]}"
+
+      # The lock is still held when the release failed, so this report is accepted.
+      # A finished run keeps its status in the API; the stage records the failure.
+      - name: Report the failed release
+        if: always() && steps.release.outcome == 'failure' && steps.lock.outputs.claimed == 'true'
+        uses: ./.github/actions/iacp-report
+        with:
+          api-url: ${{ vars.IACP_API_URL }}
+          audience: ${{ vars.IACP_OIDC_AUDIENCE }}
+          pipeline: apply
+          stack-path: ${{ matrix.stack.path }}
+          stage: release
+          status: failed
+          error-message: the stack lock could not be released; it is held until its lease expires or an admin releases it
+          fencing-token: ${{ steps.lock.outputs.fencing_token }}
