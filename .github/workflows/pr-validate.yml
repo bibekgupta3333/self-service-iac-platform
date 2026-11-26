@@ -6,10 +6,12 @@
 #   detect    -> changed stacks as a JSON matrix (tools/stack_pipeline); fails on
 #                any environments/ path outside a valid stack root
 #   validate  -> per stack: fmt, module pins, init, installed-module check,
-#                validate, TFLint, Checkov,
-#                plan, show -json, conftest, hermetic LocalStack apply round
-#                trip; uploads the plan summary
+#                validate, TFLint, Checkov (both also as SARIF),
+#                plan, show -json, conftest, hermetic LocalStack apply
+#                round trip; uploads the plan summary and SARIF
 #   comment   -> sticky PR comment per stack (the only job that can write to the PR)
+#   code-scanning -> per stack: uploads the SARIF (the only job with
+#                security-events: write); skipped for fork and Dependabot PRs
 #   report    -> per stack: POST /v1/runs (pipeline validate) through the iacp-report
 #                action; the only job with id-token: write, and it runs no Terraform.
 #                Skipped with a notice while vars.IACP_API_URL is empty (ADR-0009)
@@ -234,19 +236,55 @@ jobs:
           tflint --init --config "$GITHUB_WORKSPACE/.tflint.hcl"
           tflint --config "$GITHUB_WORKSPACE/.tflint.hcl" --format compact
 
+      # SARIF for code scanning (WBS 6.1): a second, non-gating run; the step above
+      # keeps deciding pass or fail.
+      - name: TFLint SARIF (code scanning)
+        if: always() && steps.tflint.outcome != 'skipped'
+        continue-on-error: true
+        run: |
+          mkdir -p "$RUNNER_TEMP/sarif"
+          tflint --config "$GITHUB_WORKSPACE/.tflint.hcl" --format sarif > "$RUNNER_TEMP/sarif/tflint.raw.sarif" || true
+
       - id: checkov
         name: Checkov (stack and downloaded modules)
         # CKV_TF_1 wants a commit hash in the source string. Stacks pin exact release
         # tags (enforced by OPA iacp.forbidden.module_source), and the tag-to-commit
         # binding is verified twice above: "Verify module pins" against the remote and
         # "Verify installed modules" against what init actually fetched.
+        # The SARIF file is an extra output; the exit code (the gate) is unchanged.
         run: |
+          mkdir -p "$RUNNER_TEMP/sarif"
           checkov --directory . --framework terraform \
             --download-external-modules true \
             --external-modules-download-path "$RUNNER_TEMP/checkov-modules" \
             --external-checks-dir "$GITHUB_WORKSPACE/policies/checkov" \
             --skip-check CKV_TF_1 \
-            --quiet --compact
+            --quiet --compact \
+            --output cli --output sarif --output-file-path "console,$RUNNER_TEMP/sarif/checkov.raw.sarif"
+
+      # Both tools name files relative to the stack root, and Checkov names the
+      # downloaded modules by temp path; code scanning needs repository paths.
+      # Fork PRs cannot upload (read-only token), so their SARIF is not kept.
+      - name: Prepare SARIF for code scanning
+        if: always() && github.event.pull_request.head.repo.full_name == github.repository
+        continue-on-error: true
+        run: |
+          mkdir -p "$RUNNER_TEMP/sarif-upload"
+          for tool in tflint checkov; do
+            raw="$RUNNER_TEMP/sarif/$tool.raw.sarif"
+            if [ ! -s "$raw" ]; then echo "no $tool SARIF (the scan did not run)"; continue; fi
+            python -m tools.stack_pipeline --repo-root "$GITHUB_WORKSPACE" sarif . --in "$raw" \
+              --out "$RUNNER_TEMP/sarif-upload/$tool.sarif" --external-dir "$RUNNER_TEMP/checkov-modules"
+          done
+
+      - name: Keep SARIF for the code scanning upload
+        if: always() && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sarif-${{ matrix.stack.id }}
+          path: ${{ runner.temp }}/sarif-upload/*.sarif
+          if-no-files-found: ignore
+          retention-days: 7
 
       - id: plan
         name: terraform plan
@@ -372,6 +410,60 @@ jobs:
               echo "created comment for $id"
             fi
           done
+
+  # Uploads each stack's TFLint and Checkov SARIF to code scanning (WBS 6.1), one
+  # category per tool and stack. The only job with security-events: write; it runs
+  # no PR code, only checkout and the pinned upload action. Fork and Dependabot PRs
+  # get a read-only token and are skipped. Not part of pr-validate-result.
+  code-scanning:
+    name: code scanning (${{ matrix.stack.path }})
+    needs: [detect, validate]
+    if: >-
+      always() && needs.detect.outputs.count != '0'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: ${{ fromJSON(needs.detect.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # Missing when the leg failed before the scans ran.
+      - name: Download SARIF
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: sarif-${{ matrix.stack.id }}
+          path: ${{ runner.temp }}/sarif
+
+      - id: files
+        name: Find SARIF files
+        run: |
+          for tool in tflint checkov; do
+            if [ -s "$RUNNER_TEMP/sarif/$tool.sarif" ]; then echo "$tool=true"; else echo "$tool=false"; fi
+          done | tee -a "$GITHUB_OUTPUT"
+
+      - name: Upload TFLint SARIF
+        if: steps.files.outputs.tflint == 'true'
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: ${{ runner.temp }}/sarif/tflint.sarif
+          category: pr-validate/tflint/${{ matrix.stack.id }}
+
+      - name: Upload Checkov SARIF
+        if: steps.files.outputs.checkov == 'true'
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: ${{ runner.temp }}/sarif/checkov.sarif
+          category: pr-validate/checkov/${{ matrix.stack.id }}
 
   # Reports each stack's summary to the Platform API. A separate job so the OIDC
   # permission is never present while PR-controlled Terraform and providers run.
