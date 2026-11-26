@@ -23,9 +23,10 @@
 # used anyway).
 #
 # While vars.IACP_API_URL is empty the lock claim and the reports are skipped with
-# a notice. Once it is set, the claim needs the stack and request UUIDs: until
-# GET /v1/internal/requests/by-path exists, only a workflow_dispatch that passes
-# them can apply, and a push fails closed instead of applying without the lock.
+# a notice. Once it is set, the claim needs the stack and request UUIDs: they come
+# from GET /v1/internal/requests/by-path (the request holding the stack's lock, only
+# if it is approved) or from the dispatch inputs. A lookup that finds nothing fails
+# the job instead of applying without the lock.
 name: apply
 
 on:
@@ -244,26 +245,30 @@ jobs:
           key: tf-providers-${{ runner.os }}-${{ hashFiles(format('{0}/.terraform.lock.hcl', matrix.stack.path)) }}
           restore-keys: tf-providers-${{ runner.os }}-
 
-      # The lock route accepts OIDC tokens only from apply.yml / ttl-reaper.yml on
-      # main via push, workflow_dispatch or schedule (auth.RouteLocks).
+      # The lock and request-lookup routes accept OIDC tokens only from apply.yml on
+      # main via push or workflow_dispatch (auth.RouteLocks, auth.RouteRequestLookup).
+      # Without dispatch inputs the tool resolves the stack and request UUIDs, and the
+      # approved plan hash, with GET /v1/internal/requests/by-path; a push also sends
+      # its commit so a request merged as another commit is refused. Nothing found
+      # (no lock, request not approved) fails the step. Outputs: stack_id, request_id
+      # and approved_plan_hash when resolved, then attempted, claimed, fencing_token.
       - id: lock
         name: Claim the platform stack lock
         env:
           LOCK_STACK_ID: ${{ inputs.stack_id }}
           LOCK_REQUEST_ID: ${{ inputs.request_id }}
+          PUSH_SHA: ${{ github.event_name == 'push' && github.sha || '' }}
         run: |
           if [ -z "$IACP_API_URL" ]; then
             echo "::notice title=Platform API not configured::stack lock not claimed for $STACK_PATH (local-first, ADR-0009)"
             printf 'attempted=false\nclaimed=false\n' >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if [ -z "$LOCK_STACK_ID" ] || [ -z "$LOCK_REQUEST_ID" ]; then
-            echo "::error title=Stack lock::cannot claim the lock for $STACK_PATH: the stack and request UUIDs are" \
-              "unknown. GET /v1/internal/requests/by-path is not implemented yet; dispatch apply.yml with stack_id and request_id."
-            exit 1
-          fi
-          # Writes attempted=true before the call, then claimed=true and fencing_token.
-          python -m tools.stack_pipeline lock acquire --stack-id "$LOCK_STACK_ID" --request-id "$LOCK_REQUEST_ID"
+          args=(--stack-path "$STACK_PATH")
+          if [ -n "$LOCK_STACK_ID" ]; then args+=(--stack-id "$LOCK_STACK_ID"); fi
+          if [ -n "$LOCK_REQUEST_ID" ]; then args+=(--request-id "$LOCK_REQUEST_ID"); fi
+          if [ -n "$PUSH_SHA" ]; then args+=(--head-sha "$PUSH_SHA"); fi
+          python -m tools.stack_pipeline lock acquire "${args[@]}"
 
       - id: pins
         name: Verify module pins
@@ -349,17 +354,24 @@ jobs:
           fail-on-error: "true"
 
       # What is applied is what was approved. The approved hash comes from the
-      # approval record (GET /v1/internal/requests/by-path, not implemented yet)
-      # or a workflow_dispatch input. Once the API is configured a missing hash
-      # fails the job; only the local-first mode (no API) applies with a notice.
-      # In the hermetic CI both plans start from an empty LocalStack, so the PR
-      # plan and this re-plan hash the same when nothing else changed.
+      # approval record (GET /v1/internal/requests/by-path, resolved by the lock step)
+      # or a workflow_dispatch input; when both exist they must agree. Once the API
+      # is configured a missing hash fails the job; only the local-first mode (no
+      # API) applies with a notice. In the hermetic CI both plans start from an
+      # empty LocalStack, so the PR plan and this re-plan hash the same when nothing
+      # else changed.
       - id: planhash
         name: Verify the plan hash against the approved plan
         env:
-          APPROVED_PLAN_HASH: ${{ inputs.approved_plan_hash }}
+          RECORDED_PLAN_HASH: ${{ steps.lock.outputs.approved_plan_hash }}
+          INPUT_PLAN_HASH: ${{ inputs.approved_plan_hash }}
         run: |
           hex64='^[0-9a-f]{64}$'
+          if [ -n "$RECORDED_PLAN_HASH" ] && [ -n "$INPUT_PLAN_HASH" ] && [ "$RECORDED_PLAN_HASH" != "$INPUT_PLAN_HASH" ]; then
+            echo "::error title=Plan hash::the approved_plan_hash input differs from the hash the platform recorded at approval"
+            exit 1
+          fi
+          APPROVED_PLAN_HASH="${RECORDED_PLAN_HASH:-$INPUT_PLAN_HASH}"
           actual="$(jq -r '.plan_hash // empty' "$RUNNER_TEMP/summary/summary.json")"
           if ! [[ "$actual" =~ $hex64 ]]; then
             echo "::error title=Plan hash::the re-plan produced no plan hash"
@@ -371,7 +383,7 @@ jobs:
           fi
           if [ -z "$APPROVED_PLAN_HASH" ]; then
             if [ -n "$IACP_API_URL" ]; then
-              echo "::error title=Plan hash missing::no approved plan hash for $STACK_PATH; the API is configured, so the re-plan cannot be applied unverified (dispatch with approved_plan_hash until GET /v1/internal/requests/by-path exists)"
+              echo "::error title=Plan hash missing::no approved plan hash for $STACK_PATH; the API is configured, so the re-plan cannot be applied unverified"
               exit 1
             fi
             echo "::notice title=Plan hash check skipped (local-first)::no API and no approved plan hash for $STACK_PATH; re-plan hash $actual"
@@ -443,8 +455,9 @@ jobs:
         name: Release the platform stack lock
         if: always() && steps.lock.outputs.attempted == 'true'
         env:
-          LOCK_STACK_ID: ${{ inputs.stack_id }}
-          LOCK_REQUEST_ID: ${{ inputs.request_id }}
+          # The ids the lock step resolved by path, else the dispatch inputs.
+          LOCK_STACK_ID: ${{ steps.lock.outputs.stack_id || inputs.stack_id }}
+          LOCK_REQUEST_ID: ${{ steps.lock.outputs.request_id || inputs.request_id }}
           FENCING_TOKEN: ${{ steps.lock.outputs.fencing_token }}
         run: |
           args=(--stack-id "$LOCK_STACK_ID" --request-id "$LOCK_REQUEST_ID")
