@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import { decideProxy, isSafeSegment, MAX_BODY_BYTES, pickHeaders, type ProxyRequestInfo, proxyTarget, rewriteLocation } from "./proxy";
+import {
+  decideProxy,
+  isSafeSegment,
+  MAX_BODY_BYTES,
+  pickHeaders,
+  portalOrigins,
+  type ProxyRequestInfo,
+  proxyTarget,
+  rewriteLocation,
+} from "./proxy";
 
 describe("proxyTarget", () => {
   const base = "http://127.0.0.1:8080/";
@@ -141,6 +150,21 @@ describe("decideProxy", () => {
     const d = decideProxy(base, info({ method: "POST", contentLength }));
     if (want === "forward") expect(d.kind).toBe("forward");
     else expect(d).toMatchObject({ kind: "reject", status: want });
+  });
+});
+
+describe("portalOrigins", () => {
+  it("includes the Host the browser used, the URL origin and the configured origin", () => {
+    expect(portalOrigins("http://localhost:3000/api/iacp/v1/requests", "127.0.0.1:3000", "https://portal.example/")).toEqual([
+      "http://localhost:3000",
+      "http://127.0.0.1:3000",
+      "https://portal.example",
+    ]);
+  });
+
+  it("deduplicates and tolerates a missing Host", () => {
+    expect(portalOrigins("http://localhost:3000/x", "localhost:3000", undefined)).toEqual(["http://localhost:3000"]);
+    expect(portalOrigins("http://localhost:3000/x", null, "  ")).toEqual(["http://localhost:3000"]);
   });
 });
 

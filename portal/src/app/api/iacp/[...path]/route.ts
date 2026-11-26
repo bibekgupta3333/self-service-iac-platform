@@ -8,6 +8,7 @@ import {
   FORWARD_RESPONSE_HEADERS,
   MAX_BODY_BYTES,
   pickHeaders,
+  portalOrigins,
   rewriteLocation,
 } from "@/lib/api/proxy";
 
@@ -59,7 +60,7 @@ async function readCapped(req: Request, max: number): Promise<Uint8Array | null>
 async function forward(req: Request, ctx: Context): Promise<Response> {
   const { path } = await ctx.params;
   const url = new URL(req.url);
-  const allowedOrigins = [url.origin, process.env.IACP_PORTAL_ORIGIN?.trim()].filter((o): o is string => !!o);
+  const allowedOrigins = portalOrigins(req.url, req.headers.get("host"), process.env.IACP_PORTAL_ORIGIN);
   const decision = decideProxy(
     serverApiBaseUrl({
       IACP_API_URL: process.env.IACP_API_URL,

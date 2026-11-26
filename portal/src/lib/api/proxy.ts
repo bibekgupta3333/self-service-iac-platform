@@ -96,6 +96,22 @@ export interface ProxyRequestInfo {
 }
 
 /**
+ * portalOrigins lists the origins the portal is being served from: the scheme and Host the
+ * browser used (req.url can carry the server's own hostname instead, e.g. localhost under
+ * next start), the request URL's origin, and IACP_PORTAL_ORIGIN for deployments behind a
+ * proxy that rewrites Host. A cross-site page cannot choose the Host header of the victim's
+ * request, so trusting it here is safe. Pure.
+ */
+export function portalOrigins(requestUrl: string, host: string | null, configured: string | undefined): string[] {
+  const url = new URL(requestUrl);
+  const out = new Set<string>([url.origin]);
+  if (host) out.add(`${url.protocol}//${host}`);
+  const extra = configured?.trim().replace(/\/+$/, "");
+  if (extra) out.add(extra);
+  return [...out];
+}
+
+/**
  * isSameOriginRequest is the CSRF check for unsafe methods. Browsers send Sec-Fetch-Site on
  * every request, and Origin on every cross-origin POST, so a cross-site form or fetch is
  * always identified. A request with neither header comes from a non-browser client (curl, a
