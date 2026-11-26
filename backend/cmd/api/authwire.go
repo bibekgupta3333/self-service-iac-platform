@@ -15,9 +15,13 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/oauth"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/ratelimit"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/session"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/teamsync"
 )
+
+// loginsPerMinute bounds GET /v1/auth/login per remote address.
+const loginsPerMinute = 30
 
 // userAuth is everything the router needs for user authentication and RBAC.
 type userAuth struct {
@@ -72,7 +76,8 @@ func newUserAuth(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, clo
 			oauth.RedirectPolicy{Origins: g.RedirectAllowlist, Default: g.DefaultRedirect}, clock)
 		out.Authenticator = httpapi.NewSessionAuthenticator(sessions)
 		out.Handler = &httpapi.AuthHandler{Login: login, Sessions: sessions, Profiles: users, Audit: recorder,
-			Secure: g.SecureCookies(), Mode: string(config.AuthModeGitHub)}
+			Secure: g.SecureCookies(), Mode: string(config.AuthModeGitHub),
+			LoginLimiter: ratelimit.New(loginsPerMinute, time.Minute, 10_000, clock)}
 		out.Public = []httpapi.RouteRegistrar{out.Handler.Public()}
 		go sweepAuth(ctx, sessions, states, clock, logger)
 		slog.Info("GitHub OAuth login enabled", "org", g.Org, "callback", g.CallbackURL, "secure_cookies", g.SecureCookies())

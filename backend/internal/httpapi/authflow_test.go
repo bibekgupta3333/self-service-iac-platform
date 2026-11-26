@@ -16,6 +16,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/catalog"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/oauth"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/ratelimit"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/rbac"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/requests"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/session"
@@ -110,6 +111,20 @@ type flow struct {
 	audit *flowAudit
 	reqs  *fakeRequests
 	user  uuid.UUID
+
+	ah          *AuthHandler
+	deps        Deps
+	denialClock *flowClock
+}
+
+func (f *flow) limitLogin(n int) {
+	f.ah.LoginLimiter = ratelimit.New(n, time.Minute, 100, f.clock)
+}
+
+func (f *flow) limitDenials(n int) {
+	f.denialClock = &flowClock{t: f.clock.t}
+	f.deps.DenialLimiter = ratelimit.New(n, time.Minute, 100, f.denialClock)
+	f.h = NewRouter(f.deps)
 }
 
 func newFlow(t *testing.T, secure bool, role rbac.Role) *flow {
@@ -119,7 +134,8 @@ func newFlow(t *testing.T, secure bool, role rbac.Role) *flow {
 	f.sess = session.NewService(f.store, session.Policy{AbsoluteTTL: 8 * time.Hour, IdleTTL: 30 * time.Minute, TouchInterval: time.Minute}, f.clock)
 	f.login = &flowLogin{sessions: f.sess, user: f.user}
 	ah := &AuthHandler{Login: f.login, Sessions: f.sess, Profiles: flowProfiles{f.user}, Audit: f.audit, Secure: secure, Mode: "github"}
-	f.h = NewRouter(Deps{
+	f.ah = ah
+	f.deps = Deps{
 		Logger:         slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		Auth:           NewSessionAuthenticator(f.sess),
 		Ready:          okPinger{},
@@ -129,7 +145,8 @@ func newFlow(t *testing.T, secure bool, role rbac.Role) *flow {
 		Policies:       DefaultPolicies(),
 		Roles:          flowRoles{role},
 		DenialAudit:    f.audit,
-	})
+	}
+	f.h = NewRouter(f.deps)
 	return f
 }
 

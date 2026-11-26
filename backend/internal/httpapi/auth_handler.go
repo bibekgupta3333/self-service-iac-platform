@@ -5,15 +5,18 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/audit"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/oauth"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/observability"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/ratelimit"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/session"
 )
 
@@ -53,6 +56,9 @@ type AuthHandler struct {
 	Secure bool
 	// Mode is echoed by /v1/me ("dev" or "github").
 	Mode string
+	// LoginLimiter bounds GET /v1/auth/login per remote address (nil: unlimited). Behind the
+	// portal proxy the remote address is the portal's, so it acts as a global cap there.
+	LoginLimiter *ratelimit.Limiter
 }
 
 const stateCookieMaxAge = 10 * time.Minute
@@ -87,6 +93,15 @@ func (h *AuthHandler) stateCookie(value string, maxAge time.Duration) *http.Cook
 }
 
 func (h *AuthHandler) login(w http.ResponseWriter, r *http.Request) {
+	if h.LoginLimiter != nil {
+		ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+		if ok, retry := h.LoginLimiter.AllowN(ip); !ok {
+			w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
+			writeError(w, r, &apperr.Error{Kind: apperr.KindRateLimited, Code: "rate_limited",
+				Message: "too many login attempts; try again shortly"})
+			return
+		}
+	}
 	authURL, state, err := h.Login.Begin(r.Context(), r.URL.Query().Get("return_to"))
 	if err != nil {
 		writeError(w, r, err)

@@ -14,6 +14,7 @@ import (
 
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/fp"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/ratelimit"
 )
 
 // Pinger reports whether a dependency is reachable (the database pool in production).
@@ -56,6 +57,8 @@ type Deps struct {
 	Policies    PolicyTable
 	Roles       RoleLookup
 	DenialAudit EventRecorder
+	// DenialLimiter bounds denial audit events per user (nil: DenialAuditPerMinute).
+	DenialLimiter *ratelimit.Limiter
 }
 
 // MetricsSource records requests and serves the exposition (observability.Metrics).
@@ -130,7 +133,7 @@ func NewRouter(d Deps) http.Handler {
 		v1.Group(func(user chi.Router) {
 			user.Use(requireAuth(d.Auth))
 			if d.DenialAudit != nil {
-				user.Use(auditDenials(d.DenialAudit))
+				user.Use(auditDenials(d.DenialAudit, d.DenialLimiter))
 			}
 			if len(d.Policies) > 0 {
 				user.Use(authorize(d.Policies, d.Roles))

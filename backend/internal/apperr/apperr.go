@@ -27,6 +27,8 @@ const (
 	KindMethodNotAllowed
 	// KindUnavailable means a dependency needed to answer is down; the caller may retry.
 	KindUnavailable
+	// KindRateLimited means the caller made too many requests; the HTTP layer answers 429.
+	KindRateLimited
 )
 
 // Forbidden builds a KindForbidden error.

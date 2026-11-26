@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -15,6 +17,8 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/audit"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/observability"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/ratelimit"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/rbac"
 )
 
@@ -62,6 +66,10 @@ func DefaultPolicies() PolicyTable {
 		"POST /v1/auth/logout": {Action: rbac.ActionRead, Scope: ScopeAuthenticated},
 	}
 }
+
+// DenialAuditPerMinute bounds rbac.denied audit events per user per minute; further denials
+// are counted and reported by the user's next audited one (payload suppressed_before).
+const DenialAuditPerMinute = 20
 
 // RoleLookup resolves the caller's most privileged team role (identity.UserStore).
 type RoleLookup interface {
@@ -125,7 +133,12 @@ func routePattern(r *http.Request) string {
 // auditDenials records an rbac.denied audit event for every 403 an authenticated user
 // receives from the handlers below it (route policies and service-level role checks alike).
 // An audit failure is logged and never changes the response.
-func auditDenials(rec EventRecorder) func(http.Handler) http.Handler {
+func auditDenials(rec EventRecorder, lim *ratelimit.Limiter) func(http.Handler) http.Handler {
+	if lim == nil {
+		lim = ratelimit.New(DenialAuditPerMinute, time.Minute, 10_000, platform.SystemClock{})
+	}
+	var mu sync.Mutex
+	suppressed := map[string]int{} // denials not audited since the user's last audited one
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
@@ -137,10 +150,29 @@ func auditDenials(rec EventRecorder) func(http.Handler) http.Handler {
 			if err != nil || p.Type != identity.ActorUser {
 				return
 			}
+			actor := p.AuditActorID()
+			if !lim.Allow(actor) {
+				// Bounded volume: a user hammering a forbidden route cannot flood the chain.
+				// The count is carried by the next audited denial.
+				mu.Lock()
+				if len(suppressed) < 10_000 {
+					suppressed[actor]++
+				}
+				mu.Unlock()
+				return
+			}
+			mu.Lock()
+			skipped := suppressed[actor]
+			delete(suppressed, actor)
+			mu.Unlock()
 			route := r.Method + " " + routePattern(r)
 			ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-			payload, _ := json.Marshal(map[string]any{"method": r.Method, "route": routePattern(r), "login": p.Login})
-			if err := rec.Record(r.Context(), audit.Event{ActorType: string(p.Type), ActorID: p.AuditActorID(), ActorIP: ip,
+			body := map[string]any{"method": r.Method, "route": routePattern(r), "login": p.Login}
+			if skipped > 0 {
+				body["suppressed_before"] = skipped
+			}
+			payload, _ := json.Marshal(body)
+			if err := rec.Record(r.Context(), audit.Event{ActorType: string(p.Type), ActorID: actor, ActorIP: ip,
 				Action: "rbac.denied", SubjectType: "route", SubjectID: route, CorrelationID: RequestIDFrom(r.Context()),
 				Payload: payload}); err != nil {
 				observability.Logger(r.Context()).ErrorContext(r.Context(), "audit rbac denial failed", "error", err)
