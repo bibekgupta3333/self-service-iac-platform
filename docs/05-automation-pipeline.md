@@ -590,6 +590,19 @@ The API is idempotent: stacks already in `destroying`, or with an open destroy r
 
 ### 4.6 `module-release.yml`
 
+**Implemented (WBS 3.6, 3.7; local-first, ADR-0009).** [`.github/workflows/module-release.yml`](../.github/workflows/module-release.yml) uses `tools/module_release` (Python, `python-hcl2`) for every step that needs logic:
+
+| Job | Runs on | What it does | Permissions |
+|---|---|---|---|
+| `detect` | every PR; push to `main` touching the release paths | On a PR, plain `git diff` first checks whether `modules/`, `tools/module_release/`, `tools/requirements.txt` or the workflow changed; if not, it emits an empty matrix without installing Python. Otherwise `python -m tools.module_release detect --base <merge-base or push before> --include-untagged` emits a JSON matrix of modules changed in the diff, plus modules whose declared `metadata.version` has no tag yet. On push it also passes `--released-tags` (from `gh release list`) so modules tagged without a GitHub release are retried. An unknown base (for example the all-zero SHA of a new branch) selects every module. | `contents: read` |
+| `gate` (matrix) | PR and push | `python -m tools.module_release gate <module>`: the interface-diff SemVer gate of [04 section 5.2](04-module-registry.md#52-semver-rules-for-infrastructure-modules). The result goes to the job summary. | `contents: read` |
+| `semver gate result` | PR and push | One stable check for branch protection. The `pull_request` trigger has no `paths:` filter, so it reports on every PR; it passes when the gate passed or no module needed it. | none |
+| `release` (matrix) | `push` or `workflow_dispatch` on `main` | `info` reads version and tag. Creates the tag `modules/<name>/v<version>` at `GITHUB_SHA` through the Git refs API if it is missing, and never moves an existing one. Creates a GitHub release (marked prerelease for `-rc.N` versions) with notes from `notes`: the CHANGELOG section, or a generated diff summary. Then runs `index --skip-if-unconfigured` against `vars.IACP_API_URL` with `secrets.IACP_INTERNAL_TOKEN`, using the commit the tag points at (annotated tags are peeled). Skipped only when both are unset. | `contents: write` (only this job) |
+
+Every `run:` step uses `shell: bash` (`-eo pipefail`). Static checks, `terraform test` and Terratest are not repeated here; they run on every PR in `ci.yml`. Not yet implemented from the target below: the GitHub App token and `module-release` environment (the `GITHUB_TOKEN` creates tags for now), the upgrade-plan test, OIDC authentication for the index call (the backend already accepts OIDC from `module-release.yml` on main via `push` or `workflow_dispatch`; the step still sends the shared token), and provenance attestation. `workflow_dispatch` on `main` re-runs the release for every module. Locally, `make module-gate` runs the gate for every module.
+
+Target design:
+
 ```yaml
 name: module-release
 on:
@@ -682,7 +695,7 @@ The tag push fails if the tag already exists, so re-running the job cannot move 
 | Require review from Code Owners | yes |
 | Dismiss stale approvals on new commits | yes |
 | Require approval of most recent push | yes (author cannot self-approve after pushing) |
-| Required status checks | `pr-validate-result`, `module-release / test` (when modules change), `policy-tests`, `backend-ci`, `portal-ci` |
+| Required status checks | `pr-validate-result`, `module-release / semver gate result` (reports on every PR), `policy-tests`, `backend-ci`, `portal-ci` |
 | Require branches up to date before merging | yes (guarantees the PR plan was computed against current `main`) |
 | Require linear history | yes (squash merge only) |
 | Require signed commits | yes (GitHub App commits are signed by GitHub) |

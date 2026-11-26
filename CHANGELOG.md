@@ -40,7 +40,7 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 - Make targets `go-integration`, `generator-update` and `api`.
 - Module registry MVP (WBS 3.1–3.5):
   - `modules/_shared/module.schema.json`, the JSON Schema for `module.yaml`.
-  - `tools/manifest_validator`: schema, inputs-schema and variables.tf parity checks. Pytest suite; run it with `make validate-manifests`.
+  - `tools/manifest_validator`: schema, inputs-schema, variables.tf parity and `compatibility` against `required_version`/`required_providers` checks. Pytest suite; run it with `make validate-manifests`.
   - `modules/s3` v1.0.0:
     - KMS CMK, public access block, TLS-only and TLS ≥ 1.2 bucket policy, versioning
     - one lifecycle rule, optional access logging, `additional_policy_statements` and `key_service_principals`
@@ -51,6 +51,19 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
     - tagged SQS event source with validated batching, KMS grants for queues, and guarded `extra_policy_jsons`
   - LocalStack examples with `policy-context.json` and `terraform test` suites (s3 14, sqs 11, lambda 23).
   - Terratest suite (`tests/`) for s3 and sqs that asserts the platform tag values. Run it with `make integration-test`.
+- Module release (WBS 3.6, 3.7 partial):
+  - `tools/module_release`, a SemVer interface-diff gate. It parses the module with `python-hcl2` (pinned 8.1.4) at the last `modules/<name>/vX.Y.Z` tag and at HEAD, classifies changes as major, minor or patch, and fails when `metadata.version` is bumped too little or not at all. Run it with `make module-gate`, which is also part of `make lint`.
+    - It compares variables (type, default, `nullable`, validation conditions with string literals kept verbatim), outputs (name and `sensitive`; a non-literal `sensitive` is treated as sensitive), and the floors of `required_version` and `required_providers` (a raised minimum major version or a removed provider is major; providers are keyed by their implied `hashicorp/<name>` source when none is given).
+    - It handles first releases and `0.x` modules, and fails when an already tagged version (prereleases included) changed, or when a prerelease is lower than an existing one.
+  - `notes` builds release notes from the module's CHANGELOG section, or from a generated diff summary against the last final release below the declared version.
+  - `index` posts the parsed `module.yaml` to `POST /v1/internal/catalog/index` in the backend's `IndexCommand` shape. It authenticates with `IACP_INTERNAL_TOKEN`, retries 5xx responses, refuses redirects, and accepts plain http only for loopback hosts. Setting only one of `IACP_API_URL` and `IACP_INTERNAL_TOKEN` is an error.
+  - Pytest suite (209 tests, including temporary git repositories, a fake HTTP server and an opt-in `IACP_INTEGRATION=1` test against a running API).
+  - `.github/workflows/module-release.yml`:
+    - It runs on every PR, so the `semver gate result` check always reports. PRs that don't touch modules or the tooling get an empty matrix without installing Python.
+    - On pushes to `main` (or a manual `workflow_dispatch` on `main`), it creates any missing tags and GitHub releases (also retrying tags that have no release), then calls the catalog index, which is skipped with a notice until `IACP_API_URL` and `IACP_INTERNAL_TOKEN` are configured.
+    - Steps run with bash `pipefail`, and annotated tags are peeled to their commit before indexing.
+    - Actions are pinned by SHA, and only the release job has `contents: write`.
+    - The first merge to `main` creates `modules/{s3,sqs,lambda}/v1.0.0`.
 - Per-stack platform lock (WBS 4.6), `backend/internal/locks`:
   - fencing tokens from `lock_fencing_seq`, a 7-day lease with heartbeat, takeover of expired leases, and a FIFO queue (`requests.queued_behind`) promoted on release
   - pure decisions (`Decide`, `NextInQueue`, `CheckToken`); the repository serialises each stack with `SELECT … FOR UPDATE` and a concurrency test proves one winner
@@ -77,7 +90,7 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 
 ### Planned
 - M0 Foundations (remaining): smoke stack against LocalStack. The real-AWS state bucket and OIDC roles are deferred by ADR-0009.
-- M1 Module registry (remaining): `module-release.yml` tagging and catalog indexing (3.6–3.7), Lambda Terratest.
+- M1 Module registry (remaining): upgrade-plan test and CHANGELOG/upgrade-notes check in `module-release.yml`, a live catalog index once a hosted API exists, Lambda Terratest.
 - M2 Orchestration engine (remaining): GitHub App PRs, webhooks, OAuth/RBAC, `pr-validate.yml`, `apply.yml`, OIDC `jti` replay cache.
 - M3 Security gates (remaining): SARIF upload, budget context, approval and budget policies, environment protection.
 - M4 Portal and destroy: Next.js dashboard, destroy flow, Infracost comments.

@@ -14,6 +14,8 @@ from typing import Iterable
 from jsonschema import Draft202012Validator, FormatChecker
 from jsonschema.exceptions import SchemaError
 
+from tools.module_release.interface import InterfaceError, parse_interface
+
 from . import diffing, hcl
 from .models import Finding, ModulePackage
 
@@ -153,6 +155,52 @@ class OutputParityChecker(Check):
             findings.append(
                 self.finding(package, f"outputs missing from module.yaml: {diffing.format_names(only_tf)}")
             )
+        return findings
+
+
+class CompatibilityParityChecker(Check):
+    """``compatibility`` in module.yaml must match the ``terraform {}`` block.
+
+    ``compatibility.terraform`` must equal ``required_version``, and
+    ``compatibility.providers`` must list the same providers (by source, with
+    Terraform's implied ``hashicorp/<name>``) with the same version constraints
+    as ``required_providers``. Constraints are compared after normalising
+    whitespace. The catalog indexes the manifest ranges while the SemVer gate
+    reads the ``.tf`` files, so they must not drift.
+    """
+
+    code = "compatibility-parity"
+
+    def check(self, package: ModulePackage) -> list[Finding]:
+        compatibility = _get(package.manifest, "compatibility")
+        if not isinstance(compatibility, dict) or not package.tf_files:
+            return []
+        try:
+            interface = parse_interface(package.tf_files)
+        except InterfaceError as exc:
+            return [self.finding(package, str(exc))]
+        findings = []
+        declared_tf = diffing.normalise_constraint(compatibility.get("terraform"))
+        actual_tf = diffing.normalise_constraint(interface.terraform_version)
+        if actual_tf is None:
+            findings.append(self.finding(package, "terraform.required_version is not set in the .tf files"))
+        elif declared_tf != actual_tf:
+            findings.append(self.finding(
+                package, f"compatibility.terraform '{compatibility.get('terraform')}' does not match "
+                         f"required_version '{interface.terraform_version}'"))
+        providers = compatibility.get("providers") if isinstance(compatibility.get("providers"), dict) else {}
+        only_manifest, only_tf = diffing.key_diff(providers, interface.providers)
+        if only_manifest:
+            findings.append(self.finding(
+                package, f"compatibility.providers missing from required_providers: {diffing.format_names(only_manifest)}"))
+        if only_tf:
+            findings.append(self.finding(
+                package, f"required_providers missing from compatibility.providers: {diffing.format_names(only_tf)}"))
+        for name in sorted(set(providers) & set(interface.providers)):
+            if diffing.normalise_constraint(providers[name]) != diffing.normalise_constraint(interface.providers[name]):
+                findings.append(self.finding(
+                    package, f"compatibility.providers['{name}'] '{providers[name]}' does not match "
+                             f"required_providers version '{interface.providers[name]}'"))
         return findings
 
 

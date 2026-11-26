@@ -82,6 +82,19 @@ class TestDiffing:
     def test_types_compatible(self, family, types, ok):
         assert diffing.types_compatible(family, frozenset(types)) is ok
 
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            (">=1.10,<2.0", ">= 1.10, < 2.0"),
+            ("  >= 5.60 ,  < 6.0 ", ">= 5.60, < 6.0"),
+            ("~>5.0", "~> 5.0"),
+            ("1.2.3", "1.2.3"),
+            (None, None),
+        ],
+    )
+    def test_normalise_constraint(self, raw, expected):
+        assert diffing.normalise_constraint(raw) == expected
+
     def test_json_path(self):
         assert diffing.json_path(["metadata", "owners", 0]) == "metadata.owners[0]"
         assert diffing.json_path([]) == "<root>"

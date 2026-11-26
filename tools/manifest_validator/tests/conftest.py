@@ -92,6 +92,19 @@ output "iacp_metadata" {
 }
 """
 
+VERSIONS_TF = """
+terraform {
+  required_version = ">= 1.10, < 2.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = ">= 5.60, < 6.0"
+    }
+  }
+}
+"""
+
 LOCALS_TF = """
 locals {
   module_version = "1.0.0"
@@ -115,7 +128,8 @@ def modules_root(tmp_path: Path) -> Path:
 @pytest.fixture
 def make_module(modules_root: Path):
     def _make(name: str = "demo", manifest: dict | None = None, variables: str = VARIABLES_TF,
-              outputs: str = OUTPUTS_TF, locals_tf: str = LOCALS_TF, raw_manifest: str | None = None) -> Path:
+              outputs: str = OUTPUTS_TF, locals_tf: str = LOCALS_TF, raw_manifest: str | None = None,
+              versions_tf: str | None = VERSIONS_TF) -> Path:
         path = modules_root / name
         path.mkdir()
         if raw_manifest is not None:
@@ -125,6 +139,8 @@ def make_module(modules_root: Path):
         (path / "variables.tf").write_text(variables)
         (path / "outputs.tf").write_text(outputs)
         (path / "locals.tf").write_text(locals_tf)
+        if versions_tf is not None:
+            (path / "versions.tf").write_text(versions_tf)
         return path
 
     return _make

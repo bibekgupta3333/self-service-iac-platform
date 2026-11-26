@@ -39,3 +39,4 @@ class ModulePackage:
     variables: dict[str, str] = field(default_factory=dict)
     outputs: dict[str, str] = field(default_factory=dict)
     locals_body: str = ""
+    tf_files: dict[str, str] = field(default_factory=dict)
