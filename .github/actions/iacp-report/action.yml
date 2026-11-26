@@ -4,8 +4,9 @@
 # validates the payload (backend/internal/runs/report.go) and sends it. The caller
 # must have checked out the repository and set up Python 3.12.
 #
-# Auth: a GitHub OIDC token for `audience` when the job has `id-token: write`,
-# otherwise the shared `internal-token`. Tokens never reach argv or the log: they
+# Auth: a GitHub OIDC token for `audience` when the job has `id-token: write` (an
+# empty audience is then an error, never a fallback); only a job without that
+# permission uses the shared `internal-token`. Tokens never reach argv or the log: they
 # travel through env and are registered with ::add-mask::.
 #
 # `github.head_sha` is always the job's github.sha (the OIDC token's `sha` claim; for
@@ -25,7 +26,9 @@ inputs:
     required: false
     default: ""
   internal-token:
-    description: Shared IACP_INTERNAL_TOKEN, used only when no OIDC token can be requested.
+    description: >-
+      Shared IACP_INTERNAL_TOKEN, used only in jobs without id-token write. Never pass it from a job
+      that runs pull-request code: the API does not scope it to a workflow.
     required: false
     default: ""
   pipeline:

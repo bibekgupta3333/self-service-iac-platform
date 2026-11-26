@@ -68,11 +68,13 @@ class Credential:
 class TokenSource:
     """Chooses the bearer token for one invocation.
 
-    OIDC first: when ``audience`` is set and the runner exposes
-    ``ACTIONS_ID_TOKEN_REQUEST_URL`` / ``ACTIONS_ID_TOKEN_REQUEST_TOKEN`` (the
-    job has ``id-token: write``), a token is requested for that audience. A
-    failed OIDC request raises instead of silently falling back. Without OIDC
-    the shared internal token is used. Every token is registered with
+    OIDC first: when the runner exposes ``ACTIONS_ID_TOKEN_REQUEST_URL`` /
+    ``ACTIONS_ID_TOKEN_REQUEST_TOKEN`` (the job has ``id-token: write``), a
+    token is requested for ``audience``. A job that can mint OIDC tokens never
+    falls back to the shared token: an empty audience or a failed OIDC request
+    raises, so a half-configured repository cannot silently run unscoped (the
+    backend does not scope the shared token to a workflow). Only a job without
+    ``id-token: write`` uses the shared internal token. Every token is registered with
     ``::add-mask::`` inside GitHub Actions so the runner masks it in all logs.
     """
 
@@ -96,7 +98,10 @@ class TokenSource:
     def credential(self, audience: str) -> Credential | None:
         """The token to use, or None when neither OIDC nor the internal token is available."""
         cred: Credential | None = None
-        if audience.strip() and self.oidc_available:
+        if self.oidc_available:
+            if not audience.strip():
+                raise ApiError("this job can request GitHub OIDC tokens but no audience is configured "
+                               "(set IACP_OIDC_AUDIENCE); refusing to fall back to the shared token")
             cred = Credential(self._oidc_token(audience.strip()), "oidc")
         elif self._env.get("IACP_INTERNAL_TOKEN", "").strip():
             cred = Credential(self._env["IACP_INTERNAL_TOKEN"].strip(), "internal")

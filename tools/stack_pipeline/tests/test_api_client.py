@@ -171,11 +171,15 @@ class TestTokenSource:
         assert cred.kind == "internal"
         assert out.getvalue() == f"::add-mask::{INTERNAL}\n"
 
-    def test_internal_token_when_no_audience(self, api):
+    def test_oidc_without_audience_never_falls_back(self, api):
+        # A job that can mint OIDC tokens must not run unscoped with the shared token.
         env = {"ACTIONS_ID_TOKEN_REQUEST_URL": f"{api.url}/token", "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "x",
                "IACP_INTERNAL_TOKEN": INTERNAL}
-        assert TokenSource(env).credential("").kind == "internal"
+        out = io.StringIO()
+        with pytest.raises(ApiError, match="no audience"):
+            TokenSource({**env, "GITHUB_ACTIONS": "true"}, stdout=out).credential("  ")
         assert api.calls == []
+        assert out.getvalue() == ""  # nothing masked, nothing chosen
 
     def test_failed_oidc_request_does_not_fall_back(self, api):
         api.reply("GET", "/token", 403, {})

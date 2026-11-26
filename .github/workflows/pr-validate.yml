@@ -417,12 +417,14 @@ jobs:
 
       # head_sha is github.sha (the merge commit the OIDC token names), never the PR
       # head; request_short_id and fencing_token come from iacp.stack.json.
+      # OIDC only: this job runs the PR's own tools/ and action code, so it must
+      # never see IACP_INTERNAL_TOKEN, which the API does not scope to a workflow.
+      # Without IACP_OIDC_AUDIENCE the report fails (as a warning) instead.
       - name: Report to the Platform API
         uses: ./.github/actions/iacp-report
         with:
           api-url: ${{ vars.IACP_API_URL }}
           audience: ${{ vars.IACP_OIDC_AUDIENCE }}
-          internal-token: ${{ secrets.IACP_INTERNAL_TOKEN }}
           pipeline: validate
           stack-path: ${{ matrix.stack.path }}
           stage: summary
