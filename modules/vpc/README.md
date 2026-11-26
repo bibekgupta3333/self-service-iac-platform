@@ -116,3 +116,12 @@ terraform -chdir=modules/vpc init -backend=false
 terraform -chdir=modules/vpc test
 cd tests && go test -run TestVPC ./...
 ```
+
+### What LocalStack cannot prove
+
+LocalStack does not evaluate IAM conditions. The tests check that the flow
+log role's trust policy names `vpc-flow-logs.amazonaws.com` with
+`aws:SourceAccount` and `aws:SourceArn` conditions, and that the KMS key
+policy limits CloudWatch Logs to the flow log group through
+`kms:EncryptionContext:aws:logs:arn`, but not that AWS enforces them. Verify
+flow log delivery once in a real account before relying on it.

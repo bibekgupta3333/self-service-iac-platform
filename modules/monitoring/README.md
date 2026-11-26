@@ -138,3 +138,14 @@ terraform -chdir=modules/monitoring init -backend=false
 terraform -chdir=modules/monitoring test
 cd tests && go test -run TestMonitoring ./...
 ```
+
+### What LocalStack cannot prove
+
+LocalStack does not evaluate IAM conditions or deliver alarm notifications
+through KMS. The tests check that the key policy and the topic policy grant
+`cloudwatch.amazonaws.com` (and any `publisher_service_principals`) only
+`kms:GenerateDataKey*`/`kms:Decrypt` and `sns:Publish` under an
+`aws:SourceAccount` condition, and that Lambda invoke permissions carry
+`source_arn` and `source_account`, but not that AWS honours those conditions
+end to end. Trigger one alarm in a real account and confirm the notification
+arrives before relying on the topic in production.
