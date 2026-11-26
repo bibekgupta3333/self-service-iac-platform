@@ -125,7 +125,7 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 | [ ] 8.4 | TTL: EventBridge Scheduler, 24 h warning, auto destroy (non-prod), extend, hourly reaper | 3 | 7.6 |
 | [ ] 8.5 | Budgets: `budget.rego`, Infracost gating, admin override, Cost Explorer actuals | 3 | 5.5, 6.2 |
 | [~] 8.6 | RBAC: viewer/developer/maintainer/admin, production gates, matrix tests (matrix, route policies, denial audit and tests done; production gates wait for 8.8) | 2 | 4.4 |
-| [ ] 8.7 | Recovery: failure classifier, retry (max 2, backoff), rollback PR, break-glass `state-surgery` | 3 | 5.3 |
+| [x] 8.7 | Recovery: failure classifier, retry (max 2, backoff), rollback PR, break-glass `state-surgery` (platform lock for surgery and S3 `restore_version` wait for the S3 backend) | 3 | 5.3 |
 | [ ] 8.8 | Production environment enablement | 1 | 8.6 |
 
 ## 9. Scale & ecosystem — Phase 3

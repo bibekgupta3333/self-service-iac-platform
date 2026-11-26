@@ -264,6 +264,31 @@ CREATE TABLE pipeline_runs (
 CREATE INDEX pipeline_runs_request_idx ON pipeline_runs (request_id, created_at DESC);
 CREATE INDEX pipeline_runs_active_idx  ON pipeline_runs (status) WHERE status IN ('queued', 'in_progress');
 
+-- Classified apply failures and the automatic retries they scheduled (migration 0016,
+-- docs/06 §5). One row per failed run of a request; iacp_app: SELECT, INSERT, UPDATE.
+CREATE TYPE failure_class AS ENUM ('transient', 'config', 'infra');
+CREATE TABLE apply_failures (
+    id                  uuid PRIMARY KEY,
+    request_id          uuid NOT NULL REFERENCES requests(id) ON DELETE CASCADE,
+    stack_id            uuid NOT NULL REFERENCES stacks(id) ON DELETE CASCADE,
+    github_run_id       bigint NOT NULL,
+    github_run_attempt  int    NOT NULL,
+    stage               text   NOT NULL,              -- first failed stage of the run: plan, apply, destroy, smoke, ...
+    terraform_exit_code int,
+    failure_class       failure_class NOT NULL,
+    reason              text   NOT NULL,              -- throttling, timeout, provider_5xx, lock_contention, partial_apply, ...
+    decision            text   NOT NULL,              -- retry_scheduled, not_transient, retry_budget_exhausted, lock_lost, ...
+    retry_number        int,                          -- requests.retry_count after the retry (1..2)
+    retry_at            timestamptz,                  -- dispatch job available_at (backoff)
+    dispatch_state      text,                         -- scheduled → dispatching → dispatched | dispatch_failed | skipped
+    dispatch_detail     text,
+    dispatched_at       timestamptz,
+    created_at          timestamptz NOT NULL,
+    updated_at          timestamptz NOT NULL,
+    UNIQUE (request_id, github_run_id, github_run_attempt)
+);
+CREATE UNIQUE INDEX apply_failures_retry_idx ON apply_failures (request_id, retry_number) WHERE retry_number IS NOT NULL;
+
 CREATE TABLE plan_summaries (
     id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     pipeline_run_id   uuid        NOT NULL UNIQUE REFERENCES pipeline_runs(id) ON DELETE CASCADE,
@@ -560,7 +585,7 @@ stateDiagram-v2
 | `pr_open`/`validating`/`plan_ready`/`approved` | `pull_request.closed` (unmerged) | `rejected` | release lock |
 | `approved` | `pull_request.closed` merged (`pr_merged`, the push to main) / `workflow_run` apply in_progress | `applying` | store `merge_commit_sha`; the stack status is unchanged until the apply run reports (`provisioning`/`updating`/`destroying` arrive with WBS 5.3) |
 | `applying` | callback apply succeeded | `applied` | stack outputs, `last_applied_sha`; stack → `active`/`destroyed`; release lock; dispatch next queued |
-| `applying` | callback apply failed (transient), `retry_count < 2` | `applying` | `retry_count += 1`; re-dispatch with backoff |
+| `applying` | callback apply failed (transient), `retry_count < 2` | `applying` | `retry_count += 1`; re-dispatch with backoff (`internal/recovery`: the run observer classifies the failed stage, `Next(apply_retry)` enforces the cap, an outbox job `recovery.apply_retry` dispatches `apply.yml` after 2 min, then 10 min) |
 | `applying` | callback apply failed (non-transient, or transient with retries used up) | `failed` | stack → `failed`; notify; release lock |
 
 **Publishing (WBS 4.8), review hardening.** `PublishTarget` and `RecordPublished` check the stack's current lock row (`locks.CheckToken`), since `requests.fencing_token` is not cleared on release or takeover. Every promotion of a queued request (release, `DELETE …/lock`, or an expired lease handed to the head of the queue) runs the lock service's promotion hook, which enqueues the promoted request's publish job in the grant transaction. Commits replace the stack directory as a whole, keeping files the generator does not render (`.terraform.lock.hcl`); on GitHub only the stack's subtree is listed. A final publish failure withdraws the branch and PR it left behind (best effort, audited), unless a re-read shows a PR is recorded. Outbox outcome writes are guarded by the claim's attempt number.
@@ -701,6 +726,7 @@ RBAC column uses team roles (see [07-security-and-policy.md](07-security-and-pol
 | GET | `/stacks/{id}/upgrades` | Available module upgrades per resource. | viewer |
 | PATCH | `/stacks/{id}` | Change metadata only (e.g. extend `expires_at` within env max). | developer (non-prod), maintainer (prod) |
 | GET | `/stacks/{id}/lock` / DELETE `/stacks/{id}/lock` | Inspect / force-release platform lock. | viewer / admin |
+| POST | `/stacks/{id}/rollback` | Open a rollback: an `update` request whose spec is the stack's last successfully applied configuration, through the normal request path (catalog and input checks, stack lock, audit, PR). Body `{"reason": "..."}` (1-1000 characters); `Idempotency-Key` required, as for `POST /requests`; `202` with the request, `Idempotent-Replayed: true` on a replay. Target: a `failed` stack returns to its newest `applied` create/update; an `active` or `drifted` stack to the one before it. Refused with `409 stack_destroyed`, `409 stack_busy` (provisioning, updating, destroying, or any open request) and `409 no_rollback_target`. The spec records `rollback_of` (the restored request's short id), the `request.created` audit event carries it, and the PR is titled `iacp: rollback <env>/<team>/<stack> to <req> (<req>)`, labelled `iacp:rollback` and explains what is and is not restored. | maintainer (rbac `retry`; route policy plus the caller's role in the stack's team; no role is `404`) |
 
 Stacks are never created or destroyed directly; mutation is always a request.
 
@@ -714,7 +740,7 @@ Stacks are never created or destroyed directly; mutation is always a request.
 | POST | `/requests/{id}/preview` | Dry-run render: returns generated files + diff without opening a PR. | developer |
 | POST | `/requests/{id}/cancel` | Cancel (`draft`/`pr_open`/`plan_ready`); closes PR, releases lock. | creator or maintainer |
 | POST | `/requests/{id}/replan` | Re-dispatch `pr-validate.yml` (e.g. after plan mismatch). | developer |
-| POST | `/requests/{id}/retry-apply` | Re-dispatch `apply.yml` for a `failed` request whose merge is on `main`. | maintainer |
+| POST | `/requests/{id}/retry-apply` | Re-dispatch `apply.yml` for a `failed` request whose merge is on `main`. Not implemented yet: automatic retries of transient failures are (docs/06 §5). | maintainer |
 | GET | `/requests/{id}/events` | Server-Sent Events stream of status changes (below). Any role in the request's team; others get `404`. | viewer |
 
 **Create** — `POST /v1/requests`
@@ -944,6 +970,7 @@ Called only by GitHub Actions jobs with `Authorization: Bearer <GitHub OIDC JWT>
 | POST | `/internal/stacks/{id}/lock` | worker, `apply.yml` | Acquire for `{"request_id"}`: `200 {"lock": "granted"\|"held", "queued_behind": null, "current": {…}}` or `202 {"lock": "queued", "queued_behind": "<holder request id>", "current": {…}}`. |
 | POST | `/internal/stacks/{id}/lock/heartbeat` | worker, `apply.yml` | Renew the lease: `{"request_id", "fencing_token"}`; `409 stale_fencing_token` when superseded. |
 | DELETE | `/internal/stacks/{id}/lock?request_id=&fencing_token=` | worker, `apply.yml` | Release (terminal request) and promote the oldest queued request: `200 {"released": {…}, "promoted": {…}\|null}`; `409 stale_fencing_token`. |
+| POST | `/internal/state-surgery` | `state-surgery.yml` | Break-glass audit report (docs/06 §2.3): `stack_path`, `operation` (`state rm`, `state mv`, `import`, `force-unlock`), `args`, `ticket`, `requested_by`, `dry_run`, `outcome` (`succeeded`, `failed`, `refused`), exit codes, state digests and `github {run_id, run_attempt, head_sha}` (must be the token's run, `403 run_mismatch`). Validated with the workflow's rules; appended as one `state.surgery` audit event on the stack (`201`); a resend by the same run attempt is `200 {"duplicate": true}`. A refused run's rejected arguments are never stored. |
 
 Machine endpoints accept the GitHub OIDC JWT, and, as a fallback while workflows migrate, the shared `IACP_INTERNAL_TOKEN`. Neither configured means every call is rejected.
 
@@ -957,6 +984,7 @@ Route classes (`backend/internal/auth/routes.go`, pure table enforced by middlew
 | catalog_index | `/internal/catalog/index` | `module-release.yml` | `refs/heads/main` | `push`, `workflow_dispatch` |
 | runs | `/runs` | `pr-validate.yml`, `apply.yml`, `drift.yml`, `ttl-reaper.yml` | per pipeline | `pull_request`, `push`, `workflow_dispatch`, `schedule` |
 | request_lookup | `/internal/requests/by-path` (read-only) | `apply.yml` only | `refs/heads/main` (ref and workflow definition) | `push`, `workflow_dispatch` |
+| state_surgery | `/internal/state-surgery` | `state-surgery.yml` only | `refs/heads/main` (ref and workflow definition) | `workflow_dispatch` |
 | budget_context | `/internal/budget-context` (read-only) | `pr-validate.yml`, `apply.yml` | global allow-list (PR merge ref for `pr-validate.yml`, main otherwise) | `pull_request`, `push`, `workflow_dispatch` |
 
 Per pipeline on `/runs`: `validate` ← `pr-validate.yml` on `pull_request`; `apply` ← `apply.yml` on main via `push`/`workflow_dispatch`; `drift` ← `drift.yml` on main via `schedule`/`workflow_dispatch`; `ttl_destroy` ← `ttl-reaper.yml` on main via `schedule`/`workflow_dispatch`. `pull_request_target` and `workflow_run` never qualify.

@@ -650,7 +650,8 @@ Roles are per team, derived from GitHub team membership: `<team>-viewers` → vi
 | Approve PR / Environment — production | | | ✓ (not own) | ✓ | |
 | Cancel own request | | ✓ | ✓ | ✓ | |
 | Cancel others' request | | | ✓ | ✓ | |
-| Retry failed apply / rollback | | | ✓ | ✓ | |
+| Retry failed apply / rollback (`POST /v1/stacks/{id}/rollback`) | | | ✓ | ✓ | |
+| Break-glass state surgery (`state-surgery.yml`) | GitHub-side only: dispatch from main by the platform team, approval by a `break-glass` Environment reviewer (not the dispatcher); recorded as `state.surgery` | | | | |
 | Extend TTL (within env max) | | ✓ | ✓ | ✓ | |
 | Resolve drift: reconcile / codify | | ✓ | ✓ | ✓ | |
 | Resolve drift: ignore | | | ✓ | ✓ | |
@@ -684,6 +685,8 @@ The highest matching role wins. Rows with `source = 'manual'` are never changed 
 **Stale authority.** Roles and the admin flag are refreshed only at login, so a person removed from a GitHub team keeps their platform role for up to the session lifetime (8 hours by default; 1 hour idle). Disabling a user (`users.disabled_at`) ends their sessions immediately. Shorten `IACP_AUTH_SESSION_TTL` where that window is too long; a periodic or webhook-driven resync (needs an org credential, WBS 4.8) is the real fix and is not built.
 
 **Read scoping.** `GET /v1/requests` and `GET /v1/requests/{id}` only return requests of the caller's teams (platform admins see all); a request in another team is `404`, identical to one that does not exist, and `?team=` can only narrow within the caller's teams. Services and SQL share one helper, `identity.Visibility` (`UserStore.VisibleTeams`, `Visibility.SQLArgs`, predicate `($all OR team_id = ANY($ids))`), which other read routes (stacks, events) use too. The audit routes are admin-only, and the catalog is shared reference data.
+
+**Recovery (WBS 8.7).** `POST /v1/stacks/{id}/rollback` has the route policy `retry` (maintainer or higher in some team) and the service checks `rbac.Decide(role, retry, environment)` with the caller's role in the stack's team; no role there is `404`. The rollback is an ordinary update request, so creation, approval and production gates apply to it unchanged. Automatic retries are system actions (actor `system/recovery`), bounded by the state machine's retry cap, and only re-run an approved, merged change on main: the retried run re-plans and must match the approved plan hash. The retry's `workflow_dispatch` is never re-sent after an error. Break-glass state surgery is gated outside the API (dispatch from main, `break-glass` Environment approval with prevent self-review); its audit report can only come from `state-surgery.yml` on main via `workflow_dispatch` (route class `state_surgery`) for the token's own run, its inputs are allow-listed and pattern-checked twice (before and after approval), never placed in a `run:` expression, never echoed raw into the log, and Terraform runs as an argv list with workflow commands paused.
 
 **Abuse limits.** `GET /v1/auth/login` is limited to 30 per minute per remote address (`429 rate_limited`, `Retry-After`); behind the portal proxy the address is the portal's, so it acts as a global cap on login starts. `rbac.denied` audit events are limited to 20 per user per minute, and the next audited denial carries `suppressed_before`. Both limits are per process.
 

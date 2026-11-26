@@ -156,21 +156,21 @@ State edits are the highest-risk operation on the platform and are never done fr
 | Rule | Detail |
 |---|---|
 | Who | Platform team members in the `iacp-breakglass` GitHub team; **two-person rule** (requester + approver from `@acme/sre`) |
-| How | Only via the `state-surgery` workflow (`workflow_dispatch` on a protected `breakglass` GitHub Environment with required reviewers). It assumes `iacp-breakglass-<env>` (session tagged with the requester) |
-| Allowed commands | `terraform state list`, `state show`, `state mv`, `state rm`, `import` (via `import` blocks preferred), `state pull` (read-only, artifact encrypted) |
+| How | Only via `.github/workflows/state-surgery.yml`: `workflow_dispatch` from `main` only, its surgery job bound to the GitHub Environment **`break-glass`**. Configure that Environment with required reviewers (platform/SRE, at least one), "Prevent self-review" on, and deployment branches limited to `main`. With the S3 backend (WBS 6.6) it assumes `iacp-breakglass-<env>` (session tagged with the requester); under ADR-0009 it runs against LocalStack with the stack's local backend, so the edited state lives only in the job |
+| Allowed commands | `state rm`, `state mv`, `import`, `force-unlock` (input `operation` is a choice; `tools/stack_pipeline state-surgery validate` checks it again). Each argument must be a Terraform resource address, a resource id/ARN or a lock id, so none can become an option or a shell word; the command runs as an argv list, never through a shell. `state rm` and `state mv` honour `dry_run` (default true) with `-dry-run`; a dry run of `import` or `force-unlock` validates and runs nothing. `terraform state list` runs read-only before |
 | Forbidden | `state push` of hand-edited JSON; `force-unlock` outside the stale-lock runbook; any `apply` from this workflow |
-| Pre-step | Workflow records current state `VersionId` and acquires the platform lock (`kind=breakglass`) |
-| Post-step | Runs `terraform plan -detailed-exitcode` and posts the result; stack stays locked until a platform engineer confirms plan matches expectation |
-| Audit | `audit_events(type='state.surgery', actor, command, args, before_version, after_version, ticket)`; CloudTrail captures S3 writes |
+| Pre-step | Workflow records the state digest (the S3 `VersionId` once the S3 backend lands) and lists the state. Taking the platform lock (`kind=breakglass`) and `restore_version` are not implemented yet; until then the surgery runs one at a time (`concurrency: iacp-state-surgery`) and the operator checks that no request holds the stack |
+| Post-step | Runs `terraform plan -lock=false -detailed-exitcode` after a successful command; its exit code goes into the audit report |
+| Audit | The workflow always sends `POST /v1/internal/state-surgery` (route class `state_surgery`: `state-surgery.yml`, main, `workflow_dispatch`; the report must name the token's own run). The API appends one `state.surgery` audit event on the stack: operation, arguments, ticket, requester, dry run, outcome (`succeeded`, `failed`, `refused`), exit codes and sha256 digests of the state before and after (S3 VersionIds once the S3 backend lands). A refused run is recorded without the rejected values. CloudTrail captures S3 writes |
+| Log hygiene | Inputs reach scripts only through environment variables (no `${{ }}` in `run:`), the tool prints validated values only, refusals name the input but never echo it, and Terraform output is wrapped in `::stop-commands::` |
 
 Prefer config-driven changes (`moved`, `import`, `removed` blocks) shipped through a normal request whenever possible; break-glass is for cases those cannot express.
 
 ### 2.4 Runbook — state surgery
 1. Open an incident/ticket describing the mismatch and the exact commands.
-2. Trigger `state-surgery` with inputs `stack_path`, `commands` (newline-separated, validated against the allow-list), `ticket`.
-3. Approver reviews the inputs and the pre-step `state list` output in the job summary, then approves the environment deployment.
-4. Verify the post-step plan. If wrong, re-run `state-surgery` with `restore_version=<before_version>` (copies the old S3 object version back as the current version).
-5. Release the lock from the portal ("Release break-glass lock") — this writes an audit event.
+2. Trigger `state-surgery` from `main` with inputs `stack_path`, `operation`, `args` (space-separated), `ticket` and `dry_run` (start with `true`).
+3. Approver reads the validated request in the `validate` job summary and approves the `break-glass` deployment; the surgery job then records the state list, runs the command and the post-step plan, and reports to the audit log.
+4. Verify the post-step plan exit code in the job summary and the `state.surgery` audit event. If wrong, run a reverse operation (for example `state mv` back); restoring an S3 version (`restore_version`) arrives with the S3 backend.
 
 ---
 
@@ -261,8 +261,13 @@ High-severity drift in production pages the on-call and auto-opens a `reconcile`
 
 **Design.**
 
-- A failed apply sets request `failed` and stack `failed`, captures the error and classifies it (`backend/internal/recovery/classify.go`) from the apply log and AWS error codes.
-- **Rollback** = a `rollback` request whose PR reverts the stack directory to the config of the last `applied` request (the App creates the revert commit from `pipeline_runs.commit_sha`). It goes through the full pipeline, including OPA and cost.
+- **Classification** (`backend/internal/recovery/classify.go`, pure, table-tested with real Terraform/AWS error strings). Every failed stage `apply.yml` reports on `POST /v1/runs` reaches the recovery run observer after the report is recorded; `apply.yml` sends the error excerpt of `apply.log` (`report --error-log`) so there is text to classify. `Classify(stage, exit code, message)` returns a class and a reason:
+  - `transient`: throttling (`ThrottlingException`, `RequestLimitExceeded`, `SlowDown`, 429), provider 5xx (`StatusCode: 503`, `InternalFailure`, `ServiceUnavailable`), timeouts (`i/o timeout`, `context deadline exceeded`, connection reset), state-lock contention (`Error acquiring the state lock`, `PreconditionFailed`), eventual consistency (`role cannot be assumed`) and a lost runner (shutdown signal, exit status above 128);
+  - `config`: policy deny, plan hash mismatch, validation and name conflicts (`Invalid value for variable`, `Unsupported argument`, `InvalidParameterCombination`, `AlreadyExists`), a failed plan, and anything unknown before apply;
+  - `infra`: an apply or destroy stage that failed otherwise (`partial_apply`, `quota`, `permission_denied`) and a failed smoke test.
+  Transient patterns win; nothing unknown is ever transient. The first failed stage of each run is recorded once in `apply_failures` (unique on request and run) and audited as `request.apply_failure_classified`.
+- **Automatic retry** (`recovery.Retrier`, `recovery.Dispatcher`). A `transient` failure of the `lock`, `plan`, `apply` or `destroy` stage of an `applying` request is retried while `requests.Next(apply_retry)` allows it (`MaxApplyRetries = 2`, counted in `requests.retry_count`; the state machine is the only cap). In one transaction (stack row, then request row) the Retrier checks the stack lock (free, or held by the request with the reported fencing token; a lock held by another request is `lock_lost`), fires `apply_retry` (audited as `request.transitioned` applying → applying), records the retry and enqueues an outbox job `recovery.apply_retry` available after the backoff: 2 min, then 10 min (exponential ×5, capped at 30 min; eventual consistency waits 60 s the first time). The Dispatcher re-checks the request (still `applying`, same retry number), takes the stack lock back for it when `apply.yml` released it and nobody waits, and calls the publisher's `DispatchWorkflow` for `apply.yml` on main with `stack_path`, `stack_id`, `request_id`, `approved_plan_hash` (and `destroy` for a destroy). The dispatch is **never retried**: the row is claimed (`scheduled → dispatching`) before GitHub is called and a failure is recorded as `dispatch_failed` with a dead job, so an ambiguous timeout cannot start two applies. Audit: `request.apply_retry_scheduled`, `request.apply_retry_dispatched`, `request.apply_retry_dispatch_failed`, `request.apply_retry_skipped`. Without a publisher (`IACP_PUBLISHER=none`) failures are classified and recorded with decision `retries_disabled`. The retried run re-plans and must match the approved plan hash, so a retry after a failure that changed nothing applies, and one after a partial apply fails `plan_mismatch` and needs a new approval.
+- **Rollback** (`POST /v1/stacks/{id}/rollback`, maintainer and up via the rbac `retry` action) opens an `update` request whose spec is the stack's last successfully applied configuration, through the normal request path (idempotency key, catalog and input checks, stack lock, audit, PR, plan, OPA, approval). A `failed` stack returns to its newest `applied` create or update; an `active` or `drifted` stack to the one before it. It is refused for a destroyed stack (`stack_destroyed`), a busy one (`stack_busy`: an apply in flight or any open request) and when there is nothing to restore (`no_rollback_target`). The spec carries `rollback_of`, and the PR is titled `iacp: rollback … to <req>`, labelled `iacp:rollback` and states the limitations below. It re-renders the old configuration rather than reverting a commit, so the generator's current templates and the module pins of that configuration apply.
 - **State versions** in S3 are a last resort, only via break-glass (§2.3), when state itself is corrupted.
 
 ### Failed-apply recovery decision table
@@ -280,7 +285,9 @@ High-severity drift in production pages the on-call and auto-opens a `reconcile`
 
 **Rollback limitations** are surfaced in the portal before submission: rolling back a module major upgrade may not be reversible if the newer version migrated data/attributes; destroyed data (deleted bucket objects, dropped DB) is not recovered by config rollback — S3 versioning, RDS snapshots and AWS Backup are the data-recovery mechanisms.
 
-**Data touched.** `requests` (`kind='rollback'`, `rollback_of_request_id`), `pipeline_runs` (`failure_class`, `attempt`), `stacks.status`, `audit_events`.
+**Data touched.** `apply_failures` (class, reason, decision, retry number, dispatch state), `requests` (`retry_count`; a rollback is `kind='update'` with `spec.rollback_of`), `outbox` (`recovery.apply_retry`), `locks`, `stacks.status`, `audit_events`.
+
+**Coordination with report-driven status (WBS 5.3).** When apply reports move requests to `failed` on a failed run, that decision must leave a transient failure with retry budget `applying` (the Retrier fires `apply_retry`); a request that is already `failed` when the observer runs is recorded with decision `request_not_applying` and not retried.
 
 **Runbook — production apply failed.**
 1. Portal → stack → failed run: read the classified error and apply log artifact.
