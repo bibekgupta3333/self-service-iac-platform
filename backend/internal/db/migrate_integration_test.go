@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -23,13 +26,14 @@ func TestMigrationsApplyAndAreIdempotent(t *testing.T) {
 		t.Fatalf("re-run migrations: %v", err)
 	}
 	v, err := m.Version(ctx)
-	if err != nil || v != 5 {
-		t.Fatalf("version = %d, %v; want 5", v, err)
+	if want := latestMigration(t); err != nil || v != want {
+		t.Fatalf("version = %d, %v; want %d", v, err, want)
 	}
 
 	for _, table := range []string{
 		"teams", "users", "memberships", "modules", "module_versions", "environments", "stacks",
 		"stack_resources", "requests", "locks", "idempotency_keys", "audit_events", "pipeline_runs",
+		"oidc_jti",
 	} {
 		var exists bool
 		if err := pool.QueryRow(ctx, "SELECT to_regclass('public.'||$1) IS NOT NULL", table).Scan(&exists); err != nil || !exists {
@@ -41,6 +45,24 @@ func TestMigrationsApplyAndAreIdempotent(t *testing.T) {
 	if err := pool.QueryRow(ctx, "SELECT aws_account_id FROM environments WHERE name='development'").Scan(&env); err != nil || env != "000000000000" {
 		t.Fatalf("seeded development env = %q, %v", env, err)
 	}
+}
+
+// latestMigration is the highest NNNN prefix among the embedded migrations.
+func latestMigration(t *testing.T) int64 {
+	t.Helper()
+	names, err := fs.Glob(migrations.FS, "*.sql")
+	if err != nil || len(names) == 0 {
+		t.Fatalf("list migrations: %v", err)
+	}
+	var latest int64
+	for _, n := range names {
+		v, err := strconv.ParseInt(strings.SplitN(n, "_", 2)[0], 10, 64)
+		if err != nil {
+			t.Fatalf("migration %s has no numeric prefix", n)
+		}
+		latest = max(latest, v)
+	}
+	return latest
 }
 
 func TestRequestCompletedAtCheck(t *testing.T) {
@@ -75,7 +97,8 @@ func TestRuntimeRoleIsLeastPrivileged(t *testing.T) {
 		"CREATE TABLE sneaky (n int)",
 		"SELECT * FROM goose_db_version",
 		"DROP TABLE requests",
-		"DELETE FROM pipeline_runs", // run reports are insert/update only (0005)
+		"DELETE FROM pipeline_runs",              // run reports are insert/update only (0005)
+		"UPDATE oidc_jti SET expires_at = now()", // replay ids are insert/purge only (0006)
 		"TRUNCATE locks",
 	} {
 		if _, err := app.Exec(ctx, stmt); err == nil {
