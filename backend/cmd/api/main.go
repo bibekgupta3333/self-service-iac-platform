@@ -20,6 +20,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/catalog"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/config"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/db"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/drift"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/generator"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/httpapi"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
@@ -87,6 +88,9 @@ func run() error {
 	access := requests.NewAccess(pool, users)
 	requestSvc.WithAccess(access) // the status stream sees the same teams as GET /v1/requests
 
+	driftSvc := drift.NewService(drift.NewPostgresRepository(pool, auditWriter), users, requestRepo,
+		drift.NewRequestReconciler(requestSvc), clock, ids)
+
 	pub, err := newPublisher(ctx, cfg, clock)
 	if err != nil {
 		return err
@@ -136,6 +140,7 @@ func run() error {
 			httpapi.NewRequestHandler(requestSvc, access),
 			httpapi.NewRequestEventsHandler(requestSvc, httpapi.StreamOptions{Stop: ctx.Done(), Session: ua.Streams}),
 			httpapi.NewStackHandler(stacks.NewService(stacks.NewPostgresRepository(pool), users)),
+			httpapi.NewDriftHandler(driftSvc),
 			httpapi.NewAuditHandler(audit.NewVerifier(pool)),
 			ua.Handler,
 		},
@@ -147,6 +152,7 @@ func run() error {
 			httpapi.NewLockHandler(lockSvc),
 			httpapi.NewRequestLookupHandler(requestSvc),
 			httpapi.NewBudgetContextHandler(budgets.NewService(budgets.NewPostgresRepository(pool), clock)),
+			httpapi.NewDriftIngestHandler(driftSvc),
 		},
 		Webhooks:         []httpapi.RouteRegistrar{webhookHandler},
 		PipelineHandlers: []httpapi.RouteRegistrar{httpapi.NewRunHandler(runs.NewService(runs.NewPostgresRepository(pool), clock))},

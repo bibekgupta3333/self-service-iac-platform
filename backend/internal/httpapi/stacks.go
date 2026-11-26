@@ -45,6 +45,7 @@ type latestRequestDTO struct {
 
 type stackLinks struct {
 	Self          string  `json:"self"`
+	Drift         string  `json:"drift"`
 	LatestRequest *string `json:"latest_request"`
 }
 
@@ -56,6 +57,7 @@ type stackDTO struct {
 	Path           string               `json:"path"`
 	Region         string               `json:"region"`
 	Status         requests.StackStatus `json:"status"`
+	Health         string               `json:"health"`
 	IsEphemeral    bool                 `json:"is_ephemeral"`
 	ExpiresAt      *time.Time           `json:"expires_at"`
 	Outputs        json.RawMessage      `json:"outputs"`
@@ -68,10 +70,10 @@ type stackDTO struct {
 
 func toStackDTO(s stacks.Stack) stackDTO {
 	d := stackDTO{
-		ID: s.ID, Team: s.Team, Environment: s.Environment, Name: s.Name, Path: s.Path, Region: s.Region, Status: s.Status,
+		ID: s.ID, Team: s.Team, Environment: s.Environment, Name: s.Name, Path: s.Path, Region: s.Region, Status: s.Status, Health: s.Health,
 		IsEphemeral: s.IsEphemeral, ExpiresAt: s.ExpiresAt, Outputs: s.Outputs, LastAppliedSHA: s.LastAppliedSHA,
 		CreatedAt: s.CreatedAt.UTC(), UpdatedAt: s.UpdatedAt.UTC(),
-		Links: stackLinks{Self: "/v1/stacks/" + s.ID.String()},
+		Links: stackLinks{Self: "/v1/stacks/" + s.ID.String(), Drift: "/v1/stacks/" + s.ID.String() + "/drift"},
 	}
 	if len(d.Outputs) == 0 {
 		d.Outputs = json.RawMessage(`{}`)

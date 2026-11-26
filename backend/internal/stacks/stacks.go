@@ -35,6 +35,7 @@ type Stack struct {
 	Path           string
 	Region         string
 	Status         requests.StackStatus
+	Health         string // drift health: healthy or drifted (docs/06 §4); independent of Status
 	IsEphemeral    bool
 	ExpiresAt      *time.Time
 	Outputs        json.RawMessage // the non-sensitive outputs of the last apply

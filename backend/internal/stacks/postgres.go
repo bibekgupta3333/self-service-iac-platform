@@ -28,7 +28,7 @@ func NewPostgresRepository(conn db.DBTX) *PostgresRepository { return &PostgresR
 const stackSelect = `
 	SELECT s.id, t.slug, e.name::text, s.name, s.path, s.region, s.status::text, s.is_ephemeral, s.expires_at,
 	       s.outputs, coalesce(s.last_applied_sha, ''), s.created_at, s.updated_at,
-	       lr.id, lr.short_id, lr.kind::text, lr.status::text, lr.created_at
+	       lr.id, lr.short_id, lr.kind::text, lr.status::text, lr.created_at, s.health::text
 	FROM stacks s
 	JOIN teams t ON t.id = s.team_id
 	JOIN environments e ON e.id = s.environment_id
@@ -49,7 +49,7 @@ func scanStack(row pgx.Row) (Stack, error) {
 		reqAt              *time.Time
 	)
 	err := row.Scan(&s.ID, &s.Team, &s.Environment, &s.Name, &s.Path, &s.Region, &status, &s.IsEphemeral, &s.ExpiresAt,
-		&outputs, &s.LastAppliedSHA, &s.CreatedAt, &s.UpdatedAt, &reqID, &reqShort, &reqKind, &reqStatus, &reqAt)
+		&outputs, &s.LastAppliedSHA, &s.CreatedAt, &s.UpdatedAt, &reqID, &reqShort, &reqKind, &reqStatus, &reqAt, &s.Health)
 	if err != nil {
 		return Stack{}, err
 	}
