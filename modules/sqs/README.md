@@ -32,9 +32,15 @@ The module declares no provider. The calling root configures `provider "aws"`.
 | Least privilege | No wildcard principals. Consumers and producers attach `consumer_policy_json` / `producer_policy_json`. |
 | Tagging | `iacp:team`, `iacp:environment`, `iacp:stack`, `iacp:module`, `iacp:managed-by` are merged last; the DLQ also has `iacp:role=dlq`. |
 
-If another AWS service (SNS, EventBridge) must send to the queue, pass a
-`kms_key_arn` whose key policy allows that service. The module-created key only
-trusts IAM principals in the owning account.
+By default the module-created key only trusts IAM principals in the owning
+account. If another AWS service (SNS, EventBridge) must send to the queue, list
+it in `key_service_principals` (scoped to this account with
+`aws:SourceAccount`), or pass a `kms_key_arn` whose policy allows it. The
+service also needs a queue policy grant, which this version does not create.
+
+The example's alarm topic is encrypted with a customer managed key that grants
+`cloudwatch.amazonaws.com`. The AWS-managed `alias/aws/sns` key cannot be
+granted to CloudWatch, so alarms publishing to such a topic never notify.
 
 ## Inputs
 
@@ -53,6 +59,7 @@ trusts IAM principals in the owning account.
 | `max_receive_count` | Receives before a message moves to the DLQ (1-100). | `number` | `5` | no |
 | `dlq_retention_seconds` | Seconds the DLQ keeps a message. At least `message_retention_seconds`. | `number` | `1209600` | no |
 | `kms_key_arn` | Existing KMS key ARN. If null, a dedicated key is created. | `string` | `null` | no |
+| `key_service_principals` | AWS service principals (for example `sns.amazonaws.com`) allowed to use the module-created key for this account. Ignored with `kms_key_arn`. | `list(string)` | `[]` | no |
 | `kms_data_key_reuse_period_seconds` | Seconds SQS reuses a data key (60-86400). | `number` | `300` | no |
 | `alarm_actions` | ARNs notified when a queue alarm changes state. | `list(string)` | `[]` | no |
 | `oldest_message_age_alarm_seconds` | Alarm threshold for the oldest message age (>= 60). | `number` | `3600` | no |
