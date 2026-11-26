@@ -5,6 +5,10 @@ configured audience when the job has ``id-token: write``, else the shared
 ``IACP_INTERNAL_TOKEN`` (docs/03 section 6.9). ``IacpApiClient`` calls
 ``POST /v1/runs`` and ``/v1/internal/stacks/{id}/lock``. Neither follows a
 redirect, because urllib would replay the bearer token to the new location.
+
+A GitHub OIDC token is single-use: the API records its ``jti`` and answers a second
+use with 401 (docs/03 section 6.9). ``FreshCredentials`` therefore mints a new OIDC
+token for every request, retries included; the shared internal token is reused.
 """
 
 from __future__ import annotations
@@ -135,6 +139,33 @@ class TokenSource:
             self._stdout.flush()
 
 
+class FreshCredentials:
+    """A credential per request. The first one is fetched up front (so a missing
+    credential fails before any call); later OIDC requests mint a new token each time."""
+
+    def __init__(self, source: TokenSource, audience: str, first: Credential) -> None:
+        self._source = source
+        self._audience = audience
+        self._pending: Credential | None = first
+        self._static = first if first.kind != "oidc" else None
+
+    @classmethod
+    def start(cls, source: TokenSource, audience: str) -> FreshCredentials | None:
+        first = source.credential(audience)
+        return None if first is None else cls(source, audience, first)
+
+    def __call__(self) -> Credential:
+        if self._pending is not None:
+            cred, self._pending = self._pending, None
+            return cred
+        if self._static is not None:
+            return self._static
+        cred = self._source.credential(self._audience)
+        if cred is None:  # the runner stopped exposing OIDC mid-run
+            raise ApiError("no credential for the next API call")
+        return cred
+
+
 @dataclass(frozen=True)
 class ApiResponse:
     status: int
@@ -152,14 +183,15 @@ class LockClaim:
 
 
 class IacpApiClient:
-    """Calls the Platform API's machine endpoints with one bearer token."""
+    """Calls the Platform API's machine endpoints. ``credential`` is a fixed Credential
+    or a callable returning one per request (FreshCredentials for single-use OIDC tokens)."""
 
     RETRYABLE = frozenset({429, 500, 502, 503, 504})
 
     def __init__(
         self,
         base_url: str,
-        credential: Credential,
+        credential: Credential | Callable[[], Credential],
         *,
         timeout: float = 20.0,
         attempts: int = 3,
@@ -219,7 +251,8 @@ class IacpApiClient:
     # ---- transport ---------------------------------------------------------------
 
     def _request(self, method: str, path: str, payload: Mapping[str, Any] | None) -> urllib.request.Request:
-        headers = {"Authorization": f"Bearer {self._credential.token}", "Accept": "application/json", "User-Agent": USER_AGENT}
+        cred = self._credential() if callable(self._credential) else self._credential
+        headers = {"Authorization": f"Bearer {cred.token}", "Accept": "application/json", "User-Agent": USER_AGENT}
         data = None
         if payload is not None:
             data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
