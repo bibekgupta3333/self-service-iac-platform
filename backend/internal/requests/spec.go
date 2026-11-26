@@ -21,17 +21,21 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/tfname"
 )
 
-// CreateInput is the body of POST /v1/requests (docs/03 §6.4).
+// CreateInput is the body of POST /v1/requests (docs/03 §6.4). A create names its stack
+// by team, environment and stack; an update or destroy names an existing stack by StackID.
 type CreateInput struct {
-	Kind          Kind            `json:"kind"`
-	Team          string          `json:"team"`
-	Environment   string          `json:"environment"`
-	Stack         string          `json:"stack"`
-	Region        string          `json:"region,omitempty"`
-	Ephemeral     *Ephemeral      `json:"ephemeral,omitempty"`
-	Justification string          `json:"justification,omitempty"`
-	Resources     []ResourceInput `json:"resources"`
-	DependsOn     []string        `json:"depends_on,omitempty"`
+	Kind        Kind       `json:"kind"`
+	StackID     *uuid.UUID `json:"stack_id,omitempty"`
+	Team        string     `json:"team,omitempty"`
+	Environment string     `json:"environment,omitempty"`
+	Stack       string     `json:"stack,omitempty"`
+	Region      string     `json:"region,omitempty"`
+	Ephemeral   *Ephemeral `json:"ephemeral,omitempty"`
+	// ConfirmStackName must repeat the stack's name on a destroy.
+	ConfirmStackName string          `json:"confirm_stack_name,omitempty"`
+	Justification    string          `json:"justification,omitempty"`
+	Resources        []ResourceInput `json:"resources"`
+	DependsOn        []string        `json:"depends_on,omitempty"`
 }
 
 // Ephemeral requests a stack that is destroyed after TTLHours.
@@ -65,9 +69,29 @@ func ValidateShape(in CreateInput) []apperr.FieldError {
 	switch {
 	case !in.Kind.Valid():
 		add("/kind", "enum", "must be one of create, update, upgrade, destroy, reconcile, rollback")
-	case in.Kind != KindCreate:
-		add("/kind", "unsupported_kind", fmt.Sprintf("kind %q is not supported yet; only create is implemented", in.Kind))
+	case !in.Kind.Supported():
+		add("/kind", "unsupported_kind", fmt.Sprintf("kind %q is not supported yet; supported kinds are create, update and destroy", in.Kind))
 	}
+	if in.Kind == KindUpdate || in.Kind == KindDestroy {
+		validateExistingStackTarget(in, add)
+	} else {
+		validateNewStackTarget(in, add)
+	}
+	if len(in.Justification) > 2000 {
+		add("/justification", "maxLength", "must be at most 2000 characters")
+	}
+	if in.Kind == KindDestroy && strings.TrimSpace(in.Justification) == "" {
+		add("/justification", "required", "a destroy request needs a justification")
+	}
+	validateResourceShapes(in, add)
+	return errs
+}
+
+// fieldAdder records one field error.
+type fieldAdder func(ptr, code, msg string)
+
+// validateNewStackTarget checks how a create names the stack it makes. Pure.
+func validateNewStackTarget(in CreateInput, add fieldAdder) {
 	if !slugRe.MatchString(in.Team) {
 		add("/team", "pattern", "must be a team slug (^[a-z][a-z0-9-]{1,38}$)")
 	}
@@ -83,8 +107,53 @@ func ValidateShape(in CreateInput) []apperr.FieldError {
 	if len(in.DependsOn) > 0 {
 		add("/depends_on", "unsupported", "cross-stack dependencies are not supported yet")
 	}
-	if len(in.Justification) > 2000 {
-		add("/justification", "maxLength", "must be at most 2000 characters")
+	if in.StackID != nil {
+		add("/stack_id", "not_allowed", "a create names its stack by team, environment and stack")
+	}
+	if in.ConfirmStackName != "" {
+		add("/confirm_stack_name", "not_allowed", "only a destroy confirms the stack name")
+	}
+}
+
+// validateExistingStackTarget checks how an update or destroy names its stack: by
+// stack_id alone, since team, environment, name and region are fixed once it exists. Pure.
+func validateExistingStackTarget(in CreateInput, add fieldAdder) {
+	if in.StackID == nil || *in.StackID == uuid.Nil {
+		add("/stack_id", "required", fmt.Sprintf("a %s request names its stack by stack_id", in.Kind))
+	}
+	notAllowed := func(ptr string, set bool) {
+		if set {
+			add(ptr, "not_allowed", fmt.Sprintf("a %s request identifies the stack by stack_id; leave this out", in.Kind))
+		}
+	}
+	notAllowed("/team", in.Team != "")
+	notAllowed("/environment", in.Environment != "")
+	notAllowed("/stack", in.Stack != "")
+	notAllowed("/region", in.Region != "")
+	notAllowed("/ephemeral", in.Ephemeral != nil)
+	if len(in.DependsOn) > 0 {
+		add("/depends_on", "unsupported", "cross-stack dependencies are not supported yet")
+	}
+	switch in.Kind {
+	case KindDestroy:
+		if !stackNameRe.MatchString(in.ConfirmStackName) {
+			add("/confirm_stack_name", "required", "repeat the stack name (^[a-z][a-z0-9-]{1,40}$) to confirm the destroy")
+		}
+		if len(in.Resources) > 0 {
+			add("/resources", "not_allowed", "a destroy removes every resource of the stack; leave resources out")
+		}
+	default:
+		if in.ConfirmStackName != "" {
+			add("/confirm_stack_name", "not_allowed", "only a destroy confirms the stack name")
+		}
+	}
+}
+
+// validateResourceShapes checks the resource list of a create or update. A destroy has
+// none, and that is checked with the target. Pure.
+func validateResourceShapes(in CreateInput, add fieldAdder) {
+	if in.Kind == KindDestroy {
+		return
 	}
 	switch {
 	case len(in.Resources) == 0:
@@ -107,7 +176,6 @@ func ValidateShape(in CreateInput) []apperr.FieldError {
 	for _, d := range fp.Duplicates(fp.Map(in.Resources, func(r ResourceInput) string { return r.Name })) {
 		add("/resources", "duplicate", fmt.Sprintf("resource name %q is used more than once", d))
 	}
-	return errs
 }
 
 // ResolvedResource pairs a resource with the catalog version it pins.
@@ -254,6 +322,18 @@ func Normalize(in CreateInput, region string) NormalizedSpec {
 	}
 	return NormalizedSpec{Team: in.Team, Environment: in.Environment, Stack: in.Stack, Region: region,
 		Ephemeral: in.Ephemeral, Resources: res, DependsOn: deps}
+}
+
+// NormalizeForStack returns the spec to store for an update or destroy of an existing
+// stack: the stack's own identity and region (the request cannot change them), the new
+// resource list for an update, and no resources for a destroy. Pure.
+func NormalizeForStack(in CreateInput, t StackTarget) NormalizedSpec {
+	n := Normalize(in, t.Region)
+	n.Team, n.Environment, n.Stack, n.Ephemeral = t.TeamSlug, t.Environment, t.Name, nil
+	if in.Kind == KindDestroy {
+		n.Resources = []ResourceInput{}
+	}
+	return n
 }
 
 // RequestHash fingerprints an idempotent POST: sha256(method + path + body).

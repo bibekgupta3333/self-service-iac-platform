@@ -94,6 +94,10 @@ type Store interface {
 	// Locks returns the stack-lock store bound to the same transaction.
 	Locks() locks.Store
 	GetRequestByShortID(ctx context.Context, shortID string) (*Request, error)
+	// LockStackTarget loads an existing stack FOR UPDATE (apperr NotFound when it does not exist).
+	LockStackTarget(ctx context.Context, id uuid.UUID) (StackTarget, error)
+	// OpenRequestKinds lists the kinds of the stack's requests that are not terminal yet.
+	OpenRequestKinds(ctx context.Context, stackID uuid.UUID) ([]Kind, error)
 	// LockRequest loads the request FOR UPDATE.
 	LockRequest(ctx context.Context, id uuid.UUID) (*Request, error)
 	// UpdateRequest writes r's mutable fields if the stored status is still from;
@@ -131,6 +135,8 @@ type Repository interface {
 	// StackHolder returns the stack at a canonical path with its lock and the lock holder's
 	// request; apperr NotFound (stack_not_found) when no stack has that path.
 	StackHolder(ctx context.Context, path string) (StackHolder, error)
+	// StackTarget loads an existing stack for an update or destroy (apperr NotFound when missing).
+	StackTarget(ctx context.Context, id uuid.UUID) (StackTarget, error)
 }
 
 // VersionLookup resolves pinned module versions (implemented by catalog.Service).
@@ -258,14 +264,56 @@ func (s *Service) precheck(ctx context.Context, by identity.Principal, in Create
 	if errs := ValidateShape(in); len(errs) > 0 {
 		return apperr.Invalid("validation_failed", "request is invalid", errs...)
 	}
+	if in.Kind.TargetsExistingStack() {
+		return s.precheckExisting(ctx, by, in)
+	}
 	role, err := s.members.RoleInTeam(ctx, in.Team, by.UserID)
 	if err != nil {
 		return fieldLookupError(err, "/team", fmt.Sprintf("unknown team %q", in.Team))
 	}
 	if need := RequiredRole(in.Kind, in.Environment); !role.AtLeast(need) {
-		return apperr.Forbidden(fmt.Sprintf("creating a %s request for team %s needs the %s role or higher", in.Kind, in.Team, need))
+		return forbiddenRole(in.Kind, in.Team, need)
 	}
-	resolved, err := s.resolve(ctx, in.Resources)
+	return s.checkResources(ctx, in.Resources)
+}
+
+// precheckExisting is precheck for an update or destroy: the stack must exist, the caller
+// needs the role in its team, the stack must be in a state that takes the kind (checked
+// again inside the transaction, with the open requests), and a destroy must repeat the
+// stack's name.
+func (s *Service) precheckExisting(ctx context.Context, by identity.Principal, in CreateInput) error {
+	t, err := s.repo.StackTarget(ctx, *in.StackID)
+	if err != nil {
+		return fieldLookupError(err, "/stack_id", fmt.Sprintf("unknown stack %s", in.StackID))
+	}
+	role, err := s.members.RoleInTeam(ctx, t.TeamSlug, by.UserID)
+	if err != nil {
+		return fmt.Errorf("lookup membership of team %s: %w", t.TeamSlug, err)
+	}
+	if need := RequiredRole(in.Kind, t.Environment); !role.AtLeast(need) {
+		return forbiddenRole(in.Kind, t.TeamSlug, need)
+	}
+	if err := CheckStackAllowsKind(in.Kind, t.Status, nil); err != nil {
+		return err
+	}
+	if in.Kind == KindDestroy && in.ConfirmStackName != t.Name {
+		return apperr.Invalid("validation_failed", "the confirmation does not match the stack name",
+			apperr.FieldError{Pointer: "/confirm_stack_name", Code: "mismatch",
+				Message: fmt.Sprintf("must be %q, the name of the stack to destroy", t.Name)})
+	}
+	if !in.Kind.RequiresResources() {
+		return nil
+	}
+	return s.checkResources(ctx, in.Resources)
+}
+
+func forbiddenRole(kind Kind, team string, need Role) error {
+	return apperr.Forbidden(fmt.Sprintf("creating a %s request for team %s needs the %s role or higher", kind, team, need))
+}
+
+// checkResources resolves the pinned module versions and validates every resource's inputs.
+func (s *Service) checkResources(ctx context.Context, resources []ResourceInput) error {
+	resolved, err := s.resolve(ctx, resources)
 	if err != nil {
 		return err
 	}
@@ -276,6 +324,9 @@ func (s *Service) precheck(ctx context.Context, by identity.Principal, in Create
 }
 
 func (s *Service) create(ctx context.Context, st Store, by identity.Principal, cmd CreateCommand) (*Request, error) {
+	if cmd.Input.Kind.TargetsExistingStack() {
+		return s.createForStack(ctx, st, by, cmd)
+	}
 	in := cmd.Input
 	team, err := st.TeamBySlug(ctx, in.Team)
 	if err != nil {
@@ -314,23 +365,51 @@ func (s *Service) create(ctx context.Context, st Store, by identity.Principal, c
 		return nil, fmt.Errorf("insert stack: %w", err)
 	}
 
-	spec, err := json.Marshal(Normalize(in, region))
+	return s.record(ctx, st, by, cmd, StackRef{ID: stack.ID, Path: path, Status: string(StackProvisioning)}, team.ID,
+		Normalize(in, region))
+}
+
+// createForStack records an update or destroy of an existing stack. It locks the stack row
+// first (the order every lock operation uses), re-checks the stack's state against its
+// open requests, and then takes the stack lock or queues like a create.
+func (s *Service) createForStack(ctx context.Context, st Store, by identity.Principal, cmd CreateCommand) (*Request, error) {
+	in := cmd.Input
+	t, err := st.LockStackTarget(ctx, *in.StackID)
+	if err != nil {
+		return nil, fieldLookupError(err, "/stack_id", fmt.Sprintf("unknown stack %s", in.StackID))
+	}
+	open, err := st.OpenRequestKinds(ctx, t.ID)
+	if err != nil {
+		return nil, fmt.Errorf("list open requests: %w", err)
+	}
+	if err := CheckStackAllowsKind(in.Kind, t.Status, open); err != nil {
+		return nil, err
+	}
+	return s.record(ctx, st, by, cmd, StackRef{ID: t.ID, Path: t.Path, Status: string(t.Status)}, t.TeamID, NormalizeForStack(in, t))
+}
+
+// record inserts the draft request for stack, audits request.created and takes the stack
+// lock or queues behind its holder, in the caller's transaction. Create, update and
+// destroy share it, so idempotency, audit and queueing behave the same for every kind.
+func (s *Service) record(ctx context.Context, st Store, by identity.Principal, cmd CreateCommand, stack StackRef,
+	teamID uuid.UUID, spec NormalizedSpec) (*Request, error) {
+	now := s.clock.Now()
+	raw, err := json.Marshal(spec)
 	if err != nil {
 		return nil, fmt.Errorf("encode spec: %w", err)
 	}
-	req := NewDraft(s.ids.NewID(), s.ids.NewShortID("req"), StackRef{ID: stack.ID, Path: path, Status: "provisioning"},
-		in.Kind, spec, in.Justification, by.UserID, now)
+	req := NewDraft(s.ids.NewID(), s.ids.NewShortID("req"), stack, cmd.Input.Kind, raw, cmd.Input.Justification, by.UserID, now)
 	if err := st.InsertRequest(ctx, req); err != nil {
 		return nil, fmt.Errorf("insert request: %w", err)
 	}
 
-	payload, err := json.Marshal(map[string]any{"short_id": req.ShortID, "kind": req.Kind, "stack_path": path})
+	payload, err := json.Marshal(map[string]any{"short_id": req.ShortID, "kind": req.Kind, "stack_path": stack.Path})
 	if err != nil {
 		return nil, fmt.Errorf("encode audit payload: %w", err)
 	}
 	if err := st.AppendAudit(ctx, audit.Event{
 		OccurredAt: now, ActorType: string(by.Type), ActorID: by.AuditActorID(), Action: "request.created",
-		SubjectType: "request", SubjectID: req.ID.String(), TeamID: &team.ID, CorrelationID: cmd.CorrelationID,
+		SubjectType: "request", SubjectID: req.ID.String(), TeamID: &teamID, CorrelationID: cmd.CorrelationID,
 		Payload: payload,
 	}); err != nil {
 		return nil, fmt.Errorf("audit: %w", err)
