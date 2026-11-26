@@ -150,11 +150,16 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
   - `postgres`: private RDS PostgreSQL with CMK storage, `rds.force_ssl=1`, an RDS-managed master password in Secrets Manager, backups, deletion protection and a final snapshot outside development, Multi-AZ in production and encrypted Performance Insights
   - `redis`: private ElastiCache replication group with CMK at-rest encryption, required TLS, an AUTH token in Secrets Manager or an RBAC user group, and automatic failover in production
   - Offline `terraform test` suites, because LocalStack community 4.4 has no ECS, ECR, ELBv2, RDS or ElastiCache: `plan` runs use the real provider with every endpoint on a closed local port, and `apply` runs use `mock_provider "aws"`
+  - Final snapshots of `postgres` and `redis` are named `<name>-final-<suffix>` with a `random_id` suffix kept in state, so destroying a re-created instance does not collide with an earlier snapshot (`postgres` now also requires `hashicorp/random`)
+  - `team` rejects trailing and consecutive hyphens, which made invalid RDS and ElastiCache identifiers
+  - The `redis` key grants `delivery.logs.amazonaws.com`, scoped to the account, for log delivery into its encrypted log groups
+  - `ecs-service` rejects `iam:PassRole` and `iam:` actions on `Resource "*"` in `extra_policy_jsons` (stricter than `lambda` 1.0.0)
+  - Each README lists known limits: the `redis` AUTH token in state (use `auth_mode = "rbac"`), the `https_egress_cidr_blocks` default, and the unexercised aws provider floor (5.70)
 - OPA rules for the new resource types, each with positive and negative tests (218 tests, 99.9 % coverage); `ecr_kms` requires a customer-managed `kms_key` (KMS without one is the AWS-managed `aws/ecr` key):
   - `iacp.encryption.rds_storage`, `iacp.encryption.rds_cmk`, `iacp.encryption.elasticache_at_rest`, `iacp.encryption.elasticache_cmk`, `iacp.encryption.elasticache_transit`, `iacp.encryption.ecr_kms`
   - `iacp.network.rds_public`, `iacp.network.ecs_public_ip`
   - `iacp.ecr.scan_on_push`, `iacp.ecr.immutable_tags`
-  - The non-compliant conftest fixture trips every new rule; `verify.sh` now asserts 30 deny and 4 warn rule IDs.
+  - The non-compliant conftest fixture trips every new rule; `verify.sh` now asserts 30 deny and 4 warn rule IDs, and `verify-example-gate.sh` proves the example gate rejects `?ref=main` and third-party sources.
 - `policies/example-plan.sh` and `make example-plans`: plan a module's `examples/complete` and run conftest with its `policy-context.json`, allowing only the deny for relative `../` module sources.
 - CI: a `module-tests-offline` job runs suites that mock the AWS provider without LocalStack, and the `module-tests` job, which skips those suites, now plans and checks every module example with conftest. LocalStack suites run as before.
 
