@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -31,12 +32,17 @@ type StreamOptions struct {
 	Heartbeat   time.Duration // idle interval between comment lines that keep proxies from closing the stream
 	MaxLifetime time.Duration // the stream ends after this long; clients resume with Last-Event-ID
 	WriteWindow time.Duration // deadline for one write, replacing the server-wide WriteTimeout
+	MaxPerUser  int           // concurrent streams one user may hold (default 5)
+	MaxTotal    int           // concurrent streams in the process (default 500)
+	// Stop, when closed, ends every open stream at once. The server passes its shutdown
+	// signal, so http.Server.Shutdown does not wait out streams of up to MaxLifetime.
+	Stop <-chan struct{}
 }
 
 // DefaultStreamOptions are the production timings.
 func DefaultStreamOptions() StreamOptions {
 	return StreamOptions{Poll: 2 * time.Second, Heartbeat: 15 * time.Second, MaxLifetime: 5 * time.Minute,
-		WriteWindow: 10 * time.Second}
+		WriteWindow: 10 * time.Second, MaxPerUser: 5, MaxTotal: 500}
 }
 
 // feedBatch bounds how many events one poll reads.
@@ -50,8 +56,42 @@ const feedBatch = 100
 // current status. The stream ends with an "end" event once the request is terminal, or
 // without one when MaxLifetime passes, and the client should reconnect only in that case.
 type RequestEventsHandler struct {
-	svc  RequestEventService
-	opts StreamOptions
+	svc   RequestEventService
+	opts  StreamOptions
+	slots *streamSlots
+}
+
+// streamSlots counts open streams per user and in total. Each stream costs the database a
+// few queries every poll, so both are capped; the caller answers 429 when a slot is refused.
+type streamSlots struct {
+	mu       sync.Mutex
+	perUser  map[uuid.UUID]int
+	total    int
+	maxUser  int
+	maxTotal int
+}
+
+// acquire takes a slot for user and returns its release function; ok is false when the
+// user or the process is at its cap.
+func (s *streamSlots) acquire(user uuid.UUID) (release func(), ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.total >= s.maxTotal || s.perUser[user] >= s.maxUser {
+		return nil, false
+	}
+	s.total++
+	s.perUser[user]++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			s.total--
+			if s.perUser[user]--; s.perUser[user] <= 0 {
+				delete(s.perUser, user)
+			}
+		})
+	}, true
 }
 
 // NewRequestEventsHandler returns a RequestEventsHandler; zero option fields take the defaults.
@@ -69,7 +109,14 @@ func NewRequestEventsHandler(svc RequestEventService, opts StreamOptions) *Reque
 	if opts.WriteWindow <= 0 {
 		opts.WriteWindow = d.WriteWindow
 	}
-	return &RequestEventsHandler{svc: svc, opts: opts}
+	if opts.MaxPerUser <= 0 {
+		opts.MaxPerUser = d.MaxPerUser
+	}
+	if opts.MaxTotal <= 0 {
+		opts.MaxTotal = d.MaxTotal
+	}
+	return &RequestEventsHandler{svc: svc, opts: opts,
+		slots: &streamSlots{perUser: map[uuid.UUID]int{}, maxUser: opts.MaxPerUser, maxTotal: opts.MaxTotal}}
 }
 
 // Routes implements RouteRegistrar.
@@ -95,6 +142,16 @@ type statusEvent struct {
 type endEvent struct {
 	RequestID uuid.UUID       `json:"request_id"`
 	Status    requests.Status `json:"status"`
+}
+
+// writeProblem answers with a problem+json body for a status that has no apperr kind.
+func writeProblem(w http.ResponseWriter, r *http.Request, status int, code, title, detail string) {
+	p := Problem{Type: ErrorTypeBase + code, Title: title, Status: status, Code: code, Detail: detail,
+		Instance: r.URL.Path, RequestID: RequestIDFrom(r.Context())}
+	observability.Logger(r.Context()).InfoContext(r.Context(), "request rejected", "code", code)
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(p)
 }
 
 // ParseLastEventID reads a Last-Event-ID header: a non-negative audit seq. Anything else
@@ -154,6 +211,15 @@ func (h *RequestEventsHandler) stream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
+
+	release, ok := h.slots.acquire(p.UserID)
+	if !ok {
+		w.Header().Set("Retry-After", "5")
+		writeProblem(w, r, http.StatusTooManyRequests, "too_many_streams", "Too many open streams",
+			"close an open request stream before opening another")
+		return
+	}
+	defer release()
 
 	// Everything that can fail with a problem response happens before the first byte.
 	var (
@@ -239,6 +305,8 @@ func (h *RequestEventsHandler) stream(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-h.opts.Stop:
+			return // server shutdown: clients reconnect with Last-Event-ID to the next instance
 		case <-deadline.C:
 			return
 		case <-beat.C:

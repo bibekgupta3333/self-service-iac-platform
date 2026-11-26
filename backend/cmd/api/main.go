@@ -132,7 +132,7 @@ func run() error {
 		Catalog:  httpapi.NewCatalogHandler(catalogSvc),
 		Public: []httpapi.RouteRegistrar{
 			httpapi.NewRequestHandler(requestSvc),
-			httpapi.NewRequestEventsHandler(requestSvc, httpapi.StreamOptions{}),
+			httpapi.NewRequestEventsHandler(requestSvc, httpapi.StreamOptions{Stop: ctx.Done()}),
 			httpapi.NewStackHandler(stacks.NewService(stacks.NewPostgresRepository(pool))),
 			httpapi.NewAuditHandler(audit.NewVerifier(pool)),
 		},
