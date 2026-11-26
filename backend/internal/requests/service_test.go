@@ -116,6 +116,10 @@ func (m *memRepo) StackHolder(_ context.Context, path string) (StackHolder, erro
 	return StackHolder{}, apperr.NotFound("no stack at %s", path)
 }
 
+func (m *memRepo) LatestSpec(ctx context.Context, stackID uuid.UUID) (json.RawMessage, bool, error) {
+	return (&memStore{s: m.state}).LatestSpec(ctx, stackID)
+}
+
 func (m *memRepo) StackTarget(_ context.Context, id uuid.UUID) (StackTarget, error) {
 	return memStackTarget(m.state, id)
 }
@@ -258,7 +262,7 @@ func (m *memStore) OpenRequestKinds(_ context.Context, stackID uuid.UUID) ([]Kin
 func (m *memStore) LatestSpec(_ context.Context, stackID uuid.UUID) (json.RawMessage, bool, error) {
 	var best *Request
 	for _, r := range m.s.requests {
-		if r.Stack.ID != stackID || (r.Kind != KindCreate && r.Kind != KindUpdate) {
+		if r.Stack.ID != stackID || (r.Kind != KindCreate && r.Kind != KindUpdate && r.Kind != KindUpgrade) {
 			continue
 		}
 		if r.Status == StatusFailed || r.Status == StatusRejected || r.Status == StatusCancelled {
@@ -333,6 +337,8 @@ func (f fakeVersions) GetVersion(_ context.Context, name, version string) (catal
 		return catalog.ModuleVersion{ModuleName: "sqs", Version: catalog.SemVer{Major: 1, Minor: 3}, Status: "active",
 			Outputs:      []catalog.Output{{Name: "queue_arn"}, {Name: "queue_url"}},
 			InputsSchema: json.RawMessage(`{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}`)}, nil
+	case "sqs@1.4.0", "sqs@1.5.0", "sqs@2.0.0", "sqs@2.1.0", "sqs@2.2.0", "sqs@3.0.0":
+		return sqsTarget(version), nil
 	case "lambda@2.0.1":
 		return catalog.ModuleVersion{ModuleName: "lambda", Version: catalog.SemVer{Major: 2, Patch: 1}, Status: "active",
 			InputsSchema: json.RawMessage(`{"type":"object","required":["name"],"properties":{"name":{"type":"string"},"queue_arn":{"type":"string"}}}`)}, nil

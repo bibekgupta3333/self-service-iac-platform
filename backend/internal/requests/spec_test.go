@@ -40,7 +40,7 @@ func TestValidateShape(t *testing.T) {
 		want   []string
 	}{
 		{name: "valid", mutate: func(*CreateInput) {}},
-		{name: "unsupported kind", mutate: func(c *CreateInput) { c.Kind = KindUpgrade }, want: []string{"/kind:unsupported_kind"}},
+		{name: "unsupported kind", mutate: func(c *CreateInput) { c.Kind = KindReconcile }, want: []string{"/kind:unsupported_kind"}},
 		{name: "unknown kind", mutate: func(c *CreateInput) { c.Kind = "delete" }, want: []string{"/kind:enum"}},
 		{name: "bad names", mutate: func(c *CreateInput) { c.Team, c.Stack = "Payments", "x" }, want: []string{"/stack:pattern", "/team:pattern"}},
 		{name: "no resources", mutate: func(c *CreateInput) { c.Resources = nil }, want: []string{"/resources:minItems"}},

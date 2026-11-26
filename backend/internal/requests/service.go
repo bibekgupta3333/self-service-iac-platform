@@ -1,8 +1,10 @@
 package requests
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/audit"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/catalog"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/fp"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/inputschema"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/locks"
@@ -150,6 +153,9 @@ type Repository interface {
 	StackHolder(ctx context.Context, path string) (StackHolder, error)
 	// StackTarget loads an existing stack for an update or destroy (apperr NotFound when missing).
 	StackTarget(ctx context.Context, id uuid.UUID) (StackTarget, error)
+	// LatestSpec is Store.LatestSpec outside a transaction: the spec an upgrade starts from
+	// is read and validated against the catalog before the transaction, then re-read there.
+	LatestSpec(ctx context.Context, stackID uuid.UUID) (spec json.RawMessage, ok bool, err error)
 	// StatusEventsAfter lists up to limit status changes of a request with Seq > after, oldest first.
 	StatusEventsAfter(ctx context.Context, id uuid.UUID, after int64, limit int) ([]StatusEvent, error)
 	// LatestStatusSeq is the Seq of the request's newest status change (0 when none).
@@ -225,8 +231,11 @@ func (s *Service) Create(ctx context.Context, by identity.Principal, cmd CreateC
 	// transaction. Inside it, the request only uses its own connection; otherwise callers
 	// holding a transaction and waiting for a second connection could exhaust the pool
 	// while the idempotency row lock makes them wait on each other.
-	err := s.precheck(ctx, by, cmd.Input)
+	upgrade, err := s.precheck(ctx, by, cmd.Input)
 	if err != nil {
+		if res, replayed, rerr := s.replayRefusedUpgrade(ctx, by, cmd, err); replayed {
+			return res, rerr
+		}
 		return CreateResult{}, err
 	}
 	var res CreateResult
@@ -240,7 +249,7 @@ func (s *Service) Create(ctx context.Context, by identity.Principal, cmd CreateC
 			res, err = s.replay(ctx, st, by, cmd)
 			return err
 		}
-		req, err := s.create(ctx, st, by, cmd)
+		req, err := s.create(ctx, st, by, cmd, upgrade)
 		if err != nil {
 			return err
 		}
@@ -261,6 +270,40 @@ func (s *Service) Create(ctx context.Context, by identity.Principal, cmd CreateC
 	return res, nil
 }
 
+// errFreshKey rolls back the probe in replayRefusedUpgrade when the key was never used.
+var errFreshKey = errors.New("idempotency key not used yet")
+
+// replayRefusedUpgrade keeps a retried upgrade idempotent. An upgrade is checked against
+// the stack's newest spec, and once recorded it is that spec, so a retry with the same key
+// fails the precheck (not_an_upgrade) although it should return the original request. When
+// an upgrade's precheck fails on the request's content or the stack's state (invalid or
+// conflict), the key is probed in a transaction that is rolled back if the key is new;
+// replayed is false then and the precheck error stands. Missing access is never replayed.
+func (s *Service) replayRefusedUpgrade(ctx context.Context, by identity.Principal, cmd CreateCommand, refusal error) (CreateResult, bool, error) {
+	if cmd.Input.Kind != KindUpgrade || !(apperr.IsKind(refusal, apperr.KindInvalid) || apperr.IsKind(refusal, apperr.KindConflict)) {
+		return CreateResult{}, false, nil
+	}
+	var res CreateResult
+	err := s.repo.InTx(ctx, func(st Store) error {
+		claimed, err := st.ClaimIdempotencyKey(ctx, NewIdempotencyClaim(by.UserID, cmd.IdempotencyKey, cmd.RequestHash, s.clock.Now()))
+		if err != nil {
+			return fmt.Errorf("claim idempotency key: %w", err)
+		}
+		if claimed {
+			return errFreshKey
+		}
+		res, err = s.replay(ctx, st, by, cmd)
+		return err
+	})
+	switch {
+	case errors.Is(err, errFreshKey):
+		return CreateResult{}, false, nil
+	case err != nil:
+		return CreateResult{}, true, err
+	}
+	return res, true, nil
+}
+
 func (s *Service) replay(ctx context.Context, st Store, by identity.Principal, cmd CreateCommand) (CreateResult, error) {
 	rec, err := st.GetIdempotencyKey(ctx, by.UserID, cmd.IdempotencyKey)
 	if err != nil {
@@ -278,56 +321,114 @@ func (s *Service) replay(ctx context.Context, st Store, by identity.Principal, c
 }
 
 // precheck validates the input shape, the caller's team role and the module versions and
-// their inputs. It runs outside the transaction.
-func (s *Service) precheck(ctx context.Context, by identity.Principal, in CreateInput) error {
+// their inputs. It runs outside the transaction. For an upgrade it returns the plan the
+// transaction records once it confirmed the stack's spec did not change meanwhile.
+func (s *Service) precheck(ctx context.Context, by identity.Principal, in CreateInput) (*upgradePlan, error) {
 	if errs := ValidateShape(in); len(errs) > 0 {
-		return apperr.Invalid("validation_failed", "request is invalid", errs...)
+		return nil, apperr.Invalid("validation_failed", "request is invalid", errs...)
 	}
 	if in.Kind.TargetsExistingStack() {
 		return s.precheckExisting(ctx, by, in)
 	}
 	role, err := s.roleIn(ctx, by, in.Team)
 	if err != nil {
-		return fieldLookupError(err, "/team", fmt.Sprintf("unknown team %q", in.Team))
+		return nil, fieldLookupError(err, "/team", fmt.Sprintf("unknown team %q", in.Team))
 	}
 	if err := authorizeKind(role, in.Kind, in.Environment, in.Team); err != nil {
-		return err
+		return nil, err
 	}
-	return s.checkResources(ctx, in.Resources)
+	return nil, s.checkResources(ctx, in.Resources)
 }
 
-// precheckExisting is precheck for an update or destroy: the stack must exist, the caller
-// needs the role in its team, the stack must be in a state that takes the kind (checked
-// again inside the transaction, with the open requests), and a destroy must repeat the
-// stack's name.
-func (s *Service) precheckExisting(ctx context.Context, by identity.Principal, in CreateInput) error {
+// precheckExisting is precheck for an update, upgrade or destroy: the stack must exist, the
+// caller needs the role in its team, the stack must be in a state that takes the kind
+// (checked again inside the transaction, with the open requests), a destroy must repeat the
+// stack's name, and an upgrade must lead to versions and inputs the catalog accepts.
+func (s *Service) precheckExisting(ctx context.Context, by identity.Principal, in CreateInput) (*upgradePlan, error) {
 	t, err := s.repo.StackTarget(ctx, *in.StackID)
 	if err != nil {
-		return stackLookupError(err, *in.StackID)
+		return nil, stackLookupError(err, *in.StackID)
 	}
 	role, err := s.roleIn(ctx, by, t.TeamSlug)
 	if err != nil {
-		return fmt.Errorf("lookup membership of team %s: %w", t.TeamSlug, err)
+		return nil, fmt.Errorf("lookup membership of team %s: %w", t.TeamSlug, err)
 	}
 	if role == RoleNone {
 		// No role in the team: the stack is hidden, exactly as if it did not exist.
-		return stackNotFound(*in.StackID)
+		return nil, stackNotFound(*in.StackID)
 	}
 	if err := authorizeKind(role, in.Kind, t.Environment, t.TeamSlug); err != nil {
-		return err
+		return nil, err
 	}
 	if err := CheckStackAllowsKind(in.Kind, t.Status, nil); err != nil {
-		return err
+		return nil, err
 	}
 	if in.Kind == KindDestroy && in.ConfirmStackName != t.Name {
-		return apperr.Invalid("validation_failed", "the confirmation does not match the stack name",
+		return nil, apperr.Invalid("validation_failed", "the confirmation does not match the stack name",
 			apperr.FieldError{Pointer: "/confirm_stack_name", Code: "mismatch",
 				Message: fmt.Sprintf("must be %q, the name of the stack to destroy", t.Name)})
 	}
-	if !in.Kind.RequiresResources() {
-		return nil
+	if in.Kind == KindUpgrade {
+		return s.prepareUpgrade(ctx, t, in)
 	}
-	return s.checkResources(ctx, in.Resources)
+	if !in.Kind.RequiresResources() {
+		return nil, nil
+	}
+	return nil, s.checkResources(ctx, in.Resources)
+}
+
+// upgradePlan is an upgrade validated against the catalog: the spec it starts from, the
+// resulting resource list and what changed.
+type upgradePlan struct {
+	base      json.RawMessage
+	resources []ResourceInput
+	changes   []UpgradeChange
+}
+
+// prepareUpgrade applies the requested versions to the stack's current spec and validates
+// the result like an update: every target version exists and is not yanked, each upgraded
+// resource's inputs validate against the target version's input schema, and references to
+// outputs still resolve. A move across more than one major is refused, and one across a
+// major needs acknowledge_breaking.
+func (s *Service) prepareUpgrade(ctx context.Context, t StackTarget, in CreateInput) (*upgradePlan, error) {
+	raw, ok, err := s.repo.LatestSpec(ctx, t.ID)
+	if err != nil {
+		return nil, fmt.Errorf("load the stack's current spec: %w", err)
+	}
+	if !ok {
+		return nil, apperr.Conflict("no_current_spec",
+			"the stack has no current spec to upgrade (its last create or update failed or was cancelled); submit an update instead")
+	}
+	var current NormalizedSpec
+	if err := json.Unmarshal(raw, &current); err != nil {
+		return nil, fmt.Errorf("decode the stack's current spec: %w", err)
+	}
+	next, changes, errs := PlanUpgrade(current, in.Upgrades)
+	if len(errs) > 0 {
+		return nil, apperr.Invalid(upgradeErrorCode(errs), "the upgrade is not allowed", errs...)
+	}
+	if breaking := BreakingChanges(changes); len(breaking) > 0 && !in.AcknowledgeBreaking {
+		names := strings.Join(fp.Map(breaking, func(c UpgradeChange) string {
+			return fmt.Sprintf("%s %s -> %s", c.Resource, c.FromVersion, c.ToVersion)
+		}), ", ")
+		return nil, apperr.Invalid("acknowledge_breaking_required",
+			"a major upgrade needs acknowledge_breaking: true after reading the migration notes",
+			apperr.FieldError{Pointer: "/acknowledge_breaking", Code: "required",
+				Message: fmt.Sprintf("%s crosses a major version; read its migration notes, then acknowledge", names)})
+	}
+	resolved, err := s.resolve(ctx, next)
+	if err != nil {
+		if e, ok := apperr.As(err); ok && len(e.Fields) > 0 {
+			fields := upgradeFieldErrors(e.Fields, next, in.Upgrades)
+			return nil, apperr.Invalid(upgradeErrorCode(fields), "the target versions are unavailable", fields...)
+		}
+		return nil, err
+	}
+	if fields := upgradeFieldErrors(ValidateResources(resolved), next, in.Upgrades); len(fields) > 0 {
+		return nil, apperr.Invalid(upgradeErrorCode(fields),
+			"the stack's current inputs do not validate against the target versions; update the inputs first", fields...)
+	}
+	return &upgradePlan{base: raw, resources: next, changes: changes}, nil
 }
 
 // roleIn is the caller's role in a team: the stored membership (which also proves the team
@@ -378,9 +479,9 @@ func (s *Service) checkResources(ctx context.Context, resources []ResourceInput)
 	return nil
 }
 
-func (s *Service) create(ctx context.Context, st Store, by identity.Principal, cmd CreateCommand) (*Request, error) {
+func (s *Service) create(ctx context.Context, st Store, by identity.Principal, cmd CreateCommand, upgrade *upgradePlan) (*Request, error) {
 	if cmd.Input.Kind.TargetsExistingStack() {
-		return s.createForStack(ctx, st, by, cmd)
+		return s.createForStack(ctx, st, by, cmd, upgrade)
 	}
 	in := cmd.Input
 	team, err := st.TeamBySlug(ctx, in.Team)
@@ -424,10 +525,10 @@ func (s *Service) create(ctx context.Context, st Store, by identity.Principal, c
 		Normalize(in, region))
 }
 
-// createForStack records an update or destroy of an existing stack. It locks the stack row
-// first (the order every lock operation uses), re-checks the stack's state against its
-// open requests, and then takes the stack lock or queues like a create.
-func (s *Service) createForStack(ctx context.Context, st Store, by identity.Principal, cmd CreateCommand) (*Request, error) {
+// createForStack records an update, upgrade or destroy of an existing stack. It locks the
+// stack row first (the order every lock operation uses), re-checks the stack's state
+// against its open requests, and then takes the stack lock or queues like a create.
+func (s *Service) createForStack(ctx context.Context, st Store, by identity.Principal, cmd CreateCommand, upgrade *upgradePlan) (*Request, error) {
 	in := cmd.Input
 	t, err := st.LockStackTarget(ctx, *in.StackID)
 	if err != nil {
@@ -445,7 +546,34 @@ func (s *Service) createForStack(ctx context.Context, st Store, by identity.Prin
 			return nil, err
 		}
 	}
-	return s.record(ctx, st, by, cmd, StackRef{ID: t.ID, Path: t.Path, Status: string(t.Status)}, t.TeamID, NormalizeForStack(in, t))
+	var changes []UpgradeChange
+	if in.Kind == KindUpgrade {
+		if err := checkUpgradeBase(ctx, st, t.ID, upgrade); err != nil {
+			return nil, err
+		}
+		in.Resources, changes = upgrade.resources, upgrade.changes
+	}
+	spec := NormalizeForStack(in, t)
+	spec.Upgrades = changes
+	return s.record(ctx, st, by, cmd, StackRef{ID: t.ID, Path: t.Path, Status: string(t.Status)}, t.TeamID, spec)
+}
+
+// checkUpgradeBase confirms, with the stack row locked, that the spec the upgrade was
+// validated against is still the stack's newest one. Otherwise a request created meanwhile
+// would be silently overwritten by the upgrade's resource list.
+func checkUpgradeBase(ctx context.Context, st Store, stackID uuid.UUID, plan *upgradePlan) error {
+	if plan == nil {
+		return fmt.Errorf("upgrade of stack %s was not prepared", stackID)
+	}
+	raw, ok, err := st.LatestSpec(ctx, stackID)
+	if err != nil {
+		return fmt.Errorf("load the stack's current spec: %w", err)
+	}
+	if !ok || !bytes.Equal(raw, plan.base) {
+		return apperr.Conflict("spec_changed",
+			"another request changed the stack's spec while the upgrade was checked; reload the stack and try again")
+	}
+	return nil
 }
 
 // createdPayload is the request.created audit payload. A destroy records why it was asked
@@ -503,7 +631,11 @@ func (s *Service) record(ctx context.Context, st Store, by identity.Principal, c
 		return nil, fmt.Errorf("insert request: %w", err)
 	}
 
-	payload, err := json.Marshal(createdPayload(req, stack, cmd.Input))
+	created := createdPayload(req, stack, cmd.Input)
+	if len(spec.Upgrades) > 0 {
+		created["upgrades"] = spec.Upgrades
+	}
+	payload, err := json.Marshal(created)
 	if err != nil {
 		return nil, fmt.Errorf("encode audit payload: %w", err)
 	}

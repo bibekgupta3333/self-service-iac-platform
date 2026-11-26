@@ -22,7 +22,8 @@ import (
 )
 
 // CreateInput is the body of POST /v1/requests (docs/03 §6.4). A create names its stack
-// by team, environment and stack; an update or destroy names an existing stack by StackID.
+// by team, environment and stack; an update, upgrade or destroy names an existing stack by
+// StackID.
 type CreateInput struct {
 	Kind        Kind       `json:"kind"`
 	StackID     *uuid.UUID `json:"stack_id,omitempty"`
@@ -40,6 +41,11 @@ type CreateInput struct {
 	Justification string          `json:"justification,omitempty"`
 	Resources     []ResourceInput `json:"resources"`
 	DependsOn     []string        `json:"depends_on,omitempty"`
+	// Upgrades lists the resources an upgrade moves to another version of their module.
+	Upgrades []UpgradeInput `json:"upgrades,omitempty"`
+	// AcknowledgeBreaking confirms that the caller read the migration notes of an upgrade
+	// that crosses a major; such an upgrade is refused without it.
+	AcknowledgeBreaking bool `json:"acknowledge_breaking,omitempty"`
 }
 
 // Ephemeral requests a stack that is destroyed after TTLHours.
@@ -74,9 +80,9 @@ func ValidateShape(in CreateInput) []apperr.FieldError {
 	case !in.Kind.Valid():
 		add("/kind", "enum", "must be one of create, update, upgrade, destroy, reconcile, rollback")
 	case !in.Kind.Supported():
-		add("/kind", "unsupported_kind", fmt.Sprintf("kind %q is not supported yet; supported kinds are create, update and destroy", in.Kind))
+		add("/kind", "unsupported_kind", fmt.Sprintf("kind %q is not supported yet; supported kinds are create, update, upgrade and destroy", in.Kind))
 	}
-	if in.Kind == KindUpdate || in.Kind == KindDestroy {
+	if in.Kind == KindUpdate || in.Kind == KindUpgrade || in.Kind == KindDestroy {
 		validateExistingStackTarget(in, add)
 	} else {
 		validateNewStackTarget(in, add)
@@ -88,6 +94,7 @@ func ValidateShape(in CreateInput) []apperr.FieldError {
 		add("/justification", "required", "a destroy request needs a justification")
 	}
 	validateResourceShapes(in, add)
+	validateUpgradeShapes(in, add)
 	return errs
 }
 
@@ -160,9 +167,10 @@ func validateExistingStackTarget(in CreateInput, add fieldAdder) {
 }
 
 // validateResourceShapes checks the resource list of a create or update. A destroy has
-// none, and that is checked with the target. Pure.
+// none, and that is checked with the target; an upgrade has none either (validateUpgradeShapes).
+// Pure.
 func validateResourceShapes(in CreateInput, add fieldAdder) {
-	if in.Kind == KindDestroy {
+	if in.Kind == KindDestroy || in.Kind == KindUpgrade {
 		return
 	}
 	switch {
@@ -315,6 +323,8 @@ type NormalizedSpec struct {
 	Ephemeral   *Ephemeral      `json:"ephemeral,omitempty"`
 	Resources   []ResourceInput `json:"resources"`
 	DependsOn   []string        `json:"depends_on"`
+	// Upgrades records what an upgrade request moved (absent for other kinds).
+	Upgrades []UpgradeChange `json:"upgrades,omitempty"`
 }
 
 // Normalize returns the spec to store, with resources sorted by name. Pure.

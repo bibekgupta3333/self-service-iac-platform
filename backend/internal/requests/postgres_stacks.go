@@ -49,9 +49,20 @@ func (s *pgStore) LockStackTarget(ctx context.Context, id uuid.UUID) (StackTarge
 
 // LatestSpec implements Store.
 func (s *pgStore) LatestSpec(ctx context.Context, stackID uuid.UUID) (json.RawMessage, bool, error) {
+	return latestSpec(ctx, s.tx, stackID)
+}
+
+// LatestSpec implements Repository.
+func (r *PostgresRepository) LatestSpec(ctx context.Context, stackID uuid.UUID) (json.RawMessage, bool, error) {
+	return latestSpec(ctx, r.pool, stackID)
+}
+
+// latestSpec reads the spec of the stack's newest create, update or upgrade that did not
+// fail, get rejected or get cancelled: the resource list the next request starts from.
+func latestSpec(ctx context.Context, q db.DBTX, stackID uuid.UUID) (json.RawMessage, bool, error) {
 	var spec []byte
-	err := s.tx.QueryRow(ctx, `SELECT spec FROM requests
-		WHERE stack_id = $1 AND kind IN ('create', 'update') AND status NOT IN ('failed', 'rejected', 'cancelled')
+	err := q.QueryRow(ctx, `SELECT spec FROM requests
+		WHERE stack_id = $1 AND kind IN ('create', 'update', 'upgrade') AND status NOT IN ('failed', 'rejected', 'cancelled')
 		ORDER BY created_at DESC, id DESC LIMIT 1`, stackID).Scan(&spec)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, false, nil

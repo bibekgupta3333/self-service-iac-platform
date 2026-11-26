@@ -32,10 +32,9 @@ var AllStackStatuses = []StackStatus{
 // Valid reports whether s is a known stack status.
 func (s StackStatus) Valid() bool { return slices.Contains(AllStackStatuses, s) }
 
-// supportedKinds are the kinds the API accepts today. upgrade needs the stack's last
-// applied spec and manifest input migrations (docs/03 §6.4); reconcile and rollback are
-// platform-initiated.
-var supportedKinds = []Kind{KindCreate, KindUpdate, KindDestroy}
+// supportedKinds are the kinds the API accepts today. reconcile and rollback are
+// platform-initiated and not built yet.
+var supportedKinds = []Kind{KindCreate, KindUpdate, KindUpgrade, KindDestroy}
 
 // Supported reports whether POST /v1/requests accepts the kind.
 func (k Kind) Supported() bool { return slices.Contains(supportedKinds, k) }
