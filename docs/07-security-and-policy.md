@@ -195,8 +195,9 @@ import data.lib.iacp as f
 
 required := {"iacp:team", "iacp:environment", "iacp:stack", "iacp:managed-by"}
 
-# Resource types that do not support tags are skipped.
-untaggable := {"aws_iam_role_policy", "aws_iam_role_policy_attachment", "aws_lambda_event_source_mapping",
+# Resource types that do not support tags are skipped. (aws_lambda_event_source_mapping
+# is taggable since AWS provider 5.70; the lambda module tags it and requires >= 5.70.)
+untaggable := {"aws_iam_role_policy", "aws_iam_role_policy_attachment",
 	"aws_s3_bucket_public_access_block", "aws_s3_bucket_versioning",
 	"aws_s3_bucket_server_side_encryption_configuration", "aws_s3_bucket_policy",
 	"aws_s3_bucket_lifecycle_configuration", "aws_sqs_queue_policy", "aws_sqs_queue_redrive_policy",

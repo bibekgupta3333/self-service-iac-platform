@@ -1,0 +1,133 @@
+apiVersion: iacp.dev/v1
+kind: Module
+metadata:
+  name: sqs
+  version: 1.0.0
+  displayName: SQS Queue
+  description: KMS-encrypted SQS queue with a mandatory dead-letter queue, TLS-only policies, alarms and producer/consumer policies.
+  category: messaging
+  maturity: beta
+  owners:
+    - "@bibekgupta3333/platform"
+  documentation: https://github.com/bibekgupta3333/self-service-iac-platform/tree/modules/sqs/v1.0.0/modules/sqs
+
+compatibility:
+  terraform: ">= 1.10, < 2.0"
+  providers:
+    hashicorp/aws: ">= 5.60, < 6.0"
+  environments: [development, staging, production]
+
+inputs:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  required: [name]
+  additionalProperties: false
+  properties:
+    name:
+      type: string
+      pattern: "^[a-z][a-z0-9-]{2,40}$"
+      description: Logical queue name. Final name is <team>-<environment>-<name>.
+      x-iacp-immutable: true
+    fifo:
+      type: boolean
+      default: false
+      description: Create FIFO queues (main and DLQ).
+      x-iacp-immutable: true
+    content_based_deduplication:
+      type: boolean
+      default: false
+      description: Deduplicate on a hash of the message body. FIFO only.
+    visibility_timeout_seconds:
+      type: integer
+      minimum: 0
+      maximum: 43200
+      default: 30
+      description: Seconds a received message stays hidden.
+    message_retention_seconds:
+      type: integer
+      minimum: 60
+      maximum: 1209600
+      default: 345600
+      description: Seconds the main queue keeps a message.
+    receive_wait_time_seconds:
+      type: integer
+      minimum: 0
+      maximum: 20
+      default: 20
+      description: Long-polling wait time.
+    max_receive_count:
+      type: integer
+      minimum: 1
+      maximum: 100
+      default: 5
+      description: Receives before a message moves to the DLQ.
+      x-iacp-group: Dead-letter queue
+    dlq_retention_seconds:
+      type: integer
+      minimum: 60
+      maximum: 1209600
+      default: 1209600
+      description: Seconds the DLQ keeps a message. At least message_retention_seconds.
+      x-iacp-group: Dead-letter queue
+    kms_key_arn:
+      type: [string, "null"]
+      default: null
+      pattern: "^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/.+$"
+      description: Existing KMS key ARN. If null, a dedicated key with rotation is created.
+      x-iacp-group: Encryption
+    kms_data_key_reuse_period_seconds:
+      type: integer
+      minimum: 60
+      maximum: 86400
+      default: 300
+      description: Seconds SQS reuses a data key.
+      x-iacp-group: Encryption
+    alarm_actions:
+      type: array
+      items: { type: string, pattern: "^arn:" }
+      default: []
+      description: ARNs notified when a queue alarm changes state.
+      x-iacp-group: Alarms
+    oldest_message_age_alarm_seconds:
+      type: integer
+      minimum: 60
+      default: 3600
+      description: Alarm threshold for the age of the oldest message.
+      x-iacp-group: Alarms
+    key_service_principals:
+      type: array
+      items: { type: string, pattern: "^[a-z0-9-]+(\\.[a-z0-9-]+)*\\.amazonaws\\.com$" }
+      uniqueItems: true
+      default: []
+      description: AWS service principals allowed to use the module-created key for this account.
+      x-iacp-group: Encryption
+    tags:
+      type: object
+      additionalProperties: { type: string }
+      propertyNames: { not: { pattern: "^iacp:" } }
+      maxProperties: 30
+      description: Extra tags. The iacp:* prefix is reserved.
+      x-iacp-ui: key-value
+
+outputs:
+  - { name: id, description: Main queue URL, wireable: true }
+  - { name: arn, description: Main queue ARN, wireable: true }
+  - { name: name, description: Main queue name, wireable: false }
+  - { name: dlq_arn, description: Dead-letter queue ARN, wireable: true }
+  - { name: dlq_url, description: Dead-letter queue URL, wireable: true }
+  - { name: kms_key_arn, description: KMS key ARN, wireable: true }
+  - { name: consumer_policy_json, description: IAM policy for consumers, wireable: true }
+  - { name: producer_policy_json, description: IAM policy for producers, wireable: true }
+  - { name: iacp_metadata, description: Module name and version, wireable: false }
+
+cost:
+  baseline_monthly_usd: 1.20
+  drivers:
+    - requests_per_month
+    - kms_requests
+
+upgrade:
+  from: ">= 1.0.0, < 2.0.0"
+  requires_migration: false
+  notes: |
+    Initial release.

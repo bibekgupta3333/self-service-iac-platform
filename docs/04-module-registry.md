@@ -88,9 +88,10 @@ Every platform module implements the same contract so the generator, policies an
 | `name` | `string` | `^[a-z][a-z0-9-]{2,40}$` | Logical resource name; final names are `${team}-${environment}-${name}` |
 | `team` | `string` | `^[a-z][a-z0-9-]{1,30}$`, must match a platform team slug | Ownership, tagging, IAM scoping |
 | `environment` | `string` | one of `development`, `staging`, `production` | Drives environment-specific defaults |
+| `stack` | `string` | `^[a-z][a-z0-9-]{1,62}$` | Owning stack; sets the `iacp:stack` tag |
 | `tags` | `map(string)` | max 30 entries, keys may not start with `iacp:` | Extra user tags, merged under mandatory tags |
 
-The Config Generator always injects `team`, `environment` and the mandatory tag set; users only supply `name` and the module-specific inputs. Modules compute:
+The Config Generator always injects `team`, `environment`, `stack` and the mandatory tag set; users only supply `name` and the module-specific inputs. Modules compute:
 
 ```hcl
 locals {
@@ -98,6 +99,7 @@ locals {
   tags = merge(var.tags, {
     "iacp:team"        = var.team
     "iacp:environment" = var.environment
+    "iacp:stack"       = var.stack
     "iacp:module"      = "s3"
     "iacp:managed-by"  = "iacp"
   })
@@ -158,7 +160,7 @@ Outputs listed in `module.yaml` under `outputs[].wireable: true` are the only on
 | `upgrade` | object | no | `from` constraint, `notes`, `requires_migration` — consumed by upgrade-path logic |
 | `deprecation` | object | no | Set by catalog ops, not authors (see §7) |
 
-CI validates `module.yaml` against `modules/_shared/module.schema.json` and runs a parity check that every key in `inputs.properties` exists in `variables.tf` with a compatible type, and vice versa (excluding injected `team`/`environment`).
+CI validates `module.yaml` against `modules/_shared/module.schema.json` and runs a parity check that every key in `inputs.properties` exists in `variables.tf` with a compatible type, and vice versa (excluding injected `team`/`environment`/`stack`). The check is implemented by `tools/manifest_validator` (`.venv/bin/python -m tools.manifest_validator modules/`), which also checks that `outputs` match `outputs.tf` and that `metadata.version` equals `locals.module_version` (the value behind the `iacp_metadata` output).
 
 ### 4.2 Example: `modules/s3/module.yaml`
 
@@ -377,7 +379,7 @@ Indexing is idempotent on `(module, version)`; re-indexing the same version with
 |---|---|---|---|---|
 | **s3** (MVP) | `aws_s3_bucket`, versioning, SSE config, public access block, ownership controls, lifecycle, bucket policy, `aws_kms_key` + alias, optional logging target | `name`, `versioning_enabled`, `kms_key_arn`, `noncurrent_version_expiration_days`, `transition_to_ia_days`, `force_destroy` | SSE-KMS with CMK + bucket key, all public access blocked, `BucketOwnerEnforced`, TLS-only policy, versioning on, `force_destroy=false` | `id`, `arn`, `name`, `kms_key_arn`, `read_policy_json`, `write_policy_json` |
 | **sqs** (MVP) | `aws_sqs_queue` (main + DLQ), redrive policy, redrive allow policy, queue policy, `aws_kms_key`, CloudWatch alarms (DLQ depth, age of oldest message) | `name`, `fifo`, `visibility_timeout_seconds`, `message_retention_seconds`, `max_receive_count`, `dlq_retention_seconds` | SSE-KMS CMK, DLQ always created, TLS-only policy, no wildcard principals, alarms on DLQ > 0 | `id` (URL), `arn`, `name`, `dlq_arn`, `dlq_url`, `kms_key_arn`, `consumer_policy_json`, `producer_policy_json` |
-| **lambda** (MVP) | `aws_lambda_function`, execution role + boundary, log group (retention + KMS), optional SQS event source mapping, optional function URL (disabled), alarms | `name`, `runtime`, `handler`, `artifact_s3_uri`, `memory_mb`, `timeout_seconds`, `environment_variables`, `sqs_trigger_arn`, `extra_policy_jsons` | Role with permission boundary `iacp-boundary`, no function URL, X-Ray active, log retention 30d, env vars encrypted with CMK, reserved concurrency set, code signing config in prod | `id`, `arn`, `name`, `role_arn`, `invoke_arn`, `log_group_name` |
+| **lambda** (MVP) | `aws_lambda_function`, execution role under `/iacp/` + boundary, log group (retention + KMS), optional SQS event source mapping (tagged), `aws_kms_key` | `name`, `runtime`, `handler`, `artifact_s3_uri`, `memory_mb`, `timeout_seconds`, `environment_variables`, `sqs_trigger`, `dead_letter_target_arn`, `extra_policy_jsons` (map) | Role always carries a permissions boundary (default `iacp-boundary`), no function URL, X-Ray active (required in prod), log retention 30d, env vars encrypted with CMK, reserved concurrency 1-1000 (required in prod). Default alarms and code signing in prod are planned for a later minor release | `id`, `arn`, `name`, `role_arn`, `invoke_arn`, `log_group_name`, `kms_key_arn` |
 | **ecs-service** | ECS service + task def, ALB target group + listener rule, ECR repository, security groups, log group, autoscaling | `name`, `image_tag`, `cpu`, `memory`, `desired_count`, `container_port`, `health_check_path`, `cluster_arn`, `vpc_id`, `subnet_ids` | Fargate only, private subnets, no public IP, ECR scan on push + immutable tags, read-only root FS, non-root user, HTTPS listener only | `id`, `arn`, `name`, `service_url`, `task_role_arn`, `ecr_repository_url`, `security_group_id` |
 | **postgres** | `aws_db_instance` (or Aurora later), subnet group, parameter group, security group, Secrets Manager secret (managed master password), KMS key, alarms | `name`, `engine_version`, `instance_class`, `allocated_storage_gb`, `multi_az`, `vpc_id`, `subnet_ids`, `allowed_security_group_ids` | Not publicly accessible, storage encrypted CMK, `rds.force_ssl=1`, managed master password, backups 7d (35d prod), deletion protection + final snapshot in prod, IAM auth on, Performance Insights encrypted | `id`, `arn`, `name`, `connection` {host, port, secret_arn}, `security_group_id` |
 | **redis** | `aws_elasticache_replication_group`, subnet group, parameter group, security group, auth token secret, KMS key | `name`, `node_type`, `num_cache_clusters`, `engine_version`, `vpc_id`, `subnet_ids`, `allowed_security_group_ids` | At-rest + in-transit encryption, AUTH token in Secrets Manager, automatic failover when >1 node, snapshots on, private subnets only | `id`, `arn`, `name`, `connection` {host, port, secret_arn}, `security_group_id` |
@@ -710,16 +712,21 @@ variable "environment_variables" {
   default     = {}
 }
 
-variable "sqs_trigger_arn" {
-  description = "Optional SQS queue ARN to subscribe to (wireable from the sqs module)."
-  type        = string
-  default     = null
+variable "sqs_trigger" {
+  description = "Optional SQS trigger; queue_arn and kms_key_arn are wireable from the sqs module."
+  type = object({
+    queue_arn                          = string
+    batch_size                         = optional(number, 10) # 1-10 unless a batching window is set
+    maximum_batching_window_in_seconds = optional(number, 0)
+    kms_key_arn                        = optional(string) # role gets kms:Decrypt on it
+  })
+  default = null
 }
 
 variable "extra_policy_jsons" {
-  description = "Additional IAM policy documents (e.g. s3 read_policy_json). Must not contain '*' actions."
-  type        = list(string)
-  default     = []
+  description = "Additional IAM policy documents keyed by a stable name (e.g. { orders-read = s3 read_policy_json }). Allow statements may not use '*', '<service>:*', NotAction or NotResource."
+  type        = map(string)
+  default     = {}
 }
 
 # outputs.tf
@@ -731,7 +738,9 @@ output "invoke_arn"     { value = aws_lambda_function.this.invoke_arn }
 output "log_group_name" { value = aws_cloudwatch_log_group.this.name }
 ```
 
-The `sqs_trigger_arn` and `extra_policy_jsons` inputs are declared as `dependencies` in `lambda/module.yaml`, so the portal offers "wire from existing stack output" pickers for them, populated from `sqs.arn`, `sqs.consumer_policy_json` and `s3.read_policy_json`.
+The `sqs_trigger.queue_arn` and `extra_policy_jsons` inputs are declared as `dependencies` in `lambda/module.yaml`, so the portal offers "wire from existing stack output" pickers for them, populated from `sqs.arn`, `sqs.consumer_policy_json` and `s3.read_policy_json`.
+
+Optional companions that take a wireable value (`sqs_trigger`, the s3 module's `access_logging`) are objects, not plain strings. A resource's `count` can then depend on whether the object is null, which Terraform knows at plan time even when the wired ARN or name is only known after apply (for example when the source resource is created in the same configuration).
 
 ## 13. Authoring guidelines and review checklist
 

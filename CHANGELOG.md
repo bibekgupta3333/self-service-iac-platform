@@ -38,6 +38,19 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
   - hash-chained audit log computed in Go (ADR-0010), with a bounded `/v1/audit/verify`
   - distroless nonroot Dockerfile and an opt-in `backend` compose service
 - Make targets `go-integration`, `generator-update` and `api`.
+- Module registry MVP (WBS 3.1–3.5):
+  - `modules/_shared/module.schema.json`, the JSON Schema for `module.yaml`.
+  - `tools/manifest_validator`: schema, inputs-schema and variables.tf parity checks. Pytest suite; run it with `make validate-manifests`.
+  - `modules/s3` v1.0.0:
+    - KMS CMK, public access block, TLS-only and TLS ≥ 1.2 bucket policy, versioning
+    - one lifecycle rule, optional access logging, `additional_policy_statements` and `key_service_principals`
+  - `modules/sqs` v1.0.0: SSE-KMS queue with a DLQ and an inline redrive-allow policy, and `key_service_principals`.
+  - `modules/lambda` v1.0.0:
+    - execution role under `/iacp/` that always has the `iacp-boundary`
+    - log group with retention, active tracing and reserved concurrency in production
+    - tagged SQS event source with validated batching, KMS grants for queues, and guarded `extra_policy_jsons`
+  - LocalStack examples with `policy-context.json` and `terraform test` suites (s3 14, sqs 11, lambda 23).
+  - Terratest suite (`tests/`) for s3 and sqs that asserts the platform tag values. Run it with `make integration-test`.
 
 ### Security
 - The backend fails closed: it binds to loopback by default, refuses to start without `IACP_AUTH_MODE`, keeps internal endpoints behind a constant-time token check, and enforces team membership on request creation.
@@ -50,7 +63,7 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 
 ### Planned
 - M0 Foundations (remaining): smoke stack against LocalStack. The real-AWS state bucket and OIDC roles are deferred by ADR-0009.
-- M1 Module registry: `modules/s3`, `modules/sqs`, `modules/lambda`, `module.yaml` schema, `module-release.yml`.
+- M1 Module registry (remaining): `module-release.yml` tagging and catalog indexing (3.6–3.7), Lambda Terratest.
 - M2 Orchestration engine (remaining): stack lock and queue, GitHub App PRs, webhooks, OIDC verifier, OAuth/RBAC, `pr-validate.yml`, `apply.yml`.
 - M3 Security gates (remaining): SARIF upload, budget context, approval and budget policies, environment protection.
 - M4 Portal and destroy: Next.js dashboard, destroy flow, Infracost comments.

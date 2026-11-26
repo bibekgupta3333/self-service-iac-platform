@@ -53,11 +53,11 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 ## 3. Module registry — M1
 | ID | Task | Est | Dep |
 |----|------|-----|-----|
-| [ ] 3.1 | `module.yaml` JSON Schema + validator + variables.tf parity check | 1 | 2.1 |
-| [ ] 3.2 | `modules/s3` (KMS, public access block, versioning, lifecycle, outputs) + examples + `terraform test` | 2 | 3.1 |
-| [ ] 3.3 | `modules/sqs` (+ DLQ, redrive, KMS) + examples + tests | 1.5 | 3.1 |
-| [ ] 3.4 | `modules/lambda` (IAM role least-privilege, log group, SQS trigger option) + tests | 2 | 3.1 |
-| [ ] 3.5 | Terratest suites against LocalStack (`tests/`) | 1.5 | 3.2–3.4 |
+| [x] 3.1 | `module.yaml` JSON Schema + validator + variables.tf parity check | 1 | 2.1 |
+| [x] 3.2 | `modules/s3` (KMS, public access block, versioning, lifecycle, outputs) + examples + `terraform test` | 2 | 3.1 |
+| [x] 3.3 | `modules/sqs` (+ DLQ, redrive, KMS) + examples + tests | 1.5 | 3.1 |
+| [x] 3.4 | `modules/lambda` (IAM role least-privilege, log group, SQS trigger option) + tests | 2 | 3.1 |
+| [x] 3.5 | Terratest suites against LocalStack (`tests/`) | 1.5 | 3.2–3.4 |
 | [ ] 3.6 | `module-release.yml`: checks, tests, SemVer interface-diff gate, tag `modules/<n>/vX.Y.Z`, release notes | 1.5 | 3.5 |
 | [ ] 3.7 | Catalog index call (`POST /v1/internal/catalog/index`) | 0.5 | 4.3, 3.6 |
 

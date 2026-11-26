@@ -1,0 +1,5 @@
+# Modules are libraries: provider lock files belong to generated stack roots,
+# not to modules or their examples.
+.terraform.lock.hcl
+# Build artifacts produced by examples (e.g. archive_file).
+*.zip
