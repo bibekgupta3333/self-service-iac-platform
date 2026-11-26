@@ -15,11 +15,11 @@ type Props = {
 };
 
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
-  return { title: `Request ${decodeURIComponent((await params).name)}` };
+  return { title: `Request ${(await params).name}` };
 }
 
 export default async function RequestModulePage({ params, searchParams }: Props) {
-  const name = decodeURIComponent((await params).name);
+  const name = (await params).name;
   const { version: requested } = await searchParams;
   const api = serverApi();
 
