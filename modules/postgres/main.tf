@@ -35,7 +35,7 @@ resource "aws_db_instance" "this" {
   copy_tags_to_snapshot     = true
   deletion_protection       = local.deletion_protection
   skip_final_snapshot       = local.skip_final_snapshot
-  final_snapshot_identifier = local.skip_final_snapshot ? null : "${local.full_name}-final"
+  final_snapshot_identifier = local.skip_final_snapshot ? null : "${local.full_name}-final-${random_id.final_snapshot[0].hex}"
   delete_automated_backups  = local.is_development
 
   # Maintenance.

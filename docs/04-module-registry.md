@@ -328,7 +328,7 @@ The matrix is derived from `module.yaml` and published in the catalog (`GET /v1/
 | sqs | 1.1.0 | >= 1.10, < 2.0 | >= 5.60, < 6.0 | dev, staging, prod | stable |
 | lambda | 1.0.0 | >= 1.10, < 2.0 | >= 5.60, < 6.0 | dev, staging, prod | stable |
 | ecs-service | 1.0.0 | >= 1.10, < 2.0 | >= 5.70, < 6.0 | dev, staging, prod | beta |
-| postgres | 1.0.0 | >= 1.10, < 2.0 | >= 5.70, < 6.0 | dev, staging, prod | beta |
+| postgres | 1.0.0 | >= 1.10, < 2.0 | >= 5.70, < 6.0 (+ hashicorp/random >= 3.6, < 4.0) | dev, staging, prod | beta |
 | redis | 1.0.0 | >= 1.10, < 2.0 | >= 5.70, < 6.0 (+ hashicorp/random >= 3.6, < 4.0) | dev, staging, prod | beta |
 | vpc | 0.2.0 | >= 1.10, < 2.0 | >= 5.60, < 6.0 | dev, staging | beta |
 | monitoring | 0.1.0 | >= 1.10, < 2.0 | >= 5.60, < 6.0 | dev | alpha |

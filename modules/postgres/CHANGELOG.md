@@ -22,7 +22,10 @@ as git tags `modules/postgres/vX.Y.Z`.
   state. IAM database authentication on by default.
 - Backups (7 days, 35 in production, at least 7 in production), deletion
   protection and a final snapshot outside development, Multi-AZ by default and
-  required in production.
+  required in production. The final snapshot is named
+  `<name>-final-<suffix>`, with a `random_id` suffix kept in state, so
+  re-created instances never collide with an earlier snapshot (adds
+  `hashicorp/random` >= 3.6, < 4.0).
 - `postgresql` and `upgrade` log groups created up front with retention and
   KMS.
 - Outputs `endpoint`, `port`, `secret_arn`, `connection`, `security_group_id`.

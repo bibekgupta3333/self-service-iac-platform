@@ -20,7 +20,8 @@ as git tags `modules/redis/vX.Y.Z`.
 - Automatic failover and Multi-AZ with 2+ nodes; 2 nodes by default and at
   least 2 required in production.
 - Daily snapshots (7 days, at least 1 in production) and a final snapshot
-  outside development.
+  `<name>-final-<suffix>` outside development; the `random_id` suffix kept in
+  state stops re-created caches colliding with an earlier snapshot.
 - Slow and engine logs delivered to KMS-encrypted log groups with retention.
 - Outputs `primary_endpoint`, `reader_endpoint`, `port`, `secret_arn`,
   `connection`, `security_group_id`.

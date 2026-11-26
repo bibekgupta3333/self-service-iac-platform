@@ -34,6 +34,7 @@ security group to `allowed_security_group_ids` and, on the application side,
 allow egress to this module's `security_group_id`.
 
 The module declares no provider. The calling root configures `provider "aws"`.
+It also uses `hashicorp/random` (local only) for the final snapshot suffix.
 [`examples/complete`](examples/complete) plans the module with a stand-in
 network.
 
@@ -45,7 +46,7 @@ network.
 | Encryption in transit | Module parameter group with `rds.force_ssl = 1`: connections without TLS are rejected. |
 | Credentials | `manage_master_user_password = true`: RDS generates and rotates the master password in Secrets Manager (encrypted with the module key). No password input, no password output, nothing in Terraform state. IAM database authentication is on by default. |
 | Network | `publicly_accessible = false`, a DB subnet group over the given private subnets, and a security group whose only rules admit the database port from `allowed_security_group_ids`. No CIDR ingress and no egress. |
-| Recovery | Automated backups for 7 days (35 in production; at least 7 in production), `copy_tags_to_snapshot`. Outside development, deletion protection is on and a final snapshot `<name>-final` is taken; development stays disposable so TTL destroys work. |
+| Recovery | Automated backups for 7 days (35 in production; at least 7 in production), `copy_tags_to_snapshot`. Outside development, deletion protection is on and a final snapshot `<name>-final-<suffix>` is taken; development stays disposable so TTL destroys work. The 8-character suffix comes from a `random_id` kept in state: stable for the life of the instance, new for a re-created one (and when the identifier changes), so a second destroy never collides with an earlier snapshot. |
 | Availability | Multi-AZ by default in production, and `multi_az = false` is rejected there. |
 | Observability | Performance Insights (encrypted, 7 days); `postgresql` and `upgrade` logs exported to log groups created up front with the module key and a retention (default 30 days); connection, disconnection, DDL and slow-statement (> 1 s) logging. |
 | Maintenance | Automatic minor version upgrades in the maintenance window; major upgrades are never applied implicitly; changes wait for the window (`apply_immediately = false`). |
@@ -98,7 +99,7 @@ alarms are planned for a later minor release.
 
 `aws_db_instance`, `aws_db_subnet_group`, `aws_db_parameter_group`,
 `aws_security_group` with one `aws_vpc_security_group_ingress_rule` per allowed
-group, two `aws_cloudwatch_log_group`s, and optional `aws_kms_key` +
+group, two `aws_cloudwatch_log_group`s, `random_id` (outside development), and optional `aws_kms_key` +
 `aws_kms_alias`.
 
 ## Testing

@@ -25,7 +25,8 @@ locals {
   failover           = local.num_cache_clusters >= 2
 
   # Final snapshot outside development, where TTL destroys must stay cheap.
-  final_snapshot_identifier = local.is_development ? null : "${local.full_name}-final"
+  # The suffix keeps names unique across re-creations (snapshot.tf).
+  final_snapshot_identifier = local.is_development ? null : "${local.full_name}-final-${random_id.final_snapshot[0].hex}"
 
   log_types      = ["slow-log", "engine-log"]
   log_group_base = "/aws/elasticache/${local.full_name}"

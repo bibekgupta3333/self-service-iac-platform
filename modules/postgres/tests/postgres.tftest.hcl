@@ -184,7 +184,7 @@ run "development_defaults_apply" {
   }
 
   assert {
-    condition     = aws_db_instance.this.deletion_protection == false && aws_db_instance.this.skip_final_snapshot == true
+    condition     = aws_db_instance.this.deletion_protection == false && aws_db_instance.this.skip_final_snapshot == true && length(random_id.final_snapshot) == 0
     error_message = "Development databases stay disposable: no deletion protection, no final snapshot."
   }
 
@@ -271,14 +271,29 @@ run "staging_is_protected" {
     kms_key_arn = "arn:aws:kms:us-east-1:123456789012:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
   }
 
+  # random_id is only known after apply; fix it so the name can be asserted.
+  override_resource {
+    target = random_id.final_snapshot
+    # Plan runs need the override too (Terraform >= 1.11).
+    override_during = plan
+    values = {
+      hex = "0a1b2c3d"
+    }
+  }
+
   assert {
     condition     = aws_db_instance.this.deletion_protection == true && aws_db_instance.this.skip_final_snapshot == false
     error_message = "Outside development, deletion protection is on and a final snapshot is taken."
   }
 
   assert {
-    condition     = aws_db_instance.this.final_snapshot_identifier == "platform-staging-tftest-db-final"
-    error_message = "The final snapshot must be named after the instance."
+    condition     = aws_db_instance.this.final_snapshot_identifier == "platform-staging-tftest-db-final-0a1b2c3d"
+    error_message = "The final snapshot must be named after the instance plus its per-instance random suffix."
+  }
+
+  assert {
+    condition     = random_id.final_snapshot[0].keepers["identifier"] == "platform-staging-tftest-db" && random_id.final_snapshot[0].byte_length == 4
+    error_message = "The snapshot suffix must be renewed when the instance identifier changes."
   }
 
   assert {

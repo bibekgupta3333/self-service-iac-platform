@@ -171,7 +171,7 @@ run "development_defaults_apply" {
   }
 
   assert {
-    condition     = aws_elasticache_replication_group.this.snapshot_retention_limit == 7 && aws_elasticache_replication_group.this.final_snapshot_identifier == null
+    condition     = aws_elasticache_replication_group.this.snapshot_retention_limit == 7 && aws_elasticache_replication_group.this.final_snapshot_identifier == null && length(random_id.final_snapshot) == 0
     error_message = "Development keeps 7 days of snapshots and takes no final snapshot."
   }
 
@@ -238,6 +238,16 @@ run "production_defaults" {
     kms_key_arn = "arn:aws:kms:us-east-1:123456789012:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
   }
 
+  # random_id is only known after apply; fix it so the name can be asserted.
+  override_resource {
+    target = random_id.final_snapshot
+    # Plan runs need the override too (Terraform >= 1.11).
+    override_during = plan
+    values = {
+      hex = "0a1b2c3d"
+    }
+  }
+
   assert {
     condition     = aws_elasticache_replication_group.this.num_cache_clusters == 2
     error_message = "Production defaults to a primary and a replica."
@@ -249,8 +259,13 @@ run "production_defaults" {
   }
 
   assert {
-    condition     = aws_elasticache_replication_group.this.final_snapshot_identifier == "platform-production-tftest-cache-final"
-    error_message = "Production caches take a final snapshot."
+    condition     = aws_elasticache_replication_group.this.final_snapshot_identifier == "platform-production-tftest-cache-final-0a1b2c3d"
+    error_message = "Production caches take a final snapshot named after the cache plus its per-cache random suffix."
+  }
+
+  assert {
+    condition     = random_id.final_snapshot[0].keepers["replication_group_id"] == "platform-production-tftest-cache"
+    error_message = "The snapshot suffix must be renewed when the replication group ID changes."
   }
 
   assert {
