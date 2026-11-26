@@ -138,6 +138,7 @@ dependencies) arrive with their features.
 | `IACP_WORKER_POLL_INTERVAL` | `1s` | idle poll interval of the in-process outbox worker (50ms–1m) |
 | `IACP_TTL_MIN_HOURS`, `IACP_TTL_MAX_HOURS`, `IACP_TTL_DEFAULT_HOURS` | `1`, `720`, `72` | bounds of an ephemeral stack's TTL in hours (a request's `ephemeral.ttl_hours`, and each extension); omitted `ttl_hours` takes the default; the environment's `max_ttl_hours` is a further ceiling |
 | `IACP_TTL_MAX_EXTENSION_HOURS` | `168` | most hours extensions may add to one stack in total |
+| `IACP_TTL_RETRY_BACKOFF_HOURS`, `IACP_TTL_MAX_ATTEMPTS` | `24`, `3` | after a failed, rejected or cancelled TTL destroy, wait this many hours before the next one (0 disables); after this many unsuccessful attempts the stack is blocked (`ttl.blocked` audit, 0 means no limit). `IACP_TTL_MAX_HOURS` is capped at 8760 |
 
 The publisher settings fail closed: `github` with any App setting missing, App settings with
 another publisher, `local` without `IACP_LOCAL_GIT_REPO`, or an unknown value stop the API at startup.
@@ -345,6 +346,7 @@ environment-specific row wins over a team-wide one; `null` when no budget is set
 - **Services** (`ttl.Service`, ports `Repository`/`Store`, PostgreSQL adapter): `Extend` (role check in
   the stack's team, cap, audit `ttl.extended`, clears the warning), `Due`, `Warn` (audit `ttl.warned`,
   `ttl_warned_at`, `ttl.warning` outbox job when comments are enabled), `Teardown`.
+- **Backoff** (`ttl.Policy.Backoff`, pure): `OpenTTLDestroy` and the due list skip a stack whose last TTL destroy ended unsuccessfully within the backoff window (`409 ttl_backoff`) and block it after the attempt limit (`409 ttl_blocked`, audit `ttl.blocked` once per expiry).
 - **Teardown** calls `requests.Service.OpenTTLDestroy` as the `iacp-bot` system user. In one transaction,
   under the stack row lock, it re-checks ephemeral, not production and past `expires_at`, skips a stack with a
   destroy already open, refuses a busy stack, then records the destroy request (justification `ttl expired`,
