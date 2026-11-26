@@ -147,8 +147,8 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 
 - Pipeline extras (WBS 5.4, 5.5, 5.7, 6.1):
   - Code scanning: TFLint and Checkov also write SARIF in `ci.yml` (modules) and `pr-validate.yml` (per stack); the gating runs are unchanged. `tools.stack_pipeline sarif` rewrites stack SARIF to repository paths, and a separate `code-scanning` job uploads it with `github/codeql-action/upload-sarif` under one category per tool and stack (`ci/tflint`, `ci/checkov`, `pr-validate/<tool>/<stack-id>`).
-  - Informational Infracost estimate per stack in `pr-validate.yml` (pinned `0.10.49`, sha256 verified). `summary --cost` folds the monthly cost into `summary.json` and the sticky comment; it never changes the result. Skipped with a notice while `INFRACOST_API_KEY` is not configured.
-  - Post-apply smoke test in `apply.yml`: `tools.stack_pipeline smoke` checks the declared outputs and the required `iacp:*` tags in state and on the live LocalStack resources (read-only AWS CLI calls), writes the job summary and is reported as stage `smoke`.
+  - Informational Infracost estimate per stack in `pr-validate.yml` (pinned `0.10.49`, sha256 verified), in its own `cost` job on a redacted plan (`cost-input`), folded into `summary.json` and the sticky comment by a `cost-summary` job (`fold-cost`). It never changes the result. Skipped with a notice while `INFRACOST_API_KEY` is not configured.
+  - Post-apply smoke test in `apply.yml`: `tools.stack_pipeline smoke` checks the declared outputs and the required `iacp:*` tags in state and on the live LocalStack resources (read-only AWS CLI calls), writes the job summary and is reported as stage `smoke`. It refuses any endpoint that is not loopback or `*.localstack.cloud`.
   - `apply.yml` documents its provider cache parity with `pr-validate.yml`.
 
 ### Security
@@ -166,7 +166,7 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 - Pull-request tokens can now also read the budget context, which is read-only, for any team's stack path (an accepted exposure, documented in docs/07). They still cannot take locks or index the catalog.
 - `tools/stack_pipeline` mints a new GitHub OIDC token for every API request, retries included, because the API now rejects a reused `jti`; the shared internal token is still reused.
 - `tools/codeowners` only counts git-tracked stack roots and rejects `platform_paths` under `/environments/<env>/`, which team rules would shadow.
-- `security-events: write` is granted only to the `code-scanning` upload jobs, which run no PR code; fork and Dependabot PRs skip the upload. `INFRACOST_API_KEY` is passed only to the Infracost step, never to a step that runs PR-controlled Terraform.
+- `security-events: write` is granted only to the `code-scanning` upload jobs, which run no PR code; fork and Dependabot PRs skip the upload. Stack SARIF paths always stay inside the repository, and a run's own `automationDetails` is dropped so a PR cannot pick its category. `INFRACOST_API_KEY` is passed only to the `cost` job, which runs no PR code.
 
 ### Changed
 - `AGENTS.md`: local-first rules, the 70/30 object-oriented and functional coding style, and the small-commit, reviewed-PR workflow.
