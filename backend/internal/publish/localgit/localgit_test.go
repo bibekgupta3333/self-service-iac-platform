@@ -192,4 +192,12 @@ func TestNewValidatesRepository(t *testing.T) {
 	if _, err := New(ctx, Config{RepoPath: dir}); err == nil {
 		t.Fatal("base branch is required")
 	}
+	// A plain directory inside a repository must not resolve to the parent repository.
+	sub := filepath.Join(dir, "nested")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(ctx, Config{RepoPath: sub, BaseBranch: "main"}); err == nil || !strings.Contains(err.Error(), "not the root") {
+		t.Fatalf("nested directory: %v", err)
+	}
 }

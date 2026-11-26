@@ -79,11 +79,24 @@ func New(ctx context.Context, cfg Config) (*Publisher, error) {
 	if cfg.GitBinary == "" {
 		cfg.GitBinary = "git"
 	}
-	repo, err := filepath.Abs(cfg.RepoPath)
+	abs, err := filepath.Abs(cfg.RepoPath)
+	if err != nil {
+		return nil, fmt.Errorf("localgit: %w", err)
+	}
+	repo, err := filepath.EvalSymlinks(abs)
 	if err != nil {
 		return nil, fmt.Errorf("localgit: %w", err)
 	}
 	p := &Publisher{cfg: cfg, repo: repo}
+	// A plain directory inside another repository would make git find the parent and
+	// commit branches there: the configured path must be the work tree root itself.
+	top, err := p.git(ctx, nil, nil, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return nil, fmt.Errorf("localgit: %s is not a git work tree: %w", repo, err)
+	}
+	if real, err := filepath.EvalSymlinks(top); err != nil || real != repo {
+		return nil, fmt.Errorf("localgit: %s is not the root of a git work tree (git found %s)", repo, top)
+	}
 	gitDir, err := p.git(ctx, nil, nil, "rev-parse", "--absolute-git-dir")
 	if err != nil {
 		return nil, fmt.Errorf("localgit: %s is not a git repository: %w", repo, err)
