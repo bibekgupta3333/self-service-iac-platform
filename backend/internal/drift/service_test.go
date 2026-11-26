@@ -441,6 +441,15 @@ func TestResolveAccessControl(t *testing.T) {
 			t.Fatal("no request for a denied caller")
 		}
 	})
+	t.Run("platform admin without a membership", func(t *testing.T) {
+		f := newFixture(t, rbac.RoleNone)
+		id := seedOpen(t, f)
+		f.user.PlatformAdmin = true
+		res, err := f.svc.Resolve(context.Background(), f.user, id, ResolveInput{Action: ActionIgnore, Reason: "accepted by the platform team"})
+		if err != nil || *res.Entry.Status != StatusIgnored {
+			t.Fatalf("platform admin: %+v, %v", res, err)
+		}
+	})
 	t.Run("hidden team", func(t *testing.T) {
 		f := newFixture(t, rbac.RoleDeveloper)
 		id := seedOpen(t, f)

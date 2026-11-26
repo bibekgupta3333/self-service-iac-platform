@@ -344,6 +344,11 @@ func (s *Service) Resolve(ctx context.Context, by identity.Principal, id uuid.UU
 	if err != nil {
 		return Resolved{}, fmt.Errorf("lookup membership of team %s: %w", cur.Team, err)
 	}
+	if by.PlatformAdmin {
+		// The flag on the principal is what route policies use too (the dev-mode user has it
+		// without a users row that says so); a platform admin is admin in every team.
+		role = rbac.RoleAdmin
+	}
 	if d := rbac.Decide(role, RBACAction(in.Action), rbac.Resource{Environment: cur.Environment}); !d.Allowed {
 		return Resolved{}, apperr.Forbidden(fmt.Sprintf("%s drift for team %s needs the %s role or higher", in.Action, cur.Team, d.Need))
 	}
