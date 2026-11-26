@@ -33,6 +33,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/publish/localgit"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/requests"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/runs"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/stacks"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/webhooks"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/migrations"
 )
@@ -131,6 +132,7 @@ func run() error {
 		Catalog:  httpapi.NewCatalogHandler(catalogSvc),
 		Public: []httpapi.RouteRegistrar{
 			httpapi.NewRequestHandler(requestSvc),
+			httpapi.NewStackHandler(stacks.NewService(stacks.NewPostgresRepository(pool))),
 			httpapi.NewAuditHandler(audit.NewVerifier(pool)),
 		},
 		InternalHandlers: []httpapi.RouteRegistrar{
