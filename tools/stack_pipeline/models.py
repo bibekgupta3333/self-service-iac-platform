@@ -98,6 +98,7 @@ class StackMetadata:
     lifecycle: str
     backend: str
     request_id: str
+    fencing_token: int | None = None
     depends_on: tuple[str, ...] = ()
     modules: Mapping[str, ModulePin] = field(default_factory=dict)
 
@@ -118,12 +119,15 @@ class StackMetadata:
             name: ModulePin(ref=str(pin.get("ref", "")), sha=str(pin.get("sha", "")))
             for name, pin in (data.get("modules") or {}).items()
         }
+        token = data.get("fencing_token")
         return cls(
             ref=ref,
             region=data["region"],
             lifecycle=data["lifecycle"],
             backend=data["backend"],
             request_id=str(data.get("request_id", "")),
+            # The token of the request that rendered the stack (validate reports carry it).
+            fencing_token=token if isinstance(token, int) and not isinstance(token, bool) else None,
             depends_on=tuple(str(d) for d in data.get("depends_on") or ()),
             modules=modules,
         )
