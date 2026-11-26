@@ -1,19 +1,21 @@
 -- drift_reports: the result of one nightly drift check of one stack (docs/03 §2 and §6.6,
 -- docs/06 §4), reported by drift.yml through POST /v1/internal/drift (WBS 8.3).
 --
--- stacks.health is separate from the lifecycle status: a drift scan only ever moves health
--- (healthy <-> drifted), never stacks.status, so it cannot disturb a request in flight.
+-- Drift is recorded in stacks.health (0011), widened here with 'drifted': a drift scan only
+-- ever moves health, never stacks.status, so it cannot disturb a request in flight
+-- (ADR-0013).
 --
 -- Privileges: 0004's default grant gives iacp_app DML here. Findings are immutable once
 -- written and reports are never deleted, so DELETE is revoked and UPDATE is limited to the
 -- resolution columns (least privilege).
 
 -- +goose Up
-CREATE TYPE stack_health AS ENUM ('healthy', 'drifted');
 CREATE TYPE drift_result AS ENUM ('clean', 'drifted', 'error');
 CREATE TYPE drift_status AS ENUM ('open', 'reconciled', 'ignored', 'codified');
 
-ALTER TABLE stacks ADD COLUMN health stack_health NOT NULL DEFAULT 'healthy';
+ALTER TABLE stacks DROP CONSTRAINT stacks_health_check;
+ALTER TABLE stacks ADD CONSTRAINT stacks_health_check
+    CHECK (health IN ('unknown', 'healthy', 'degraded', 'drifted'));
 
 CREATE TABLE drift_reports (
     id                    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -57,7 +59,9 @@ END $$;
 
 -- +goose Down
 DROP TABLE drift_reports;
-ALTER TABLE stacks DROP COLUMN health;
+UPDATE stacks SET health = 'unknown' WHERE health = 'drifted';
+ALTER TABLE stacks DROP CONSTRAINT stacks_health_check;
+ALTER TABLE stacks ADD CONSTRAINT stacks_health_check
+    CHECK (health IN ('unknown', 'healthy', 'degraded'));
 DROP TYPE drift_status;
 DROP TYPE drift_result;
-DROP TYPE stack_health;

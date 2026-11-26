@@ -100,8 +100,8 @@ func TestRuntimeRoleIsLeastPrivileged(t *testing.T) {
 		"DELETE FROM pipeline_runs",                 // run reports are insert/update only (0005)
 		"UPDATE oidc_jti SET expires_at = now()",    // replay ids are insert/purge only (0006)
 		"DELETE FROM outbox",                        // jobs are completed, never deleted (0008)
-		"DELETE FROM drift_reports",                 // findings are immutable, never deleted (0012)
-		"UPDATE drift_reports SET plan_hash = NULL", // only the resolution columns are writable (0012)
+		"DELETE FROM drift_reports",                 // findings are immutable, never deleted (0013)
+		"UPDATE drift_reports SET plan_hash = NULL", // only the resolution columns are writable (0013)
 		"UPDATE webhook_deliveries SET event = 'x'", // deliveries are insert-only, purged by DELETE (0008)
 		"TRUNCATE locks",
 	} {
