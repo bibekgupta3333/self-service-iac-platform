@@ -35,7 +35,7 @@ func TestEveryUserRouteHasAPolicy(t *testing.T) {
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), Auth: DenyAuthenticator{}, Ready: okPinger{},
 		Catalog: NewCatalogHandler(nil),
 		Public: []RouteRegistrar{NewRequestHandler(nil, nil), NewRequestEventsHandler(nil, StreamOptions{}),
-			NewStackHandler(nil), NewAuditHandler(nil), ah},
+			NewStackHandler(nil), NewRollbackHandler(nil), NewAuditHandler(nil), ah},
 		PublicHandlers:   []RouteRegistrar{ah.Public()},
 		InternalHandlers: []RouteRegistrar{NewLockHandler(nil), NewBudgetContextHandler(nil)},
 		PipelineHandlers: []RouteRegistrar{NewRunHandler(nil)},

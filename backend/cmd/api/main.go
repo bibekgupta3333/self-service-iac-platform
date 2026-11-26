@@ -145,6 +145,7 @@ func run() error {
 			httpapi.NewRequestHandler(requestSvc, access),
 			httpapi.NewRequestEventsHandler(requestSvc, httpapi.StreamOptions{Stop: ctx.Done(), Session: ua.Streams}),
 			httpapi.NewStackHandler(stacks.NewService(stacks.NewPostgresRepository(pool), users)),
+			httpapi.NewRollbackHandler(recovery.NewRollbackService(requestRepo, requestRepo, recoveryRepo, requestSvc)),
 			httpapi.NewAuditHandler(audit.NewVerifier(pool)),
 			ua.Handler,
 		},
