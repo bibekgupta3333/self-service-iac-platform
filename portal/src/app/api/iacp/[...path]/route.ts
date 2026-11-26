@@ -1,13 +1,14 @@
 // Same-origin proxy to the control-plane API for client components. The rules are pure
 // functions in src/lib/api/proxy.ts; this file only does the I/O.
 
-import { serverApiBaseUrl } from "@/lib/api/config";
+import { PROXY_PREFIX, serverApiBaseUrl } from "@/lib/api/config";
 import {
   decideProxy,
   FORWARD_REQUEST_HEADERS,
   FORWARD_RESPONSE_HEADERS,
   MAX_BODY_BYTES,
   pickHeaders,
+  rewriteLocation,
 } from "@/lib/api/proxy";
 
 export const dynamic = "force-dynamic";
@@ -94,6 +95,9 @@ async function forward(req: Request, ctx: Context): Promise<Response> {
   }
 
   const headers = pickHeaders(upstream.headers, FORWARD_RESPONSE_HEADERS);
+  const location = rewriteLocation(headers.get("location"), PROXY_PREFIX);
+  headers.delete("location");
+  if (location !== null) headers.set("location", location);
   if (decision.head) {
     await upstream.body?.cancel();
     return new Response(null, { status: upstream.status, headers });

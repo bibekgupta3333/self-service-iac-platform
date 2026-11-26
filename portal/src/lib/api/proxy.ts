@@ -62,6 +62,17 @@ export function pickHeaders(src: Headers, names: readonly string[]): Headers {
   return out;
 }
 
+/**
+ * rewriteLocation maps an upstream Location header into the proxy's URL space. The backend
+ * answers with API-relative paths ("/v1/requests/{id}"), which a browser would resolve against
+ * the portal origin. Anything that is not such a path (absolute URLs, other paths) is dropped
+ * rather than passed on. Pure.
+ */
+export function rewriteLocation(location: string | null, prefix: string): string | null {
+  if (location === null || !location.startsWith("/v1/") || location.startsWith("//")) return null;
+  return `${prefix.replace(/\/+$/, "")}${location}`;
+}
+
 /** The backend caps request bodies at 1 MiB (backend/internal/httpapi/respond.go). */
 export const MAX_BODY_BYTES = 1 << 20;
 

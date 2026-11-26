@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { decideProxy, isSafeSegment, MAX_BODY_BYTES, pickHeaders, type ProxyRequestInfo, proxyTarget } from "./proxy";
+import { decideProxy, isSafeSegment, MAX_BODY_BYTES, pickHeaders, type ProxyRequestInfo, proxyTarget, rewriteLocation } from "./proxy";
 
 describe("proxyTarget", () => {
   const base = "http://127.0.0.1:8080/";
@@ -119,6 +119,16 @@ describe("decideProxy", () => {
     if (want === "forward") expect(d.kind).toBe("forward");
     else expect(d).toMatchObject({ kind: "reject", status: want });
   });
+});
+
+describe("rewriteLocation", () => {
+  it.each([
+    ["/v1/requests/r1", "/api/iacp/v1/requests/r1"],
+    [null, null],
+    ["/elsewhere", null],
+    ["//evil.test/v1/x", null],
+    ["https://api.test/v1/requests/r1", null],
+  ])("%s -> %s", (loc, want) => expect(rewriteLocation(loc, "/api/iacp/")).toBe(want));
 });
 
 describe("pickHeaders", () => {

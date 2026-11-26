@@ -69,7 +69,11 @@ describe("proxy route", () => {
   });
 
   it("forwards a POST body and the Idempotency-Key", async () => {
-    reply = async () => new Response('{"id":"r1"}', { status: 202, headers: { "Content-Type": "application/json" } });
+    reply = async () =>
+      new Response('{"id":"r1"}', {
+        status: 202,
+        headers: { "Content-Type": "application/json", Location: "/v1/requests/r1" },
+      });
     const body = JSON.stringify({ kind: "create" });
     const res = await POST(
       req("v1/requests", {
@@ -80,6 +84,7 @@ describe("proxy route", () => {
       ctx(["v1", "requests"]),
     );
     expect(res.status).toBe(202);
+    expect(res.headers.get("location")).toBe("/api/iacp/v1/requests/r1");
     expect(calls[0]?.init.method).toBe("POST");
     expect(new TextDecoder().decode(calls[0]?.init.body as Uint8Array)).toBe(body);
     expect(new Headers(calls[0]?.init.headers).get("idempotency-key")).toBe("key-12345678");
