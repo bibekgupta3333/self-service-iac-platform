@@ -7,6 +7,13 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 ## [Unreleased]
 
 ### Added
+- TTL and ephemeral stacks (WBS 8.4):
+  - Model: `stacks.ttl_hours` and `ttl_extended_hours` (migration `0011`); a create with `ephemeral.ttl_hours` (0 or omitted takes the default) on a non-production environment sets `expires_at`; bounds from `IACP_TTL_MIN_HOURS`, `IACP_TTL_MAX_HOURS`, `IACP_TTL_DEFAULT_HOURS` and the environment's `max_ttl_hours`; production can never be ephemeral (request service, trigger and CHECK on `environments`, reaper guards). Pure `ttl` package: bounds, expiry, 24 h warning window, eligibility, extension.
+  - `POST /v1/stacks/{id}/ttl/extend` (developer role in the stack's team, `IACP_TTL_MAX_EXTENSION_HOURS` total cap, environment ceiling, audit `ttl.extended`, resets the warning); `stacks` responses carry `ttl_hours` and `ttl_extended_hours`.
+  - Machine routes `GET /v1/internal/ttl/due`, `POST /v1/internal/ttl/{id}/warn` and `POST /v1/internal/ttl/{id}/teardown`, route class `ttl` (`ttl-reaper.yml` on main via `schedule` or `workflow_dispatch` only). Teardown opens a destroy request as the platform bot (justification `ttl expired`, audit `ttl.expired`) after re-checking ephemeral, not production and expired under the stack lock; idempotent while a destroy is open.
+  - `.github/workflows/ttl-reaper.yml` (hourly and dispatch with `dry_run`; OIDC only, `id-token: write` on its one job, skipped with a notice while `IACP_API_URL` is empty) running the new `tools/ttl_reaper` (pure planning, per-run teardown cap, one failing stack does not stop the pass).
+  - 24 h warning recorded as audit `ttl.warned` and, with the GitHub App publisher (new optional `publish.Commenter`), a comment on the stack's pull request through an outbox job; audit-only with the local publisher.
+  - Not done: auto-approval of the destroy PR (`ttl_auto_approve.rego`), EventBridge Scheduler, email/Slack/portal notifications, TTL in `iacp.stack.json` and resource tags.
 - GitHub OAuth login, sessions and RBAC (WBS 4.4, core of 8.6):
   - `IACP_AUTH_MODE=github`: authorization-code flow with `state` and S256 PKCE (`/v1/auth/login`, `/v1/auth/callback`), a `GitHubIdentity` port with an `httptest`-tested adapter (fixed hosts, no cross-host redirects, timeouts, size caps), org-membership gate, fail-closed config
   - server-side sessions (`iacp_session`, hashed in the new `sessions` table, absolute and sliding idle expiry, logout and disablement revoke, fresh id on every login), per-session `X-CSRF-Token` on unsafe methods, `GET /v1/me` (also in dev mode), `POST /v1/auth/logout`
