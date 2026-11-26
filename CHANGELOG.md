@@ -161,6 +161,7 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
   - `modules/dynamodb`: a table on a CMK with PITR always on, deletion protection outside development, on-demand billing by default, typed GSIs with derived attribute definitions, optional TTL and stream, and read/write policy documents, the read one covering the stream when enabled (16 runs).
   - Terratest `TestVPCComplete`, `TestMonitoringComplete` and `TestDynamoDBComplete` assert the platform tag values and the secure defaults through the AWS SDK. The CloudWatch client stays on v1.52.x, the last AWSQuery release, because LocalStack 4.4 cannot decode Smithy RPC v2 CBOR.
   - OPA `iacp.encryption.sns_sse`, `iacp.encryption.sns_kms` and `iacp.encryption.dynamodb_cmk` with 17 new tests (196 in total, 99.9% coverage); the conftest fixtures and `verify.sh` cover the three new rule IDs.
+  - `policies/example-plan.sh` also checks each `policy-context.<env>.json` against a plan made with `-var environment=<env>`, so the staging contexts of these three examples run in `make example-plans` and CI.
   - LocalStack (`docker-compose.yml` and every workflow) also starts `ec2`, `dynamodb`, `dynamodbstreams` and `kinesis`. CI discovers modules by glob, so `module-tests`, `terratest` and the release gate pick the new modules up without workflow changes.
 
 - Phase 2 modules `ecs-service`, `postgres` and `redis` v1.0.0 (WBS 8.1, partial). Each has a `module.yaml`, secure defaults, a plan-only `examples/complete` with `policy-context.json`, a README and a CHANGELOG:
