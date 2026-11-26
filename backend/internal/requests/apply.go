@@ -29,6 +29,17 @@ type ApplyInput struct {
 	Progress      ApplyProgress
 	By            identity.Principal
 	CorrelationID string
+	// Retry, when set, is asked before a failed apply fails the request (recovery).
+	Retry RetryPolicy
+}
+
+// RetryPolicy decides, inside the report's transaction, whether a failed apply of an
+// applying request is retried automatically instead of failing it. When it answers true it
+// has fired apply_retry on the request (retry_count + 1, within MaxApplyRetries), audited it
+// and scheduled the re-dispatch; the request then stays applying and the stack as it is.
+// Implemented by recovery.Retrier.
+type RetryPolicy interface {
+	RetryIn(ctx context.Context, r *Request, p ApplyProgress, correlationID string) (bool, error)
 }
 
 // ApplyResult reports what applying a report did.
@@ -52,6 +63,7 @@ type Applier interface {
 type ApplyDriver struct {
 	svc   *Service
 	audit *audit.Writer
+	retry func(tx pgx.Tx) RetryPolicy
 }
 
 // NewApplyDriver returns an ApplyDriver writing audit events with w.
@@ -61,15 +73,30 @@ func NewApplyDriver(svc *Service, w *audit.Writer) *ApplyDriver {
 
 // ForTx returns the Applier that runs inside tx.
 func (d *ApplyDriver) ForTx(tx pgx.Tx) Applier {
-	return txApplier{svc: d.svc, st: &pgStore{tx: tx, audit: d.audit}}
+	a := txApplier{svc: d.svc, st: &pgStore{tx: tx, audit: d.audit}}
+	if d.retry != nil {
+		a.retry = d.retry(tx)
+	}
+	return a
+}
+
+// WithRetry lets recovery retry a failed apply instead of failing the request (docs/06 §5):
+// policy builds the RetryPolicy bound to the report's transaction.
+func (d *ApplyDriver) WithRetry(policy func(tx pgx.Tx) RetryPolicy) *ApplyDriver {
+	d.retry = policy
+	return d
 }
 
 type txApplier struct {
-	svc *Service
-	st  Store
+	svc   *Service
+	st    Store
+	retry RetryPolicy
 }
 
 func (a txApplier) Apply(ctx context.Context, in ApplyInput) (ApplyResult, error) {
+	if in.Retry == nil {
+		in.Retry = a.retry
+	}
 	return a.svc.ApplyIn(ctx, a.st, in)
 }
 
@@ -96,6 +123,15 @@ func (s *Service) ApplyIn(ctx context.Context, st Store, in ApplyInput) (ApplyRe
 	d, err := DecideApply(r.Status, r.Kind, target.Status, in.Progress)
 	if err != nil {
 		return ApplyResult{}, err
+	}
+	if in.Retry != nil && r.Status == StatusApplying && in.Progress.Phase == PhaseFailed && d.Ignore == "" {
+		retried, err := in.Retry.RetryIn(ctx, r, in.Progress, in.CorrelationID)
+		if err != nil {
+			return ApplyResult{}, fmt.Errorf("decide retry: %w", err)
+		}
+		if retried {
+			return ApplyResult{Status: StatusApplying, Changed: true}, nil
+		}
 	}
 	res := ApplyResult{Status: r.Status, Ignored: d.Ignore}
 	run := map[string]any{"run": in.Progress.Run}
