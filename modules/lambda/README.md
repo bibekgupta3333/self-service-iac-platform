@@ -21,10 +21,15 @@ module "worker" {
 
   # Wired from the outputs of an sqs stack.
   sqs_trigger = {
-    queue_arn  = "arn:aws:sqs:us-east-1:123456789012:payments-development-orders"
-    batch_size = 10
+    queue_arn   = "arn:aws:sqs:us-east-1:123456789012:payments-development-orders"
+    kms_key_arn = "arn:aws:kms:us-east-1:123456789012:key/1111aaaa-22bb-33cc-44dd-555555eeeeee"
+    batch_size  = 10
   }
-  extra_policy_jsons = [var.orders_consumer_policy_json]
+
+  # Extra access from other stacks, keyed by a stable name.
+  extra_policy_jsons = {
+    artifacts-read = var.artifacts_read_policy_json
+  }
 }
 ```
 
@@ -36,21 +41,25 @@ together on LocalStack and deploys a small inline Python handler.
 
 | Control | Implementation |
 |---|---|
-| Least privilege | Inline role policy limited to the function's own log group, its KMS key, X-Ray, the trigger queue and the dead-letter target. `extra_policy_jsons` rejects `*` actions. Optional permissions boundary. |
+| Least privilege | Inline role policy limited to the function's own log group, its KMS key, X-Ray, the trigger queue and its key, and the dead-letter target and its key. `extra_policy_jsons` rejects `*`, `<service>:*`, other non-read wildcards, `NotAction` and `NotResource` in Allow statements. |
+| IAM guardrails | The role lives under `/iacp/` (the platform's `iam:PassRole` is limited to that path) and always has a permissions boundary: `permissions_boundary_arn`, or the account's `iacp-boundary` policy by default. |
 | Confused deputy | The trust policy only lets `lambda.amazonaws.com` assume the role for the owning account (`aws:SourceAccount`). |
 | Encryption | Environment variables and the log group use a KMS key (module-created with rotation unless `kms_key_arn` is set). The key grants CloudWatch Logs access to this log group only. |
-| Observability | Log group created up front with retention (default 30 days). X-Ray tracing `Active` by default. |
-| Blast radius | Reserved concurrency set by default (10) and required in production. No function URL. |
-| Tagging | `iacp:team`, `iacp:environment`, `iacp:stack`, `iacp:module`, `iacp:managed-by` are merged last. |
+| Observability | Log group created up front with retention (default 30 days). X-Ray tracing `Active` by default and required in production. |
+| Blast radius | Reserved concurrency set by default (10), 1-1000, and required in production (0 is rejected because it stops the function). No function URL. |
+| Tagging | `iacp:team`, `iacp:environment`, `iacp:stack`, `iacp:module`, `iacp:managed-by` are merged last, on every taggable resource including the event source mapping (hence AWS provider >= 5.70). |
 
 `sqs_trigger` is an object rather than a plain ARN so the queue can be created
 in the same configuration: whether the trigger exists depends only on the object
 being non-null, which Terraform knows at plan time even when the ARN is not.
 
-When `sqs_trigger` points at a queue encrypted with its own key (as the
-sqs module does), also pass that module's `consumer_policy_json` in
-`extra_policy_jsons` so the role can decrypt messages. Lambda also requires the
-queue's visibility timeout to be at least the function timeout.
+Queues from the sqs module are encrypted with their own key. Pass it as
+`sqs_trigger.kms_key_arn` (and `dead_letter_target_kms_key_arn` for an SQS
+dead-letter target) so the role can decrypt trigger messages and publish
+failed invocations; without it, messages cannot be read and async failures are
+dropped. Lambda also requires the queue's visibility timeout to be at least the
+function timeout, and SQS allows `batch_size` above 10 only with a batching
+window (never on FIFO queues).
 
 ## Inputs
 
@@ -68,15 +77,16 @@ queue's visibility timeout to be at least the function timeout.
 | `source_code_hash` | Base64 SHA-256 of the package. Changing it redeploys the code. | `string` | `null` | no |
 | `memory_mb` | Memory in MB (128-10240). | `number` | `256` | no |
 | `timeout_seconds` | Maximum execution time (1-900). | `number` | `30` | no |
-| `reserved_concurrent_executions` | Reserved concurrency (-1 to 1000). -1 removes the reservation and is rejected in production. | `number` | `10` | no |
-| `tracing_mode` | `Active` or `PassThrough`. | `string` | `"Active"` | no |
+| `reserved_concurrent_executions` | Reserved concurrency (1-1000). Null leaves the function unreserved and is rejected in production. | `number` | `10` | no |
+| `tracing_mode` | `Active` or `PassThrough`. Only `Active` in production. | `string` | `"Active"` | no |
 | `environment_variables` | Non-secret configuration. Keys may not start with `AWS_`. | `map(string)` | `{}` | no |
 | `log_retention_days` | CloudWatch Logs retention (a supported value such as 7, 14, 30, 90, 365). | `number` | `30` | no |
 | `kms_key_arn` | Existing KMS key ARN for environment variables and logs. If null, a dedicated key is created. Must be known at plan time. | `string` | `null` | no |
-| `sqs_trigger` | Optional SQS trigger: `{ queue_arn = string, batch_size = optional(number, 10) }` (batch size 1-10000). | `object` | `null` | no |
+| `sqs_trigger` | Optional SQS trigger: `{ queue_arn, kms_key_arn = optional, batch_size = optional(10), maximum_batching_window_in_seconds = optional(0) }`. `batch_size` is 1-10, or up to 10000 with a window of 1-300 s (FIFO stays at 10). | `object` | `null` | no |
 | `dead_letter_target_arn` | SQS queue or SNS topic ARN for failed asynchronous invocations. | `string` | `null` | no |
-| `permissions_boundary_arn` | IAM permissions boundary for the execution role. | `string` | `null` | no |
-| `extra_policy_jsons` | Up to 10 additional IAM policy documents. Wildcard actions are rejected. | `list(string)` | `[]` | no |
+| `dead_letter_target_kms_key_arn` | KMS key of the dead-letter target; the role gets `kms:GenerateDataKey` and `kms:Decrypt`. Requires `dead_letter_target_arn`. | `string` | `null` | no |
+| `permissions_boundary_arn` | Permissions boundary for the role. Null uses `arn:<partition>:iam::<account>:policy/iacp-boundary`; a boundary is always attached. | `string` | `null` | no |
+| `extra_policy_jsons` | Up to 10 additional IAM policy documents keyed by a stable name (`^[a-z0-9][a-z0-9-]{0,39}$`). Allow statements may not use `*`, `<service>:*`, non-read wildcards, `NotAction` or `NotResource`. | `map(string)` | `{}` | no |
 
 ## Outputs
 
@@ -93,9 +103,9 @@ queue's visibility timeout to be at least the function timeout.
 
 ## Resources
 
-`aws_lambda_function`, `aws_iam_role`, `aws_iam_role_policy` (execution and
-extras), `aws_cloudwatch_log_group`, optional `aws_lambda_event_source_mapping`,
-and optional `aws_kms_key` + `aws_kms_alias`.
+`aws_lambda_function`, `aws_iam_role`, `aws_iam_role_policy` (execution, plus
+one per `extra_policy_jsons` key), `aws_cloudwatch_log_group`, optional
+`aws_lambda_event_source_mapping`, and optional `aws_kms_key` + `aws_kms_alias`.
 
 ## Testing
 
