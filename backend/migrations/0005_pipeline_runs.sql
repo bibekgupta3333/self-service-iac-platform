@@ -11,7 +11,7 @@ CREATE TYPE pipeline_status AS ENUM ('queued', 'in_progress', 'succeeded', 'fail
 CREATE TABLE pipeline_runs (
     id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     request_id         uuid            REFERENCES requests(id) ON DELETE CASCADE,
-    stack_id           uuid            REFERENCES stacks(id) ON DELETE CASCADE,
+    stack_id           uuid            NOT NULL REFERENCES stacks(id) ON DELETE CASCADE,  -- part of the run key; NULLs would never conflict
     kind               pipeline_kind   NOT NULL,
     status             pipeline_status NOT NULL DEFAULT 'queued',
     github_run_id      bigint          NOT NULL CHECK (github_run_id > 0),
