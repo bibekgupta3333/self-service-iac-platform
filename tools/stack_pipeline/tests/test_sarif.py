@@ -43,6 +43,20 @@ class TestRebaseUri:
             ("", f"{STACK}/main.tf"),
             (".", f"{STACK}/main.tf"),
             ("../other/main.tf", f"{STACK}/main.tf"),
+            # Escapes, backslashes and drive letters are not plain POSIX paths.
+            ("%2e%2e/x", f"{STACK}/main.tf"),
+            ("a/%2E%2E/%2e%2e/x.tf", f"{STACK}/main.tf"),
+            ("a\\..\\..\\x", f"{STACK}/main.tf"),
+            ("C:/x", f"{STACK}/main.tf"),
+            ("c:x.tf", f"{STACK}/main.tf"),
+            ("file://C:/x", f"{STACK}/main.tf"),
+            ("100%.tf", f"{STACK}/main.tf"),
+            # The repository-root and download-dir branches apply the same check.
+            ("/home/runner/work/repo/repo/environments/%2e%2e/x.tf", f"{STACK}/main.tf"),
+            ("/home/runner/work/repo/repo/a\\b.tf", f"{STACK}/main.tf"),
+            ("/home/runner/work/_temp/checkov-modules/a/modules/s3/v1.0.0/%2e%2e/x.tf", f"{STACK}/main.tf"),
+            # Only a single letter before the colon is a drive letter.
+            ("ab:c/x.tf", f"{STACK}/ab:c/x.tf"),
         ],
     )
     def test_rebase(self, uri, expected):

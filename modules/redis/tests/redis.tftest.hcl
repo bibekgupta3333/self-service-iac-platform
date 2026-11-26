@@ -118,7 +118,9 @@ run "development_defaults_apply" {
   }
 
   assert {
-    condition     = aws_elasticache_replication_group.this.at_rest_encryption_enabled == "true" && aws_elasticache_replication_group.this.kms_key_id == aws_kms_key.this[0].arn
+    # tostring: the attribute is a string in some provider 5.x versions and a bool in others
+    # (found by running the suite on the 5.70 floor).
+    condition     = tostring(aws_elasticache_replication_group.this.at_rest_encryption_enabled) == "true" && aws_elasticache_replication_group.this.kms_key_id == aws_kms_key.this[0].arn
     error_message = "Data at rest must be encrypted with the module-created customer-managed key."
   }
 

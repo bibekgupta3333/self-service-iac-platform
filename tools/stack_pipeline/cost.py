@@ -2,9 +2,9 @@
 
 Everything here is pure:
 
-- ``redact_plan``: the plan JSON handed to the separate cost job, with every value
-  Terraform marks sensitive replaced by null and the parts Infracost does not
-  price (prior state, variables, output changes) left out;
+- ``redact_plan``: the plan JSON handed to the separate cost job, built from an
+  allow-list of the fields Infracost reads, with every value Terraform marks
+  sensitive replaced by null;
 - ``parse_infracost``: ``infracost breakdown --format json`` output as a
   ``CostEstimate``, with its one-line Markdown rendering;
 - ``fold_cost``: that estimate added to an already rendered summary (JSON and
@@ -18,13 +18,24 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 _SYMBOLS = {"USD": "$", "EUR": "€", "GBP": "£"}
 _CENT = Decimal("0.01")
 COST_LINE_PREFIX = "**Estimated cost (Infracost, informational):**"
-# Top-level plan keys Infracost does not need and that can carry values verbatim.
-_DROPPED_PLAN_KEYS = ("prior_state", "variables", "output_changes", "relevant_attributes")
+# The fields Infracost 0.10 reads from a Terraform plan JSON (internal/providers/terraform/parser.go);
+# redact_plan keeps these and nothing else:
+#   terraform_version, format_version
+#   planned_values.root_module: child_modules[], resources[] (address, type, provider_name, index, values)
+#   resource_changes[]: address, change.actions (stripNonTargetResources reads the address)
+#   configuration.root_module: resources[] (address, provider_config_key, expressions.*.references),
+#       module_calls (source, module)
+#   configuration.provider_config.<key>: name, expressions.region, expressions.default_tags
+#   variables.<name>.value: only for a variable the provider region refers to
+# prior_state is left out on purpose: without it Infracost prices the plan alone (no "past" cost).
+_PLAN_META_KEYS = ("format_version", "terraform_version")
+_RESOURCE_ID_KEYS = ("address", "mode", "type", "name", "index", "provider_name")
+_PROVIDER_EXPRESSIONS = ("region", "default_tags")
 
 
 @dataclass(frozen=True)
@@ -137,46 +148,114 @@ def _mask(value: Any, sensitive: Any) -> Any:
     return copy.deepcopy(value)
 
 
+def _pick(source: Any, keys: Iterable[str]) -> dict[str, Any]:
+    """The listed keys of ``source`` that it has, deep-copied. Pure."""
+    if not isinstance(source, Mapping):
+        return {}
+    return {k: copy.deepcopy(source[k]) for k in keys if k in source}
+
+
 def _redact_module(module: Mapping[str, Any]) -> dict[str, Any]:
     resources = [
-        {**r, "values": _mask(r.get("values"), r.get("sensitive_values"))} if isinstance(r, Mapping) else r
+        {**_pick(r, _RESOURCE_ID_KEYS), "values": _mask(r.get("values"), r.get("sensitive_values"))}
         for r in module.get("resources") or []
+        if isinstance(r, Mapping)
     ]
+    out: dict[str, Any] = {**_pick(module, ("address",)), "resources": resources}
     children = [_redact_module(c) for c in module.get("child_modules") or [] if isinstance(c, Mapping)]
-    return {**module, "resources": resources, "child_modules": children}
+    if children:
+        out["child_modules"] = children
+    return out
 
 
-def _redact_change(rc: Any) -> Any:
-    change = rc.get("change") if isinstance(rc, Mapping) else None
-    if not isinstance(change, Mapping):
-        return rc
+def _redact_change(rc: Any) -> dict[str, Any] | None:
+    if not isinstance(rc, Mapping):
+        return None
+    change = rc.get("change") if isinstance(rc.get("change"), Mapping) else {}
     return {
-        **rc,
+        **_pick(rc, (*_RESOURCE_ID_KEYS, "module_address")),
         "change": {
-            **change,
+            **_pick(change, ("actions",)),
             "before": _mask(change.get("before"), change.get("before_sensitive")),
             "after": _mask(change.get("after"), change.get("after_sensitive")),
         },
     }
 
 
-def redact_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
-    """The plan JSON for Infracost: sensitive values nulled, unpriced parts dropped. Pure.
+def _references_only(expressions: Any) -> dict[str, Any]:
+    """Each expression reduced to its ``references``: literals (``constant_value``) can be secrets. Pure."""
+    if not isinstance(expressions, Mapping):
+        return {}
+    return {
+        name: {"references": copy.deepcopy(expr["references"])}
+        for name, expr in expressions.items()
+        if isinstance(expr, Mapping) and isinstance(expr.get("references"), list)
+    }
 
-    Values that are only known after apply are not in the plan at all, and module
-    outputs and variables are dropped, so what is left is the configuration and
-    the non-sensitive planned attributes Infracost prices.
+
+def _redact_config_module(module: Mapping[str, Any]) -> dict[str, Any]:
+    calls = {
+        name: {**_pick(call, ("source", "module_address")),
+               **({"module": _redact_config_module(call["module"])} if isinstance(call.get("module"), Mapping) else {})}
+        for name, call in (module.get("module_calls") or {}).items()
+        if isinstance(call, Mapping)
+    }
+    resources = [
+        {**_pick(r, ("address", "mode", "type", "name", "provider_config_key")),
+         "expressions": _references_only(r.get("expressions"))}
+        for r in module.get("resources") or []
+        if isinstance(r, Mapping)
+    ]
+    return {"resources": resources, **({"module_calls": calls} if calls else {})}
+
+
+def _redact_provider(provider: Any) -> dict[str, Any]:
+    exprs = provider.get("expressions") if isinstance(provider, Mapping) else None
+    kept = _pick(exprs, _PROVIDER_EXPRESSIONS)
+    # default_tags carry literal tags (not secrets by contract); other attributes (keys, tokens) are dropped.
+    return {**_pick(provider, ("name", "full_name", "module_address")), "expressions": kept}
+
+
+def _region_variables(providers: Mapping[str, Any]) -> set[str]:
+    names: set[str] = set()
+    for provider in providers.values():
+        region = ((provider.get("expressions") or {}).get("region") or {}) if isinstance(provider, Mapping) else {}
+        refs = region.get("references") if isinstance(region, Mapping) else None
+        names.update(r[4:] for r in refs or [] if isinstance(r, str) and r.startswith("var."))
+    return names
+
+
+def redact_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
+    """The plan JSON for Infracost, built from an allow-list. Pure.
+
+    Only the fields listed above ``_PLAN_META_KEYS`` survive; every unknown
+    key (``resource_drift``, ``prior_state``, ``output_changes``, ``relevant_attributes``,
+    variable defaults in ``configuration``, ...) is dropped, and values Terraform marks
+    sensitive are nulled. Values only known after apply are not in the plan at all.
     """
-    out = {k: copy.deepcopy(v) for k, v in plan.items() if k not in _DROPPED_PLAN_KEYS}
-    if isinstance(plan.get("resource_changes"), list):
-        out["resource_changes"] = [_redact_change(rc) for rc in plan["resource_changes"]]
+    out: dict[str, Any] = _pick(plan, _PLAN_META_KEYS)
+    changes = plan.get("resource_changes")
+    if isinstance(changes, list):
+        out["resource_changes"] = [c for c in map(_redact_change, changes) if c is not None]
     planned = plan.get("planned_values")
     if isinstance(planned, Mapping):
         root = planned.get("root_module")
-        out["planned_values"] = {
-            **{k: copy.deepcopy(v) for k, v in planned.items() if k not in ("outputs", "root_module")},
-            **({"root_module": _redact_module(root)} if isinstance(root, Mapping) else {}),
+        out["planned_values"] = {"root_module": _redact_module(root)} if isinstance(root, Mapping) else {}
+    config = plan.get("configuration")
+    if isinstance(config, Mapping):
+        providers = {
+            k: _redact_provider(v) for k, v in (config.get("provider_config") or {}).items() if isinstance(v, Mapping)
         }
+        root_cfg = config.get("root_module")
+        out["configuration"] = {
+            "provider_config": providers,
+            **({"root_module": _redact_config_module(root_cfg)} if isinstance(root_cfg, Mapping) else {}),
+        }
+        wanted = _region_variables(providers)
+        variables = plan.get("variables")
+        if wanted and isinstance(variables, Mapping):
+            out["variables"] = {k: {"value": copy.deepcopy(v.get("value"))} for k, v in variables.items()
+                                if k in wanted and isinstance(v, Mapping)}
     return out
 
 
