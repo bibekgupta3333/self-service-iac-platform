@@ -372,6 +372,21 @@ class TestReportCommand:
         assert "/fencing_token" in capsys.readouterr().err
         assert main([*args, "--fencing-token", "9"]) == 0
 
+    def test_error_log_becomes_the_error_message_of_a_failed_stage(self, tmp_path, make_stack, runner_env, capsys):
+        root = make_stack("development", "platform", "smoke")
+        log = tmp_path / "apply.log"
+        log.write_text("aws_sqs_queue.q: Creating...\n│ Error: api error ThrottlingException: Rate exceeded\n")
+        base = ["--repo-root", str(tmp_path), "report", str(root), "--pipeline", "apply", "--stage", "apply",
+                "--fencing-token", "9", "--terraform-exit-code", "1", "--error-log", str(log), "--dry-run"]
+        main([*base, "--status", "failure"])
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["error"]["message"].startswith("│ Error: api error ThrottlingException")
+        # A passed stage, or an explicit message, ignores the log.
+        main([*base, "--status", "success"])
+        assert "error" not in json.loads(capsys.readouterr().out)
+        main([*base, "--status", "failure", "--error-message", "explicit"])
+        assert json.loads(capsys.readouterr().out)["error"]["message"] == "explicit"
+
     def test_outputs_are_redacted(self, tmp_path, make_stack, runner_env, capsys):
         root = make_stack("development", "platform", "smoke")
         outputs = tmp_path / "outputs.json"
@@ -563,3 +578,19 @@ def test_server_text_in_warnings_stays_on_one_line(tmp_path, make_stack, runner_
     assert rc == 0
     out = capsys.readouterr().out
     assert "\n::error::" not in out and "%0A::error::injected" in out
+
+
+class TestStateSurgeryReport:
+    def test_posts_and_retries(self, api):
+        path = "/v1/internal/state-surgery"
+        api.reply("POST", path, 503, {"code": "unavailable"})
+        api.reply("POST", path, 201, {"stack_id": STACK, "duplicate": False})
+        resp = client(api).post_state_surgery({"outcome": "succeeded"})
+        assert resp.status == 201 and resp.body["stack_id"] == STACK
+        assert len(api.calls) == 2 and api.calls[1]["body"] == {"outcome": "succeeded"}
+
+    def test_rejection_raises(self, api):
+        api.reply("POST", "/v1/internal/state-surgery", 403, {"code": "workflow_not_allowed"})
+        with pytest.raises(ApiError) as exc:
+            client(api).post_state_surgery({})
+        assert exc.value.status == 403 and exc.value.code == "workflow_not_allowed"

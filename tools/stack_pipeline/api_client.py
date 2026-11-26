@@ -28,6 +28,7 @@ from .report import api_base_url, describe_problem
 RUNS_PATH = "/v1/runs"
 LOCK_PATH = "/v1/internal/stacks/{stack_id}/lock"
 REQUEST_BY_PATH = "/v1/internal/requests/by-path"
+STATE_SURGERY_PATH = "/v1/internal/state-surgery"
 USER_AGENT = "iacp-stack-pipeline"
 
 
@@ -230,6 +231,11 @@ class IacpApiClient:
     def post_run(self, payload: Mapping[str, Any]) -> ApiResponse:
         """POST /v1/runs. Retried on 429/5xx: a stage report replaces its earlier entry."""
         return self._call("POST", RUNS_PATH, payload, ok=(200,))
+
+    def post_state_surgery(self, payload: Mapping[str, Any]) -> ApiResponse:
+        """POST /v1/internal/state-surgery: the break-glass audit report. Retried on 429/5xx:
+        the API records one event per run attempt (a resend answers 200 duplicate)."""
+        return self._call("POST", STATE_SURGERY_PATH, payload, ok=(200, 201))
 
     def resolve_request(self, stack_path: str, head_sha: str = "", *, merge_wait_attempts: int = 6,
                         merge_wait_seconds: float = 5.0) -> ResolvedRequest:
