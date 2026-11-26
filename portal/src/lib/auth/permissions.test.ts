@@ -57,6 +57,17 @@ describe("decide", () => {
     expect(other.reason).toContain("not a member of payments");
   });
 
+  it("treats an unknown environment as production, like the backend", () => {
+    const qa = { team: "payments", environment: "qa" };
+    const dev = decide(teams({ payments: "developer" }), "destroy", qa);
+    expect(dev).toMatchObject({ allowed: false, need: "maintainer" });
+    expect(dev.reason).toBe("Your developer role in payments cannot destroy qa stacks; it needs the maintainer role or higher.");
+    expect(decide(teams({ payments: "developer" }), "update", qa).allowed).toBe(true);
+    expect(decide(teams({ payments: "maintainer" }), "destroy", qa).allowed).toBe(true);
+    expect(decide(teams({}, true), "destroy", qa).allowed).toBe(true);
+    expect(decide({ kind: "unrestricted" }, "destroy", qa).allowed).toBe(true);
+  });
+
   it("allows a maintainer to destroy in production", () => {
     expect(decide(teams({ payments: "maintainer" }), "destroy", prod).allowed).toBe(true);
   });

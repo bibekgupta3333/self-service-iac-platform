@@ -116,6 +116,16 @@ describe("stackActions", () => {
     expect(a.destroy.reason).toContain("maintainer");
   });
 
+  it("mirrors the role check for an unknown environment as production", () => {
+    const dev: Capabilities = { kind: "teams", admin: false, roles: { payments: "developer" } };
+    const a = stackActions(stack({ environment: "sandbox" }), dev);
+    expect(a.update.enabled).toBe(true);
+    expect(a.destroy.enabled).toBe(false);
+    expect(a.destroy.reason).toContain("needs the maintainer role");
+    const maintainer: Capabilities = { kind: "teams", admin: false, roles: { payments: "maintainer" } };
+    expect(stackActions(stack({ environment: "sandbox" }), maintainer).destroy.enabled).toBe(true);
+  });
+
   it("denies a viewer both", () => {
     const viewer: Capabilities = { kind: "teams", admin: false, roles: { payments: "viewer" } };
     const a = stackActions(stack(), viewer);
