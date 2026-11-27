@@ -20,6 +20,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
+from . import tf_error
 from .report import GitHubRun, ReportError
 
 # Terraform's `plan -detailed-exitcode` outcomes.
@@ -121,13 +122,9 @@ def counts(findings: Sequence[Finding]) -> dict[str, int]:
 
 
 MAX_SUMMARY = 200
-_SECRET_RE = re.compile(
-    r"((?:secret|token|password|passwd|authorization|api[_-]?key|access[_-]?key)[A-Za-z_-]*\s*[=:]\s*)\S+"
-    r"|AKIA[0-9A-Z]{16}|bearer\s+\S+", re.IGNORECASE)
 GENERIC_FAILURE = "terraform plan -refresh-only failed; see the workflow log"
 
 
-_ERROR_LINE_RE = re.compile(r"Error:\s+\S")
 # The messages this tool and the workflow write themselves (not terraform's output): fixed
 # text with at most a number and no terraform or provider text, and no "Error:" prefix.
 # An explicit allow-list; anything else is terraform output and is reduced to its Error line.
@@ -140,7 +137,6 @@ _PLATFORM_MESSAGE_RE = re.compile(
     r"|the plan must be a JSON object \(terraform show -json\)"
     r"|plan resource_drift must be a list"
     r"|plan resource_drift\[\d{1,6}\] (?:must be an object|has no address or actions))")
-_BOX = " \t\u2502\u2577\u2575"
 
 
 def summarize_error(text: str) -> str:
@@ -158,26 +154,12 @@ def summarize_error(text: str) -> str:
     input; with none, the
     fixed ``GENERIC_FAILURE`` is used, never "the first non-empty line" (on a full log that is
     a "Refreshing state" line, on a tail it is source text). Credential-shaped text is replaced
-    as defence in depth and control characters become spaces. Mirrors ``drift.SummarizeError``
-    in the backend.
+    as defence in depth and control characters become spaces (``tf_error``, shared with apply
+    failure reports). Mirrors ``drift.SummarizeError`` in the backend.
     """
     if _PLATFORM_MESSAGE_RE.fullmatch(text.strip()):
         return text.strip()
-    for raw in text.splitlines():
-        line = raw.strip().strip(_BOX).strip()
-        if not _ERROR_LINE_RE.match(line):
-            continue
-        line = "".join(" " if ord(c) < 0x20 or ord(c) == 0x7F else c for c in line)
-
-        def redact(m: re.Match[str]) -> str:
-            return (m.group(1).rstrip() + " <redacted>") if m.group(1) else "<redacted>"
-
-        line = _SECRET_RE.sub(redact, line)
-        cut = line.find(": ", len("Error:"))
-        if cut >= 0:
-            line = line[:cut].rstrip()
-        return line if len(line) <= MAX_SUMMARY else line[: MAX_SUMMARY - 3] + "..."
-    return GENERIC_FAILURE
+    return tf_error.summary(text, 1, MAX_SUMMARY, GENERIC_FAILURE)
 
 
 def one_line(text: str, limit: int = MAX_ERROR) -> str:
