@@ -6,7 +6,7 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-11-27
+## [1.0.0] - 2026-11-26
 
 MVP release: module catalog, request to generated PR, validate, scan, price and plan in GitHub Actions, apply with fencing-token locks, live status, drift detection, TTL teardown, budgets, module upgrades, recovery and rollback, RBAC with production gates, and the hash-chained audit log, all running locally against LocalStack (ADR-0009).
 
