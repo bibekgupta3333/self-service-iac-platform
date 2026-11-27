@@ -49,6 +49,9 @@ type RoutePolicy struct {
 	Workflows []string // allowed workflow file names (Workflow.File)
 	MainOnly  bool     // ref and workflow definition must be refs/heads/main
 	Events    []string // allowed event_name values
+	// OIDCOnly refuses callers without a verified workflow identity (the shared internal
+	// token), for routes whose record must name the workflow run that wrote it.
+	OIDCOnly bool
 }
 
 // RoutePolicies is the per-route allow-list. A pull-request token (pr-validate.yml on a
@@ -82,6 +85,7 @@ var RoutePolicies = map[RouteClass]RoutePolicy{
 		Workflows: []string{"state-surgery.yml"},
 		MainOnly:  true,
 		Events:    []string{"workflow_dispatch"},
+		OIDCOnly:  true,
 	},
 	RouteTTL: {
 		Workflows: []string{"ttl-reaper.yml"},
@@ -97,12 +101,16 @@ var RoutePolicies = map[RouteClass]RoutePolicy{
 
 // AuthorizeRoute checks a caller's workflow identity against the route class policy.
 // A nil workflow is a caller that used the shared internal token, which is not scoped
-// to a workflow and is allowed. An unknown class denies. Pure.
+// to a workflow and is allowed, except on OIDCOnly route classes. An unknown class denies.
+// Pure.
 func AuthorizeRoute(class RouteClass, wf *identity.Workflow) error {
+	p, ok := RoutePolicies[class]
 	if wf == nil {
+		if ok && p.OIDCOnly {
+			return workflowNotAllowed(fmt.Sprintf("%s routes accept only a GitHub OIDC token, not the shared token", class))
+		}
 		return nil
 	}
-	p, ok := RoutePolicies[class]
 	switch {
 	case !ok:
 		return workflowNotAllowed(fmt.Sprintf("route class %q accepts no workflow", class))

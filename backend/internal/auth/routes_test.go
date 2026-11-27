@@ -48,7 +48,7 @@ func TestAuthorizeRoute(t *testing.T) {
 		{"apply on a schedule may not look up the request", RouteRequestLookup, wfFor("apply.yml", main, "schedule"), false},
 		{"ttl reaper may not look up the request", RouteRequestLookup, wfFor("ttl-reaper.yml", main, "schedule"), false},
 		{"state surgery dispatched on main may record", RouteStateSurgery, wfFor("state-surgery.yml", main, "workflow_dispatch"), true},
-		{"shared token may record state surgery", RouteStateSurgery, nil, true},
+		{"shared token may not record state surgery", RouteStateSurgery, nil, false},
 		{"state surgery from a branch may not record", RouteStateSurgery, wfFor("state-surgery.yml", "refs/heads/fix", "workflow_dispatch"), false},
 		{"state surgery on push may not record", RouteStateSurgery, wfFor("state-surgery.yml", main, "push"), false},
 		{"apply may not record state surgery", RouteStateSurgery, wfFor("apply.yml", main, "workflow_dispatch"), false},

@@ -43,6 +43,12 @@ type Workflow struct {
 	EventName      string
 	RunID          int64
 	RunAttempt     int
+	// Actor is the GitHub login that started the run (the token's actor claim).
+	Actor string
+	// Environment is the GitHub Environment the job ran in (the environment claim); empty
+	// for a job without one. A job only gets it after that Environment's protection rules
+	// (required reviewers) passed.
+	Environment string
 }
 
 // MainRef is the default branch every mutating workflow must run from.
