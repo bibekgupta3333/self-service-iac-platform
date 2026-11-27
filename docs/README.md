@@ -16,6 +16,7 @@ The Self-Service IaC Platform is a self-service Infrastructure-as-Code platform:
 | 07 | [Security & policy](07-security-and-policy.md) | Threat model, IAM, OPA/Checkov policies, RBAC matrix |
 | 08 | [MVP roadmap](08-mvp-roadmap.md) | Phased delivery plan, acceptance criteria, metrics |
 | 09 | [Observability](09-observability.md) | Platform dashboard and alarms, metric mapping, thresholds, runbook |
+| — | [Case study](case-study.md) | Portfolio write-up: problem, key decisions, hardening, trade-offs |
 | — | [Architecture decisions](adr/README.md) | ADRs for the key design choices |
 | — | [Diagrams](diagrams/README.md) | Python sources and rendered images |
 
