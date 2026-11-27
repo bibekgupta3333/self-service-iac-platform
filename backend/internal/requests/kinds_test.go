@@ -20,7 +20,7 @@ func TestKindHelpers(t *testing.T) {
 		{KindCreate, true, false, true},
 		{KindUpdate, true, true, true},
 		{KindDestroy, true, true, false},
-		{KindUpgrade, false, true, false},
+		{KindUpgrade, true, true, false},
 		{KindReconcile, false, true, false},
 		{KindRollback, false, true, false},
 		{Kind("delete"), false, false, false},
@@ -558,13 +558,5 @@ func TestAuthorizeKindFollowsTheRBACMatrix(t *testing.T) {
 	err := authorizeKind(RoleDeveloper, KindDestroy, "production", "payments")
 	if e, _ := apperr.As(err); !strings.Contains(e.Message, "needs the maintainer role") {
 		t.Fatalf("message = %v", err)
-	}
-}
-
-func TestUpgradeIsRejectedUntilItIsImplemented(t *testing.T) {
-	in := updateInput()
-	in.Kind = KindUpgrade
-	if !slices.Contains(pointers(ValidateShape(in)), "/kind:unsupported_kind") {
-		t.Fatal("upgrade must be refused with unsupported_kind")
 	}
 }

@@ -81,5 +81,8 @@ func PRContextFor(r *requests.Request, spec requests.NormalizedSpec, portalURL s
 		Resources: fp.Map(spec.Resources, func(in requests.ResourceInput) publish.PRResource {
 			return publish.PRResource{Name: in.Name, Module: in.Module, Version: in.Version}
 		}),
+		Upgrades: fp.Map(spec.Upgrades, func(u requests.UpgradeChange) publish.PRUpgrade {
+			return publish.PRUpgrade{Resource: u.Resource, Module: u.Module, From: u.FromVersion, To: u.ToVersion, Change: string(u.Change)}
+		}),
 	}
 }

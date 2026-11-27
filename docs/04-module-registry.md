@@ -157,7 +157,7 @@ Outputs listed in `module.yaml` under `outputs[].wireable: true` are the only on
 | `outputs` | list | yes | `name`, `description`, `sensitive`, `wireable` |
 | `dependencies` | list | no | Typed input slots that accept another module's output (e.g. `vpc_id` from `vpc`) |
 | `cost` | object | no | `baseline_monthly_usd`, `drivers[]` — portal hints before Infracost runs |
-| `upgrade` | object | no | `from` constraint, `notes`, `requires_migration` — consumed by upgrade-path logic |
+| `upgrade` | object | no | `from` constraint, `notes`, `requires_migration`. `notes` is indexed as the version's `upgrade_notes` when its CHANGELOG section has no `### Migration` subsection |
 | `deprecation` | object | no | Set by catalog ops, not authors (see §7) |
 
 CI validates `module.yaml` against `modules/_shared/module.schema.json` and runs a parity check that every key in `inputs.properties` exists in `variables.tf` with a compatible type, and vice versa (excluding injected `team`/`environment`/`stack`). The check is implemented by `tools/manifest_validator` (`.venv/bin/python -m tools.manifest_validator modules/`), which also checks that `outputs` match `outputs.tf` and that `metadata.version` equals `locals.module_version` (the value behind the `iacp_metadata` output).
@@ -314,7 +314,9 @@ Enforcement in `module-release.yml`:
 
    **Reviewer checklist** until the upgrade-plan test (check 2) lands: the gate classifies a changed default as MINOR, because it cannot tell whether the new default alters existing resources. If it does, the change is MAJOR by the table above ("Tighten a default..."), and the reviewer must ask for a major bump or for a new input that keeps the old behaviour. Likewise, narrowing a constraint ceiling (`< 7.0` to `< 6.0`, or a range to an exact version) is PATCH to the gate but can make a consumer's lock file unresolvable; treat it as MAJOR.
 2. **Upgrade plan test** (planned, not yet in the workflow) — apply `examples/complete` at the previous tag against LocalStack, switch source to HEAD, run `terraform plan -detailed-exitcode`. Any `delete` or `replace` action fails a MINOR/PATCH release.
-3. **CHANGELOG / upgrade notes check** (planned) — `CHANGELOG.md` must contain a section for the new version. MAJOR releases must contain a `### Migration` subsection and `module.yaml` `upgrade.notes`; its text is copied to `module_versions.upgrade_notes`. Today the release notes come from the CHANGELOG section when it exists, and otherwise from a generated interface-diff summary.
+3. **CHANGELOG / upgrade notes check** (planned) — `CHANGELOG.md` must contain a section for the new version. MAJOR releases must contain a `### Migration` subsection and `module.yaml` `upgrade.notes`. Today the release notes come from the CHANGELOG section when it exists, and otherwise from a generated interface-diff summary.
+
+   **Upgrade notes (WBS 8.2, implemented).** `python -m tools.module_release index` sends the version's CHANGELOG section as `changelog_md` and its migration notes as `upgrade_notes`: the `### Migration` subsection of that section (a `### Upgrade notes` heading counts too, in any letter case; the subsection runs to the next `#`, `##` or `###` heading), else `module.yaml` `upgrade.notes`. The backend stores them in `module_versions.changelog_md` and `upgrade_notes` (migration 0015). Both fields are optional in the index payload; for a version indexed without `upgrade_notes` the API reads the migration subsection from `changelog_md`. The upgrade-path API and the portal's major-upgrade confirmation show them, so write the steps a consumer must take (inputs to set, outputs that moved, `moved` blocks shipped, state surgery needed) under `### Migration` in every MAJOR section.
 
 `module-release.yml` fails if a breaking change is not accompanied by a major bump (check 1). Once checks 2 and 3 land, it also requires upgrade notes.
 
@@ -380,7 +382,7 @@ Pinning rules:
 - **Exact tag only.** `ref` is always a full `modules/<name>/vX.Y.Z` tag; branches, SHAs and ranges are rejected by the generator and by the OPA `module_source.rego` policy on the plan's `configuration` block.
 - **Approved source host only.** Only `git::https://github.com/acme/self-service-iac-platform.git//modules/*` is allowed; public registry modules are denied.
 - **Integrity.** The pipeline resolves each tag to its commit SHA and compares it with `module_versions.commit_sha`; a mismatch (moved tag) fails the run.
-- **Upgrades** are always explicit requests (see [06-lifecycle-management.md](06-lifecycle-management.md#1-version-management)); the platform never floats a version.
+- **Upgrades** are always explicit requests (see [06-lifecycle-management.md](06-lifecycle-management.md#1-version-management)); the platform never floats a version. `GET /v1/catalog/modules/{name}/upgrade-path?from=X.Y.Z` lists the newer versions with their SemVer class and notes, and a `kind: upgrade` request re-pins one or more resources, at most one major at a time ([03 §6.4](03-data-model-and-api.md#64-requests)).
 
 ## 9. Release flow and catalog indexing
 

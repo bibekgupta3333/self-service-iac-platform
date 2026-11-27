@@ -63,10 +63,13 @@ type ModuleVersion struct {
 	TFVersionRange   string
 	AWSProviderRange string
 	Changelog        string
-	Status           Status
-	DeprecationNote  string
-	ReleasedBy       string
-	ReleasedAt       time.Time
+	// UpgradeNotes are the migration instructions for moving to this version (the CHANGELOG
+	// "### Migration" subsection, or module.yaml upgrade.notes); see Notes.
+	UpgradeNotes    string
+	Status          Status
+	DeprecationNote string
+	ReleasedBy      string
+	ReleasedAt      time.Time
 }
 
 // Usable reports whether new requests may pin this version.

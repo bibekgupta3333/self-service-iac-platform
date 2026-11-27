@@ -356,6 +356,44 @@ func TestDestroyRendersAnEmptyMarkedRoot(t *testing.T) {
 	}
 }
 
+// TestUpgradeRendersTheNewPin: an upgrade request's spec pins the target version, so the
+// generator renders the new ref and commit, and the PR body lists the move.
+func TestUpgradeRendersTheNewPin(t *testing.T) {
+	r := draftRequest()
+	r.Kind = requests.KindUpgrade
+	raw, _ := json.Marshal(requests.NormalizedSpec{Team: "payments", Environment: "development", Stack: "orders",
+		Region: "us-east-1", DependsOn: []string{},
+		Resources: []requests.ResourceInput{{Name: "orders_queue", Module: "sqs", Version: "1.4.0",
+			Inputs: json.RawMessage(`{"name":"payments-orders-dev"}`)}},
+		Upgrades: []requests.UpgradeChange{{Resource: "orders_queue", Module: "sqs", FromVersion: "1.3.0",
+			ToVersion: "1.4.0", Change: catalog.ChangeMinor}}})
+	r.Spec = raw
+	spec, err := DecodeSpec(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, _ := fakeVersions{}.GetVersion(context.Background(), "sqs", "1.3.0")
+	v.Version, v.GitTag, v.GitSHA = catalog.SemVer{Major: 1, Minor: 4}, "modules/sqs/v1.4.0", strings.Repeat("4a", 20)
+	got, err := BuildStackSpec(r, spec, map[string]catalog.ModuleVersion{VersionKey("sqs", "1.4.0"): v}, "cc-1", "~> 1.13", "~> 5.80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := generator.New("https://example.test/iacp.git", generator.LocalBackend{},
+		generator.LocalStackProvider{Endpoint: "http://localhost:4566"}).Render(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(files[generator.FileMain]), "?ref=modules/sqs/v1.4.0") ||
+		!strings.Contains(string(files[generator.FileStackJSON]), strings.Repeat("4a", 20)) {
+		t.Fatalf("main.tf:\n%s", files[generator.FileMain])
+	}
+	pc := PRContextFor(r, spec, "http://portal")
+	if len(pc.Upgrades) != 1 || pc.Upgrades[0] != (publish.PRUpgrade{Resource: "orders_queue", Module: "sqs", From: "1.3.0", To: "1.4.0", Change: "minor"}) ||
+		!strings.Contains(publish.Body(pc), "| `orders_queue` | sqs | 1.3.0 | 1.4.0 | minor |") {
+		t.Fatalf("PR context = %+v", pc)
+	}
+}
+
 // TestPublishToLocalGit runs the real generator and local git adapter end to end.
 func TestPublishToLocalGit(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {

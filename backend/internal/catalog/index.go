@@ -31,8 +31,14 @@ type IndexCommand struct {
 	TFVersionRange   string          `json:"tf_version_range"`
 	AWSProviderRange string          `json:"aws_provider_range"`
 	Changelog        string          `json:"changelog_md,omitempty"`
-	ReleasedBy       string          `json:"released_by"`
+	// UpgradeNotes is optional so release tooling that predates it still indexes; without it
+	// the notes are read from the changelog's "### Migration" subsection (ModuleVersion.Notes).
+	UpgradeNotes string `json:"upgrade_notes,omitempty"`
+	ReleasedBy   string `json:"released_by"`
 }
+
+// MaxNotesLength bounds changelog_md and upgrade_notes (both are shown in the portal).
+const MaxNotesLength = 64 << 10
 
 var (
 	moduleNameRe = regexp.MustCompile(`^[a-z][a-z0-9-]{1,40}$`)
@@ -83,6 +89,12 @@ func ValidateIndex(cmd IndexCommand) (Module, ModuleVersion, error) {
 	} else if _, err := inputschema.Compile(cmd.InputsSchema); err != nil {
 		add("/inputs_schema", "invalid_schema", err.Error())
 	}
+	if len(cmd.Changelog) > MaxNotesLength {
+		add("/changelog_md", "maxLength", fmt.Sprintf("must be at most %d bytes", MaxNotesLength))
+	}
+	if len(cmd.UpgradeNotes) > MaxNotesLength {
+		add("/upgrade_notes", "maxLength", fmt.Sprintf("must be at most %d bytes", MaxNotesLength))
+	}
 	for i, o := range cmd.Outputs {
 		if !outputNameRe.MatchString(o.Name) {
 			add(fmt.Sprintf("/outputs/%d/name", i), "pattern", "must be a Terraform identifier")
@@ -110,7 +122,7 @@ func ValidateIndex(cmd IndexCommand) (Module, ModuleVersion, error) {
 	v := ModuleVersion{
 		ModuleName: cmd.Module, Version: ver, GitTag: cmd.GitTag, GitSHA: cmd.CommitSHA, Manifest: manifest,
 		InputsSchema: cmd.InputsSchema, Outputs: outputs, CostHints: cmd.CostHints, TFVersionRange: cmd.TFVersionRange,
-		AWSProviderRange: cmd.AWSProviderRange, Changelog: cmd.Changelog, Status: StatusActive, ReleasedBy: cmd.ReleasedBy,
+		AWSProviderRange: cmd.AWSProviderRange, Changelog: cmd.Changelog, UpgradeNotes: strings.TrimSpace(cmd.UpgradeNotes), Status: StatusActive, ReleasedBy: cmd.ReleasedBy,
 	}
 	return m, v, nil
 }

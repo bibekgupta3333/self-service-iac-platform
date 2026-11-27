@@ -11,6 +11,8 @@ from tools.module_release import (
     SemVer,
     bump_between,
     changelog_section,
+    migration_notes,
+    upgrade_notes,
     constraint_floor,
     diff_interfaces,
     diff_summary,
@@ -352,6 +354,27 @@ class TestNotes:
         assert changelog_section(CHANGELOG, SemVer.parse("9.9.9")) is None
         assert changelog_section(None, SemVer.parse("1.0.0")) is None
         assert changelog_section("## [1.0.0]\n\n## [0.9.0]\nx", SemVer.parse("1.0.0")) is None
+
+    @pytest.mark.parametrize(
+        "section,want",
+        [
+            ("### Added\n- x", None),
+            ("### Changed\n- y\n\n### Migration\n\nRename `a`.\n\n### Fixed\n- z", "Rename `a`."),
+            ("### Upgrade notes\n- step 1\n- step 2\n", "- step 1\n- step 2"),
+            ("### MIGRATION NOTES\ndo it\n## [1.0.0]\nold", "do it"),
+            ("### Migration\n#### Step 1\nmove\n", "#### Step 1\nmove"),
+            ("### Migration\n\n### Fixed\n", None),
+            (None, None),
+        ],
+    )
+    def test_migration_notes(self, section, want):
+        assert migration_notes(section) == want
+
+    def test_upgrade_notes_fall_back_to_the_manifest(self):
+        assert upgrade_notes("### Migration\nA", {"upgrade": {"notes": "B"}}) == "A"
+        assert upgrade_notes("### Added\n- x", {"upgrade": {"notes": " B \n"}}) == "B"
+        assert upgrade_notes(None, {"upgrade": {"requires_migration": False}}) is None
+        assert upgrade_notes(None, {}) is None
 
     def test_summary_lists_changes(self):
         text = diff_summary(gate("2.0.0", "1.1.0", [Bump.MAJOR]))

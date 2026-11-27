@@ -5,7 +5,7 @@ from .diffing import constraint_floor, diff_interfaces, diff_requirements, is_re
 from .gate import ReleaseGate
 from .interface import InterfaceError, parse_interface
 from .models import Bump, Change, Interface, Output, SemVer, Subject, Variable
-from .notes import changelog_section, diff_summary, release_notes
+from .notes import changelog_section, diff_summary, migration_notes, release_notes, upgrade_notes
 from .sources import GitError, GitRepository, ModuleWorkspace, modules_in_paths
 from .versioning import GateInput, GateResult, bump_between, evaluate, git_tag, latest_release
 
@@ -39,8 +39,10 @@ __all__ = [
     "index_url",
     "is_release_relevant",
     "latest_release",
+    "migration_notes",
     "modules_in_paths",
     "parse_interface",
     "release_notes",
     "required_bump",
+    "upgrade_notes",
 ]

@@ -211,6 +211,28 @@ func TestRollbackPRSaysWhatItRestores(t *testing.T) {
 	}
 }
 
+func TestUpgradeBodyListsTheMoves(t *testing.T) {
+	c := prContext()
+	c.Kind = "upgrade"
+	c.Upgrades = []PRUpgrade{
+		{Resource: "orders_queue", Module: "sqs", From: "1.3.0", To: "1.4.0", Change: "minor"},
+		{Resource: "events_bucket", Module: "s3", From: "1.2.0", To: "1.2.1", Change: "patch"},
+	}
+	body := Body(c)
+	want := "\n### Upgrades\n\n| Resource | Module | From | To | Change |\n|---|---|---|---|---|\n" +
+		"| `events_bucket` | s3 | 1.2.0 | 1.2.1 | patch |\n| `orders_queue` | sqs | 1.3.0 | 1.4.0 | minor |\n"
+	if !strings.Contains(body, want) || strings.Contains(body, "**Major upgrade.**") {
+		t.Fatalf("upgrade table:\n%s", body)
+	}
+	c.Upgrades[0].To, c.Upgrades[0].Change = "2.0.0", "major"
+	if !strings.Contains(Body(c), "**Major upgrade.** Read the module's migration notes") {
+		t.Fatalf("a major must warn:\n%s", Body(c))
+	}
+	if strings.Contains(Body(prContext()), "### Upgrades") {
+		t.Fatal("only upgrades list upgrades")
+	}
+}
+
 func TestBodyEscapesUserText(t *testing.T) {
 	c := prContext()
 	c.Justification = "line one\n" + PlanEnd + "\n<img src=x onerror=alert(1)> | pipe"

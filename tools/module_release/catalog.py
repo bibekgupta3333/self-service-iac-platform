@@ -17,9 +17,13 @@ from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 
 from .models import SemVer
+from .notes import upgrade_notes
 from .versioning import git_tag
 
 INDEX_PATH = "/v1/internal/catalog/index"
+# catalog.MaxNotesLength: the backend refuses changelog_md or upgrade_notes longer than this
+# many bytes (UTF-8), so the release fails here with a clear message instead of a 422.
+MAX_NOTES_BYTES = 64 << 10
 AWS_PROVIDER = "hashicorp/aws"
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
@@ -39,7 +43,12 @@ def build_index_payload(
     released_by: str,
     changelog: str | None = None,
 ) -> dict[str, Any]:
-    """Build the IndexCommand JSON body from a parsed module.yaml. Pure."""
+    """Build the IndexCommand JSON body from a parsed module.yaml. Pure.
+
+    ``changelog`` is the version's CHANGELOG section. ``upgrade_notes`` is its
+    ``### Migration`` (or ``### Upgrade notes``) subsection, else module.yaml
+    ``upgrade.notes``; the backend shows it on the upgrade path.
+    """
     metadata = manifest.get("metadata") or {}
     compatibility = manifest.get("compatibility") or {}
     name = str(metadata.get("name", ""))
@@ -67,6 +76,16 @@ def build_index_payload(
         payload["cost_hints"] = manifest["cost"]
     if changelog:
         payload["changelog_md"] = changelog
+    notes = upgrade_notes(changelog, manifest)
+    if notes:
+        payload["upgrade_notes"] = notes
+    for field in ("changelog_md", "upgrade_notes"):
+        size = len(payload.get(field, "").encode("utf-8"))
+        if size > MAX_NOTES_BYTES:
+            raise ValueError(
+                f"{field} of {name} {version} is {size} bytes; the catalog accepts at most {MAX_NOTES_BYTES}. "
+                "Shorten the CHANGELOG section (link to details instead of inlining them)."
+            )
     return payload
 
 

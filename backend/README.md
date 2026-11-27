@@ -23,8 +23,8 @@ internal/
   identity/              Principal, context helpers, UserStore (dev user upsert)
   db/                    pgx pool, Migrator (goose), TxRunner, DBTX; dbtest/ for integration tests
   inputschema/           JSON Schema 2020-12 compile + validate, pointer-addressed violations
-  catalog/               modules, versions, SemVer, index validation, CatalogService, Postgres repo
-  requests/              state machine, Request entity, spec validation (create, update, destroy), stack-state gating, RequestService, status feed, apply-target lookup, Postgres repo
+  catalog/               modules, versions, SemVer, upgrade paths, index validation, CatalogService, Postgres repo
+  requests/              state machine, Request entity, spec validation (create, update, upgrade, destroy), upgrade planning, stack-state gating, RequestService, status feed, apply-target lookup, Postgres repo
   stacks/                read side of stacks: list/show scoped to the caller's teams, Postgres repo
   locks/                 per-stack platform lock: pure Decide/NextInQueue/CheckToken, Service, Postgres repo
   auth/                  GitHub Actions OIDC: claim allow-lists (pure), JWKSCache, Verifier, jti ReplayGuard
@@ -90,6 +90,7 @@ together apply each migration once.
 | `0011_stack_health.sql` | `stacks.health` (`unknown`, `healthy`, `degraded`), set from the post-apply smoke test |
 | `0013_drift_reports.sql` | `drift_result`, `drift_status`, `drift_reports` (one row per drift.yml run and stack, CHECKs tie result, status, counts and resolution together) and `stacks.health` widened with `drifted` ([ADR-0013](../docs/adr/0013-drift-in-stack-health.md)); `iacp_app` gets SELECT/INSERT and UPDATE on the resolution columns only, no DELETE |
 | `0014_budget_admin.sql` | `budgets`: `updated_by`, `updated_at`, `override_reason`, `override_expires_at`, `override_max_delta_usd` (set or null with `override_by`; a half-made override from 0007 is cleared), `single_change_cap_usd`, `actual_usd`, `actual_recorded_at`; limit, cap and threshold bounds; `stacks.committed_monthly_usd` and `committed_at` |
+| `0015_module_upgrade_notes.sql` | `module_versions.upgrade_notes` (migration notes sent by `module-release`; NULL for older versions, which fall back to the `### Migration` subsection of `changelog_md`) |
 
 ### Database roles
 
@@ -204,6 +205,7 @@ docker run --rm -p 127.0.0.1:8080:8080 -e IACP_AUTH_MODE=dev \
 | GET | `/v1/catalog/modules/{name}` | module + latest version detail |
 | GET | `/v1/catalog/modules/{name}/versions` | SemVer descending |
 | GET | `/v1/catalog/modules/{name}/versions/{version}` | manifest view: `inputs_schema`, outputs, pinned `source` |
+| GET | `/v1/catalog/modules/{name}/upgrade-path?from=X.Y.Z[&to=latest\|X.Y.Z]` | usable versions after `from`, oldest first, each `patch`/`minor`/`major` with `changelog_md` and `upgrade_notes`; patch/minor/major targets and `next` (at most one major up); pure logic in `catalog/upgrade.go` |
 | POST | `/v1/internal/catalog/index` | machine auth (below); `201` created, `200` same commit re-indexed (metadata changes are audited as `module.updated`), `409 version_immutable` |
 | GET | `/v1/internal/stacks/{id}/lock` | machine auth; current lock (`404` when unlocked) |
 | POST | `/v1/internal/stacks/{id}/lock` | machine auth; `{"request_id"}`; `200 {"lock":"granted"\|"held", "current":{…, "fencing_token"}}` or `202 {"lock":"queued","queued_behind":…}` |
@@ -211,7 +213,7 @@ docker run --rm -p 127.0.0.1:8080:8080 -e IACP_AUTH_MODE=dev \
 | DELETE | `/v1/internal/stacks/{id}/lock?request_id=&fencing_token=` | machine auth; releases and promotes the oldest queued request: `{"released":…, "promoted":…\|null}` |
 | POST | `/v1/runs` | machine auth; run report (docs/03 §6.9) stored in `pipeline_runs`; `200 {"accepted":true,"run_id","run_status","request_status"}`, `409 stale_fencing_token`, `403 run_mismatch` / `workflow_not_allowed` |
 | GET | `/v1/internal/requests/by-path?stack_path=&head_sha=` | machine auth (`request_lookup` class: `apply.yml` on main, `push`/`workflow_dispatch`); the request holding the stack lock with `fencing_token` and `approved_plan_hash`; `404 stack_not_found` / `no_active_request`, `409 request_not_approved` / `merge_not_recorded` (retryable) / `merge_commit_mismatch` (docs/03 §6.9) |
-| POST | `/v1/requests` | `kind` create, update or destroy (update and destroy name the stack by `stack_id`; destroy also needs `confirm_stack_name` and a `justification`); upgrade, reconcile and rollback are `422 unsupported_kind`; developer role in the stack's team (maintainer for a production destroy; `403` otherwise); `409 stack_busy` / `stack_destroyed` / `destroy_pending` when the stack does not take the kind; `404` for a stack in another team; an update that drops resources needs `allow_removals` (`422 resources_removed`); requires `Idempotency-Key` (remembered 24 h); `202`; replays set `Idempotent-Replayed: true` |
+| POST | `/v1/requests` | `kind` create, update, upgrade or destroy (update, upgrade and destroy name the stack by `stack_id`; destroy also needs `confirm_stack_name` and a `justification`; upgrade lists `upgrades: [{resource, to_version}]` and needs `acknowledge_breaking: true` across a major, refuses more than one major, a downgrade, a yanked target and inputs the target schema rejects, is `409 stack_busy` while another create, update or upgrade is open, and is `409 spec_changed` if the spec moved meanwhile); reconcile and rollback are `422 unsupported_kind`; developer role in the stack's team (maintainer for a production destroy; `403` otherwise); `409 stack_busy` / `stack_destroyed` / `destroy_pending` when the stack does not take the kind; `404` for a stack in another team; an update that drops resources needs `allow_removals` (`422 resources_removed`); requires `Idempotency-Key` (remembered 24 h); `202`; replays set `Idempotent-Replayed: true` |
 | GET | `/v1/requests?team=&status=&kind=&mine=true&limit=&cursor=` | keyset pagination, `next_cursor` |
 | GET | `/v1/requests/{id}` | includes the normalised `spec`, `allowed_events`, `github {branch, pr_number, pr_url}` once published and `failure_reason` |
 | GET | `/v1/requests/{id}/events` | Server-Sent Events: `snapshot`, then `status` per change (event id = audit seq, resume with `Last-Event-ID`), `: heartbeat` every 15 s, `end` when terminal (also on a resume at the terminal seq), closed after 5 min or on server shutdown; ended when its session is revoked; at most 5 streams per user and 500 in total (`429`); `404` for a caller with no role in the team |

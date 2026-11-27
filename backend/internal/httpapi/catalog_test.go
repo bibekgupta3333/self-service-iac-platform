@@ -49,6 +49,24 @@ func (f *fakeCatalog) GetVersion(_ context.Context, name, version string) (catal
 	return catalog.ModuleVersion{}, apperr.NotFound("module %s has no version %q", name, version)
 }
 
+// UpgradePath runs the real path logic over the fake's versions.
+func (f *fakeCatalog) UpgradePath(_ context.Context, name, from, to string) (catalog.UpgradePath, error) {
+	if name != "sqs" {
+		return catalog.UpgradePath{}, apperr.NotFound("module %q not found", name)
+	}
+	fromV, err := catalog.ParseSemVer(from)
+	if err != nil {
+		return catalog.UpgradePath{}, apperr.Invalid("validation_failed", "bad from")
+	}
+	toV := f.versions[0].Version
+	if to != "" && to != catalog.LatestTarget {
+		if toV, err = catalog.ParseSemVer(to); err != nil {
+			return catalog.UpgradePath{}, apperr.Invalid("validation_failed", "bad to")
+		}
+	}
+	return catalog.BuildUpgradePath(name, fromV, toV, f.versions)
+}
+
 func (f *fakeCatalog) Index(_ context.Context, by identity.Principal, cmd catalog.IndexCommand) (catalog.ModuleVersion, bool, error) {
 	if cmd.Module == "" {
 		return catalog.ModuleVersion{}, false, apperr.Invalid("validation_failed", "module release is invalid",
@@ -189,6 +207,69 @@ func TestCatalogHandlers(t *testing.T) {
 	}
 	if len(cat.indexed) != 2 || cat.indexed[0] != releaseBot {
 		t.Fatalf("index should receive the internal principal, not the dev user: %+v", cat.indexed)
+	}
+}
+
+func TestUpgradePathHandler(t *testing.T) {
+	mk := func(v, notes string) catalog.ModuleVersion {
+		mv := sqsVersion()
+		mv.Version, _ = catalog.ParseSemVer(v)
+		mv.GitTag, mv.UpgradeNotes = "modules/sqs/v"+v, notes
+		return mv
+	}
+	cat := &fakeCatalog{versions: []catalog.ModuleVersion{mk("2.0.0", "Rename dlq."), mk("1.3.0", ""), mk("1.3.1", ""), mk("1.2.0", "")}}
+	h := newTestRouter(cat, okPinger{})
+
+	rec := do(t, h, "GET", "/v1/catalog/modules/sqs/upgrade-path?from=1.2.0", "")
+	if rec.Code != 200 {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body)
+	}
+	var body struct {
+		From, To, Change string
+		UpToDate         bool    `json:"up_to_date"`
+		MajorsCrossed    int     `json:"majors_crossed"`
+		Next             *string `json:"next"`
+		Targets          struct{ Patch, Minor, Major *string }
+		Steps            []struct {
+			Version, Change string
+			Breaking        bool
+			UpgradeNotes    string `json:"upgrade_notes"`
+		}
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.From != "1.2.0" || body.To != "2.0.0" || body.Change != "major" || body.UpToDate || body.MajorsCrossed != 1 ||
+		body.Next == nil || *body.Next != "2.0.0" || body.Targets.Patch != nil || *body.Targets.Minor != "1.3.1" ||
+		len(body.Steps) != 3 || body.Steps[0].Change != "minor" || body.Steps[1].Change != "patch" ||
+		!body.Steps[2].Breaking || body.Steps[2].UpgradeNotes != "Rename dlq." {
+		t.Fatalf("body = %s", rec.Body)
+	}
+
+	rec = do(t, h, "GET", "/v1/catalog/modules/sqs/upgrade-path?from=2.0.0&to=latest", "")
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"up_to_date":true`) || !strings.Contains(rec.Body.String(), `"steps":[]`) ||
+		!strings.Contains(rec.Body.String(), `"next":null`) {
+		t.Fatalf("up to date: %d %s", rec.Code, rec.Body)
+	}
+	for path, want := range map[string]int{
+		"/v1/catalog/modules/sqs/upgrade-path":             400,
+		"/v1/catalog/modules/sqs/upgrade-path?from=1.x":    422,
+		"/v1/catalog/modules/nope/upgrade-path?from=1.0.0": 404,
+	} {
+		if rec := do(t, h, "GET", path, ""); rec.Code != want {
+			t.Errorf("%s: status %d, want %d (%s)", path, rec.Code, want, rec.Body)
+		}
+	}
+}
+
+// The release tool sends upgrade_notes; the strict decoder must accept it.
+func TestIndexAcceptsUpgradeNotes(t *testing.T) {
+	cat := &fakeCatalog{versions: []catalog.ModuleVersion{sqsVersion()}}
+	h := newTestRouter(cat, okPinger{})
+	rec := do(t, h, "POST", "/v1/internal/catalog/index", `{"module":"sqs","version":"1.3.0","upgrade_notes":"Rename x."}`,
+		"Authorization", "Bearer "+testInternalToken)
+	if rec.Code != 201 {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body)
 	}
 }
 

@@ -140,6 +140,10 @@ func TestValidateIndex(t *testing.T) {
 		{name: "bad sha", mutate: func(c *IndexCommand) { c.CommitSHA = "main" }, pointers: []string{"/commit_sha"}},
 		{name: "bad category", mutate: func(c *IndexCommand) { c.Category = "misc" }, pointers: []string{"/category"}},
 		{name: "database category", mutate: func(c *IndexCommand) { c.Category = "database" }},
+		{name: "upgrade notes", mutate: func(c *IndexCommand) { c.UpgradeNotes = "Rename x to y." }},
+		{name: "notes too long", mutate: func(c *IndexCommand) {
+			c.UpgradeNotes, c.Changelog = strings.Repeat("n", MaxNotesLength+1), strings.Repeat("c", MaxNotesLength+1)
+		}, pointers: []string{"/changelog_md", "/upgrade_notes"}},
 		{name: "cache category", mutate: func(c *IndexCommand) { c.Category = "cache" }},
 		{name: "network category", mutate: func(c *IndexCommand) { c.Category = "network" }},
 		{name: "observability category", mutate: func(c *IndexCommand) { c.Category = "observability" }},
