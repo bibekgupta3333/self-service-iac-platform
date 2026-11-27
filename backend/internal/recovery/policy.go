@@ -3,6 +3,7 @@ package recovery
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -63,24 +64,33 @@ func FailedApplyFromProgress(req *requests.Request, p requests.ApplyProgress, co
 	}
 }
 
-// ErrorMessage is the message of a report's error block ({"class": ..., "message": ...}),
-// or the raw value when it is a plain JSON string, reduced to its redacted Terraform
-// "Error:" lines (tferror.Clean) before it is classified. Other fields are ignored. Pure.
+// ErrorMessage is the text Classify reads for a report's error block ({"class",
+// "message", "signals"}), or for a plain JSON string: the message reduced to its redacted
+// Terraform "Error:" lines (tferror.Clean), followed by the signals, one per line. Signals
+// are the reported ones that are vocabulary entries (tferror.FilterSignals) plus those
+// found in the message itself, so a block without a signals field classifies too. Pure.
 func ErrorMessage(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
 	}
 	var block struct {
-		Message string `json:"message"`
+		Message string   `json:"message"`
+		Signals []string `json:"signals"`
 	}
-	msg := ""
-	if err := json.Unmarshal(raw, &block); err == nil {
-		msg = block.Message
-	} else if err := json.Unmarshal(raw, &msg); err != nil {
-		return ""
+	if err := json.Unmarshal(raw, &block); err != nil {
+		if err := json.Unmarshal(raw, &block.Message); err != nil {
+			return ""
+		}
 	}
-	if msg == "" {
-		return ""
+	return ClassificationText(block.Message, block.Signals)
+}
+
+// ClassificationText joins a cleaned message and its vocabulary signals for Classify. Pure.
+func ClassificationText(message string, reported []string) string {
+	signals := tferror.FilterSignals(append(append([]string(nil), reported...), tferror.Signals(message)...))
+	parts := make([]string, 0, 1+len(signals))
+	if strings.TrimSpace(message) != "" {
+		parts = append(parts, tferror.Clean(message, 3, 500))
 	}
-	return tferror.Clean(msg, 3, 500)
+	return strings.Join(append(parts, signals...), "\n")
 }

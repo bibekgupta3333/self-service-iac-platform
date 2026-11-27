@@ -40,7 +40,8 @@ func TestErrorMessage(t *testing.T) {
 		``:                                       "",
 		`{"class":"transient","message":"boom"}`: "boom",
 		`{"message":"Error: x","log_excerpt":"line"}`:                                                    "Error: x",
-		`{"message":"\u2502 Error: api error ThrottlingException: token=abc\n\u2502  password = \"p\""}`: "Error: api error ThrottlingException [api error ThrottlingException; ThrottlingException; Throttling]",
+		`{"message":"\u2502 Error: api error ThrottlingException: token=abc\n\u2502  password = \"p\""}`: "Error: api error ThrottlingException\nThrottlingException\nThrottling",
+		`{"message":"Error: creating Q (q)","signals":["Rate exceeded","Xs3cr3t","StatusCode: 503"]}`:    "Error: creating Q (q)\nRate exceeded\nStatusCode: 503",
 		`"plain"`: "plain",
 		`42`:      "",
 	}

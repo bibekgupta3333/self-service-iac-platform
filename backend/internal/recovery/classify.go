@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/tferror"
 )
 
 // Class is the kind of a pipeline failure (enum failure_class).
@@ -54,50 +56,44 @@ type rule struct {
 	re     *regexp.Regexp
 }
 
-// transientRules match errors that are expected to clear up by running again. They are
-// checked first and win over everything else: "ThrottlingException" inside an otherwise
-// unknown apply error is still throttling. Eventual consistency comes before the generic
-// AWS validation codes it is reported under (InvalidParameterValueException).
-var transientRules = []rule{
-	{"eventual_consistency", regexp.MustCompile(`(?i)role (defined for the function )?cannot be assumed|` +
-		`not authorized to perform: sts:AssumeRole.*(retry|eventual)|` +
-		`NoSuchEntity[^\n]*(just|recently) created|InvalidInstanceProfile|` +
-		`Invalid IAM Instance Profile`)},
-	{"throttling", regexp.MustCompile(`(?i)ThrottlingException|\bThrottling\b|RequestLimitExceeded|` +
-		`TooManyRequestsException|Rate exceeded|\bSlowDown\b|ProvisionedThroughputExceeded|` +
-		`RequestThrottled|PriorRequestNotComplete|StatusCode: 429`)},
-	{"provider_5xx", regexp.MustCompile(`(?i)StatusCode: 5\d\d|status code:? 5\d\d|` +
-		`\b(InternalError|InternalFailure|InternalServerError|ServiceUnavailable(Exception)?|ServiceFailure)\b|` +
-		`\b50[234] (Bad Gateway|Service Unavailable|Gateway Time-?out)`)},
-	{"timeout", regexp.MustCompile(`(?i)i/o timeout|context deadline exceeded|TLS handshake timeout|` +
-		`connection reset by peer|connection refused|no such host|RequestTimeout(Exception)?\b|` +
-		`net/http: request canceled|unexpected EOF|use of closed network connection`)},
-	{"lock_contention", regexp.MustCompile(`(?i)Error acquiring the state lock|Error locking state|` +
-		`ConditionalCheckFailedException|state lock|\.tflock|PreconditionFailed`)},
-	{"runner_lost", regexp.MustCompile(`(?i)runner has received a shutdown signal|` +
-		`lost communication with the server|The hosted runner encountered an error|` +
-		`runner .* (lost|disconnected)`)},
+// statusRules are the HTTP-status forms the excerpt carries as "StatusCode: <nnn>" (and an
+// AWS SDK v1 "status code: <nnn>" in raw text), checked after the vocabulary entries of
+// their class, so a named error code gives the reason ("RequestLimitExceeded ... 503" is
+// throttling).
+var statusRules = map[Class][]rule{
+	ClassTransient: {
+		{"throttling", regexp.MustCompile(`(?i)\bstatus ?code:? ?429\b`)},
+		{"provider_5xx", regexp.MustCompile(`(?i)\bstatus ?code:? ?5\d\d\b`)},
+	},
 }
 
-// configRules match a wrong change: re-running it fails the same way.
-var configRules = []rule{
-	{"policy_denied", regexp.MustCompile(`(?i)(^|\n)\s*deny: |policy (check )?denied|\bFAIL - |conftest .*fail`)},
-	{"plan_mismatch", regexp.MustCompile(`(?i)plan_mismatch|differs from the approved plan|plan hash mismatch`)},
-	{"validation", regexp.MustCompile(`(?i)Invalid value for (variable|input)|Unsupported argument|` +
-		`Missing required argument|Reference to undeclared|Unsupported attribute|Invalid reference|` +
-		`InvalidParameterCombination|InvalidParameterValue|ValidationException|ValidationError|` +
-		`MalformedPolicyDocument|InvalidRequest\b|` +
-		`AlreadyExists|already exists|EntityAlreadyExists|BucketAlreadyExists|BucketAlreadyOwnedByYou|` +
-		`ResourceInUseException|DuplicateRecord|ResourceConflictException`)},
+// policyRule matches the conftest output of a policy stage. It is not Terraform output, so
+// it is not in the vocabulary; a policy stage reports its own short message.
+var policyRule = rule{"policy_denied", regexp.MustCompile(`(?i)(^|\n)\s*deny: |policy (check )?denied|\bFAIL - |conftest .*fail`)}
+
+// rulesFor builds the rules of one class from tferror.Vocabulary, the single list of
+// signals the pipeline excerpt can carry: a phrase the classifier matches is always one the
+// excerpt keeps (case-insensitive substring, in Vocabulary order). Pure.
+func rulesFor(class Class) []rule {
+	var out []rule
+	for _, v := range tferror.Vocabulary {
+		if Class(v.Class) == class {
+			out = append(out, rule{v.Reason, regexp.MustCompile(`(?i)` + regexp.QuoteMeta(v.Text))})
+		}
+	}
+	return append(out, statusRules[class]...)
 }
 
-// infraRules refine an apply-stage failure that is neither transient nor a config error.
-var infraRules = []rule{
-	{"quota", regexp.MustCompile(`(?i)LimitExceeded|InsufficientInstanceCapacity|QuotaExceeded|` +
-		`TooManyBuckets|ServiceQuota|VcpuLimitExceeded|AddressLimitExceeded`)},
-	{"permission_denied", regexp.MustCompile(`(?i)AccessDenied|UnauthorizedOperation|` +
-		`is not authorized to perform|explicit deny|AuthorizationError|InvalidClientTokenId`)},
-}
+var (
+	// transientRules are checked first and win over everything else: "ThrottlingException"
+	// in an otherwise unknown apply error is still throttling. Eventual consistency comes
+	// before the AWS validation code it is reported under (InvalidParameterValueException).
+	transientRules = rulesFor(ClassTransient)
+	// configRules match a wrong change: re-running it fails the same way.
+	configRules = append([]rule{policyRule}, rulesFor(ClassConfig)...)
+	// infraRules refine an apply-stage failure that is neither transient nor a config error.
+	infraRules = rulesFor(ClassInfra)
+)
 
 // applyStages run terraform apply: a failure there may have changed infrastructure.
 var applyStages = []string{"apply", "destroy"}
