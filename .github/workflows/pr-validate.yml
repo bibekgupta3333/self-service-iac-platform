@@ -163,7 +163,6 @@ jobs:
       AWS_ENDPOINT_URL: http://localhost:4566
       STACK_ID: ${{ matrix.stack.id }}
       STACK_PATH: ${{ matrix.stack.path }}
-      TFLINT_PLUGIN_DIR: ${{ github.workspace }}/.tflint.d/plugins
       # Steps run inside the stack root; keep `python -m tools.stack_pipeline` importable.
       PYTHONPATH: ${{ github.workspace }}
     defaults:
@@ -177,11 +176,14 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # A plugin cache inside the checkout would let the PR commit provider binaries that
-      # `terraform init` reuses without any download or signature check; keep it outside.
-      - name: Keep the Terraform plugin cache outside the checkout
+      # A plugin directory inside the checkout would let the PR commit provider (or TFLint
+      # plugin) binaries that `terraform init` / `tflint --init` reuse without any download or
+      # signature check; keep both outside it.
+      - name: Keep the Terraform and TFLint plugin directories outside the checkout
         working-directory: .
-        run: echo "TF_PLUGIN_CACHE_DIR=$RUNNER_TEMP/terraform-plugin-cache" >> "$GITHUB_ENV"
+        run: |
+          echo "TF_PLUGIN_CACHE_DIR=$RUNNER_TEMP/terraform-plugin-cache" >> "$GITHUB_ENV"
+          echo "TFLINT_PLUGIN_DIR=$RUNNER_TEMP/tflint-plugins" >> "$GITHUB_ENV"
 
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
@@ -216,17 +218,13 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/bin" conftest
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
-      # No provider cache here. A PR's runs may restore caches saved on the PR's own ref, and
-      # an earlier run of the same PR (with a changed workflow) could have saved a provider
-      # package under the key a later, clean-looking run restores; `terraform init` accepts
-      # that package when the lock lists its hash. Providers are downloaded and verified
-      # against the pinned lock on every run instead (only the TFLint plugin cache below stays,
-      # TFLint plugins are keyed by the platform-owned .tflint.hcl).
-      - name: Cache TFLint plugins
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ${{ env.TFLINT_PLUGIN_DIR }}
-          key: tflint-${{ runner.os }}-${{ env.TFLINT_VERSION }}-${{ hashFiles('.tflint.hcl') }}
+      # No provider or TFLint plugin cache here. A PR's runs may restore caches saved on the
+      # PR's own ref, and an earlier run of the same PR (with a changed workflow) could have
+      # saved a provider package or a TFLint plugin binary under the key a later,
+      # clean-looking run restores: `terraform init` accepts that package when the lock lists
+      # its hash, and TFLint runs a cached plugin without checking it again. Both are
+      # downloaded and verified on every run instead (`tflint --init` below, with the job's
+      # GITHUB_TOKEN so the download is not rate limited).
 
       # `terraform plan` runs code: data "external" starts a program, data "http" calls out,
       # and a provider is a binary. The stack root is written by the PR, so before init and
