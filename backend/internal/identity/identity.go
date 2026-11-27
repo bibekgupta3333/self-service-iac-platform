@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -32,6 +33,9 @@ type Principal struct {
 	// Workflow is set when the caller proved a GitHub Actions OIDC identity. Callers
 	// using the shared internal token have none.
 	Workflow *Workflow
+	// AuthenticatedAt is when the user signed in (the session's creation time); zero when
+	// unknown (machine callers). A production destroy needs a recent one (rbac.DecideFresh).
+	AuthenticatedAt time.Time
 }
 
 // Workflow is the verified GitHub Actions run behind an OIDC token.

@@ -72,7 +72,8 @@ type Record struct {
 
 // Principal is the caller a valid session represents.
 func (r Record) Principal() identity.Principal {
-	return identity.Principal{UserID: r.UserID, Login: r.Login, Type: identity.ActorUser, PlatformAdmin: r.PlatformAdmin}
+	return identity.Principal{UserID: r.UserID, Login: r.Login, Type: identity.ActorUser, PlatformAdmin: r.PlatformAdmin,
+		AuthenticatedAt: r.CreatedAt}
 }
 
 // Policy bounds a session's life.
