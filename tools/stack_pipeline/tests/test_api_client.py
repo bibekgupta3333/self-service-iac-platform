@@ -380,7 +380,8 @@ class TestReportCommand:
                 "--fencing-token", "9", "--terraform-exit-code", "1", "--error-log", str(log), "--dry-run"]
         main([*base, "--status", "failure"])
         payload = json.loads(capsys.readouterr().out)
-        assert payload["error"]["message"].startswith("│ Error: api error ThrottlingException")
+        assert payload["error"]["message"].startswith("Error: api error ThrottlingException")
+        assert "api error ThrottlingException" in payload["error"]["message"]
         # A passed stage, or an explicit message, ignores the log.
         main([*base, "--status", "success"])
         assert "error" not in json.loads(capsys.readouterr().out)

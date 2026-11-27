@@ -161,15 +161,27 @@ def test_result_from_untrusted_file() -> None:
     assert r == SurgeryResult(outcome="failed")
 
 
-def test_error_excerpt() -> None:
-    log = "\x1b[31mmodule.q.aws_sqs_queue.this: Creating...\x1b[0m\n" \
-          "│ Error: creating SQS Queue: api error ThrottlingException: Rate exceeded\n│\n" \
-          "::set-output name=x::y\n  with module.q.aws_sqs_queue.this"
+def test_error_excerpt_keeps_only_redacted_error_lines_and_signals() -> None:
+    log = ("\x1b[31mmodule.db.aws_db_instance.main: Creating...\x1b[0m\n"
+           "\u2577\n"
+           "\u2502 Error: creating RDS DB Instance (orders-db): operation error RDS: CreateDBInstance, https response error "
+           "StatusCode: 400, api error InvalidParameterValue: MasterUserPassword hunter2-secret token=abc (AKIAABCDEFGHIJKLMNOP)\n"
+           "\u2502\n"
+           "\u2502   12:   master_password = \"s3cr3t-in-detail\" # ThrottlingException\n"
+           "\u2575\n"
+           "\u2502 Error: creating SQS Queue (q): https response error StatusCode: 503, api error ThrottlingException: Rate exceeded\n"
+           "::set-output name=x::y\n")
     out = error_excerpt(log)
-    assert out.startswith("│ Error: creating SQS Queue") and "ThrottlingException" in out
-    assert "\x1b" not in out and "\n::" not in out
-    assert error_excerpt("a\nb") == "a\nb"
-    assert len(error_excerpt("Error: " + "x" * 5000)) == 2000
+    assert out.startswith("Error: creating RDS DB Instance (orders-db) | Error: creating SQS Queue (q) [")
+    for leak in ("hunter2", "abc", "AKIA", "s3cr3t", "master_password", "MasterUserPassword", "\u2502", "\x1b", "set-output"):
+        assert leak not in out, leak
+    for signal in ("api error InvalidParameterValue", "api error ThrottlingException", "StatusCode: 503", "Rate exceeded"):
+        assert signal in out, signal
+    assert len(error_excerpt("Error: " + "x" * 5000)) == 500
+
+
+def test_error_excerpt_without_an_error_line_is_a_fixed_message() -> None:
+    assert error_excerpt("Refreshing state...\n  password = \"p\"\na\nb") == "terraform apply failed; see the workflow log"
 
 
 # ---- CLI --------------------------------------------------------------------------------

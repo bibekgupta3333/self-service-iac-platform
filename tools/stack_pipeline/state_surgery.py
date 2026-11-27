@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from . import tf_error
+
 OP_STATE_RM = "state rm"
 OP_STATE_MV = "state mv"
 OP_IMPORT = "import"
@@ -303,16 +305,17 @@ class SurgeryRunner:
                              state_before_sha256=before, state_after_sha256=after)
 
 
-def error_excerpt(log: str, limit: int = 2_000) -> str:
-    """The Terraform error of a failed run for the run report (the classifier reads it).
+APPLY_FAILURE = "terraform apply failed; see the workflow log"
+MAX_EXCERPT = 500
 
-    From the first ``Error:`` line on, ANSI colour codes removed and lines that would read
-    as workflow commands (``::``) neutralised, bounded to ``limit`` characters; the last 20 lines when no
-    ``Error:`` line exists. Pure.
+
+def error_excerpt(log: str) -> str:
+    """The error message of a failed apply or destroy stage, safe to send and store. Pure.
+
+    Only Terraform's ``Error:`` lines (at most three diagnostics), cut after the resource
+    identifier and redacted, plus the classification signals the backend needs (AWS error
+    codes, HTTP status, known phrases), at most ``MAX_EXCERPT`` characters; a fixed message
+    when the log has no ``Error:`` line. The same rules as the drift summary
+    (``tf_error``), and the API applies them again before storing.
     """
-    clean = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", log)
-    lines = [line.rstrip() for line in clean.splitlines()]
-    start = next((i for i, line in enumerate(lines) if line.lstrip("│ ").startswith("Error:")), None)
-    picked = lines[start:] if start is not None else lines[-20:]
-    text = "\n".join(": :" + line.lstrip()[2:] if line.lstrip().startswith("::") else line for line in picked).strip()
-    return text[:limit]
+    return tf_error.excerpt(log, 3, MAX_EXCERPT, APPLY_FAILURE)
