@@ -50,8 +50,12 @@ func TestPostgresRepository(t *testing.T) {
 	if err != nil || len(env.AllowedRegions) != 1 || env.AllowedRegions[0] != "us-east-1" {
 		t.Fatalf("environment = %+v, %v", env, err)
 	}
+	// Migration 0017 seeds production; remove it to check the not-found path.
+	if _, err := owner.Exec(ctx, `DELETE FROM environments WHERE name = 'production'`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := repo.Environment(ctx, "production"); !apperr.IsKind(err, apperr.KindNotFound) {
-		t.Fatalf("unseeded environment: %v", err)
+		t.Fatalf("missing environment: %v", err)
 	}
 
 	b, err := repo.MonthlyBudget(ctx, "payments", "development", nov)

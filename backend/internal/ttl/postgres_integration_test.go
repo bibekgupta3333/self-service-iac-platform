@@ -122,8 +122,11 @@ func TestTTLLifecycleAgainstPostgres(t *testing.T) {
 		t.Error("a permanent stack must not accept a ttl_hours")
 	}
 	// Production never allows ephemeral stacks, whatever an INSERT or UPDATE says.
+	// Migration 0017 seeds production, so the INSERT meets the row and updates it: the
+	// trigger must force the values on that path too.
 	exec(`INSERT INTO environments (name, aws_account_id, allowed_regions, allow_ephemeral, max_ttl_hours)
-		VALUES ('production', '111111111111', ARRAY['us-east-1'], true, 48)`)
+		VALUES ('production', '111111111111', ARRAY['us-east-1'], true, 48)
+		ON CONFLICT (name) DO UPDATE SET allow_ephemeral = true, max_ttl_hours = 48`)
 	exec(`UPDATE environments SET allow_ephemeral = true WHERE name = 'production'`)
 	var prodAllows bool
 	var prodMax *int
