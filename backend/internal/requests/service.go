@@ -382,6 +382,9 @@ func (s *Service) precheck(ctx context.Context, by identity.Principal, in Create
 	if err := authorizeKind(role, in.Kind, in.Environment, in.Team); err != nil {
 		return nil, err
 	}
+	if err := authorizeProductionGates(role, in, in.Environment, by.AuthenticatedAt, s.clock.Now()); err != nil {
+		return nil, err
+	}
 	return nil, s.checkResources(ctx, in.Resources)
 }
 
@@ -403,6 +406,9 @@ func (s *Service) precheckExisting(ctx context.Context, by identity.Principal, i
 		return nil, stackNotFound(*in.StackID)
 	}
 	if err := authorizeKind(role, in.Kind, t.Environment, t.TeamSlug); err != nil {
+		return nil, err
+	}
+	if err := authorizeProductionGates(role, in, t.Environment, by.AuthenticatedAt, s.clock.Now()); err != nil {
 		return nil, err
 	}
 	if err := CheckStackAllowsKind(in.Kind, t.Status, nil); err != nil {
@@ -505,6 +511,27 @@ func (s *Service) roleIn(ctx context.Context, by identity.Principal, teamSlug st
 func authorizeKind(role Role, kind Kind, env, team string) error {
 	if d := rbac.Decide(role, ActionFor(kind), rbac.Resource{Environment: env}); !d.Allowed {
 		return apperr.Forbidden(fmt.Sprintf("creating a %s request for team %s needs the %s role or higher", kind, team, d.Need))
+	}
+	return nil
+}
+
+// authorizeProductionGates applies the gates a request meets beyond its kind's role
+// threshold (WBS 8.8, rbac/production.go), after authorizeKind allowed it:
+//   - allow_stateful_destroy needs the request.allow_stateful_destroy role in env
+//     (maintainer in production);
+//   - a production destroy needs a sign-in within rbac.ReauthWindow (403 reauth_required).
+//
+// Pure.
+func authorizeProductionGates(role Role, in CreateInput, env string, authAt, now time.Time) error {
+	if in.AllowStatefulDestroy {
+		if d := rbac.Decide(role, rbac.ActionStatefulDestroy, rbac.Resource{Environment: env}); !d.Allowed {
+			return apperr.Forbidden(fmt.Sprintf("allow_stateful_destroy in %s needs the %s role or higher", env, d.Need))
+		}
+	}
+	if d := rbac.DecideFresh(role, ActionFor(in.Kind), rbac.Resource{Environment: env}, authAt, now); d.Reason == rbac.ReasonReauth {
+		return &apperr.Error{Kind: apperr.KindForbidden, Code: rbac.ReasonReauth,
+			Message: fmt.Sprintf("destroying a production stack needs a sign-in within the last %s; sign in again and retry",
+				rbac.ReauthWindow)}
 	}
 	return nil
 }

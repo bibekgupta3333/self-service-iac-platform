@@ -61,7 +61,7 @@ func newUserAuth(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, clo
 		}
 		p.PlatformAdmin = true
 		slog.Warn("dev authentication enabled: every caller acts as the local user", "login", p.Login)
-		out.Authenticator = httpapi.DevAuthenticator{Principal: p}
+		out.Authenticator = httpapi.DevAuthenticator{Principal: p, Now: clock.Now}
 		out.Handler = &httpapi.AuthHandler{Profiles: users, Mode: string(config.AuthModeDev), Proxies: proxies}
 		return out, nil
 

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/db"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/db/dbtest"
@@ -44,6 +45,47 @@ func TestMigrationsApplyAndAreIdempotent(t *testing.T) {
 	var env string
 	if err := pool.QueryRow(ctx, "SELECT aws_account_id FROM environments WHERE name='development'").Scan(&env); err != nil || env != "000000000000" {
 		t.Fatalf("seeded development env = %q, %v", env, err)
+	}
+	testProductionEnvironmentSeed(ctx, t, pool)
+}
+
+// testProductionEnvironmentSeed checks migration 0017: staging and production exist, and
+// production always requires a maintainer's approval and never allows ephemeral stacks,
+// whatever an UPDATE or INSERT says (WBS 8.8).
+func testProductionEnvironmentSeed(ctx context.Context, t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	type envRow struct {
+		requiresApproval bool
+		minRole          string
+		allowEphemeral   bool
+		maxTTL           *int
+	}
+	read := func(name string) envRow {
+		var r envRow
+		if err := pool.QueryRow(ctx, `SELECT requires_approval, min_approver_role::text, allow_ephemeral, max_ttl_hours
+			FROM environments WHERE name = $1`, name).Scan(&r.requiresApproval, &r.minRole, &r.allowEphemeral, &r.maxTTL); err != nil {
+			t.Fatalf("environment %s: %v", name, err)
+		}
+		return r
+	}
+	if s := read("staging"); !s.requiresApproval || s.minRole != "developer" || !s.allowEphemeral || s.maxTTL == nil || *s.maxTTL != 168 {
+		t.Errorf("staging = %+v", s)
+	}
+	if p := read("production"); !p.requiresApproval || p.minRole != "maintainer" || p.allowEphemeral || p.maxTTL != nil {
+		t.Errorf("production = %+v", p)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE environments SET requires_approval = false, min_approver_role = 'developer',
+		allow_ephemeral = true WHERE name = 'production'`); err != nil {
+		t.Fatalf("update production: %v", err)
+	}
+	if p := read("production"); !p.requiresApproval || p.minRole != "maintainer" || p.allowEphemeral {
+		t.Errorf("the production invariants did not hold after an UPDATE: %+v", p)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE environments SET min_approver_role = 'admin' WHERE name = 'production'`); err != nil {
+		t.Fatal(err)
+	}
+	if p := read("production"); p.minRole != "admin" {
+		t.Errorf("production may require more than a maintainer: %+v", p)
 	}
 }
 

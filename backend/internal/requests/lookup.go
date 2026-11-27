@@ -2,6 +2,7 @@ package requests
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -9,7 +10,9 @@ import (
 
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/budgets"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/locks"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/rbac"
 )
 
 // StackHolder is a stack and what holds its platform lock: the read model behind
@@ -19,6 +22,8 @@ type StackHolder struct {
 	StackPath string
 	Lock      *locks.Lock // nil when the stack is not locked
 	Request   *Request    // the request named by Lock; nil when there is no lock
+	// RequesterLogin is the GitHub login of the user who created Request (empty when unknown).
+	RequesterLogin string
 }
 
 // ApplyTarget is what apply.yml needs to claim the stack lock and verify its plan: the
@@ -34,6 +39,17 @@ type ApplyTarget struct {
 	FencingToken     int64
 	ApprovedPlanHash string
 	MergeCommitSHA   string
+	// Environment is the stack's environment (from its path); the pre-apply gate and the
+	// production caller check (CheckApplyCaller) read it.
+	Environment string
+	// RequestedBy is the GitHub login of the request's author: the pre-apply approval gate
+	// never counts the author's own review (policies/opa/prod_approval.rego).
+	RequestedBy string
+	// PRNumber is the request's pull request, whose reviews the pre-apply gate reads (0 when
+	// none is recorded).
+	PRNumber int
+	// AllowStatefulDestroy is the request's allow_stateful_destroy.
+	AllowStatefulDestroy bool
 }
 
 // ParseLookupPath canonicalises a stack path from a query string. It applies the same
@@ -87,9 +103,63 @@ func ResolveApplyTarget(h StackHolder, head string, now time.Time) (ApplyTarget,
 		return ApplyTarget{}, apperr.Conflict("merge_commit_mismatch",
 			fmt.Sprintf("request %s was merged as %s, not %s", r.ShortID, r.MergeCommitSHA, head))
 	}
-	return ApplyTarget{StackID: h.StackID, StackPath: h.StackPath, RequestID: r.ID, RequestShortID: r.ShortID,
+	t := ApplyTarget{StackID: h.StackID, StackPath: h.StackPath, RequestID: r.ID, RequestShortID: r.ShortID,
 		Kind: r.Kind, Status: r.Status, FencingToken: h.Lock.FencingToken, ApprovedPlanHash: r.ApprovedPlanHash,
-		MergeCommitSHA: r.MergeCommitSHA}, nil
+		MergeCommitSHA: r.MergeCommitSHA, RequestedBy: h.RequesterLogin,
+		AllowStatefulDestroy: specAllowsStatefulDestroy(r.Spec)}
+	if ref, err := budgets.ParseStackPath(h.StackPath); err == nil {
+		t.Environment = ref.Environment
+	}
+	if r.PR != nil {
+		t.PRNumber = r.PR.Number
+	}
+	return t, nil
+}
+
+// specAllowsStatefulDestroy reads allow_stateful_destroy from a stored spec; an unreadable
+// spec never allows it (fail closed). Pure.
+func specAllowsStatefulDestroy(spec json.RawMessage) bool {
+	var s struct {
+		AllowStatefulDestroy bool `json:"allow_stateful_destroy"`
+	}
+	return json.Unmarshal(spec, &s) == nil && s.AllowStatefulDestroy
+}
+
+// ProductionEnvironment is the GitHub Environment (and platform environment) whose
+// required reviewers gate a production apply.
+const ProductionEnvironment = "production"
+
+// CheckApplyCaller decides whether the caller of GET /v1/internal/requests/by-path may
+// receive the lock credential and approved hash of a stack in env (WBS 8.8). Pure.
+//
+//   - production (and any environment the platform does not know, fail closed) needs a
+//     GitHub OIDC token from a job that ran in the GitHub Environment "production": the
+//     token only carries that environment claim after the Environment's required reviewers
+//     approved the job. The shared internal token is refused (oidc_required), and a job
+//     outside the Environment gets production_environment_required;
+//   - in development and staging a job bound to a GitHub Environment must be bound to the
+//     stack's own (environment_mismatch); a job with no Environment is still accepted there.
+func CheckApplyCaller(env string, wf *identity.Workflow) error {
+	forbidden := func(code, msg string) error {
+		return &apperr.Error{Kind: apperr.KindForbidden, Code: code, Message: msg}
+	}
+	if rbac.IsProduction(env) {
+		switch {
+		case wf == nil:
+			return forbidden("oidc_required",
+				"a production stack is applied only by apply.yml with a GitHub OIDC token, never the shared token")
+		case wf.Environment != ProductionEnvironment:
+			return forbidden("production_environment_required",
+				fmt.Sprintf("a production stack is applied only from a job in the %q GitHub Environment (its required reviewers gate the apply); this job ran in %q",
+					ProductionEnvironment, wf.Environment))
+		}
+		return nil
+	}
+	if wf != nil && wf.Environment != "" && wf.Environment != env {
+		return forbidden("environment_mismatch",
+			fmt.Sprintf("a job in the %q GitHub Environment cannot apply a %s stack", wf.Environment, env))
+	}
+	return nil
 }
 
 // checkLockHolder guards against a read model that pairs a lock with a different request.

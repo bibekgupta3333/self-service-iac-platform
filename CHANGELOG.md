@@ -6,6 +6,15 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 
 ## [Unreleased]
 
+### Added
+- Production environment enablement (WBS 8.8, 8.6 production gates):
+  - Migration `0017_production_environment` seeds the `staging` and `production` environment rows (LocalStack placeholder accounts, ADR-0009); a trigger and a CHECK force production to `requires_approval` with a `maintainer` (or `admin`) approver role, next to the 0012 rule that production is never ephemeral.
+  - RBAC: the `request.allow_stateful_destroy` action (maintainer in production) and `rbac.DecideFresh`: a production destroy needs a sign-in within 15 minutes (`403 reauth_required`; the session's creation time is carried as `Principal.AuthenticatedAt`, dev mode counts every call as fresh). Production matrix tests pin every production threshold.
+  - Requests accept `allow_stateful_destroy` on updates and destroys (stored in the spec only when set).
+  - `GET /v1/internal/requests/by-path` returns `environment`, `requested_by`, `pr_number` and `allow_stateful_destroy`, and gives a production stack's lock credential and approved hash only to an `apply.yml` OIDC token from the `production` GitHub Environment (`oidc_required`, `production_environment_required`); a job bound to another Environment cannot read a stack of a different one (`environment_mismatch`).
+  - `apply.yml` runs each leg in the GitHub Environment of its stack, so production waits for the Environment's required reviewers, and never applies a production stack without a recorded approved plan hash, even local-first.
+  - `policies/opa/prod_approval.rego` (`iacp.approval`) with positive and negative tests: on the pre-apply envelope, production needs one maintainer approval of the final commit from someone other than the author and never a machine user, two for a destructive plan, a matching approved plan hash, and `allow_stateful_destroy` before stateful deletes. Not waivable; it judges only the envelope, so the `main` namespace is unchanged. Building the envelope in `apply.yml` is deferred.
+
 ### Changed
 - Portfolio docs (WBS 10.4, write-up part): `README.md` rewritten as a front page (what works today, quickstart, layout, status and limits), and a new `docs/case-study.md` covering the problem, design decisions, review hardening, testing and trade-offs.
 - Terratest module dependencies: `golang.org/x/crypto` 0.52.0, `github.com/klauspost/compress` 1.18.7 and `github.com/ulikunitz/xz` 0.5.14 (replaces the Dependabot PRs #5, #6 and #7).

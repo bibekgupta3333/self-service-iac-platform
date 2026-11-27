@@ -160,6 +160,10 @@ func TestPostgresAdminRepository(t *testing.T) {
 	if _, err := repo.Set(ctx, w, ada, ""); !apperr.IsKind(err, apperr.KindNotFound) {
 		t.Errorf("unknown team: %v", err)
 	}
+	// Migration 0017 seeds production; remove it to check an environment with no row.
+	if _, err := owner.Exec(ctx, `DELETE FROM environments WHERE name = 'production'`); err != nil {
+		t.Fatal(err)
+	}
 	w, _ = budgets.NewWrite("payments", "2026-11", in(1, "production", nil), clock.Now())
 	if _, err := repo.Set(ctx, w, ada, ""); !apperr.IsKind(err, apperr.KindInvalid) {
 		t.Errorf("unconfigured environment: %v", err)

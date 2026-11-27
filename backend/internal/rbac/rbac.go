@@ -2,9 +2,10 @@
 // environment (docs/07 section 7). Nothing here performs I/O, so it is tested without mocks
 // and shared by the HTTP route policies and the request service.
 //
-// Roles are per team; a platform admin counts as admin everywhere. Production gates (extra
-// approvers, Environment reviewers, the pre-apply OPA check) are layered on top by WBS 8.8;
-// this package only encodes the role thresholds the matrix states for production.
+// Roles are per team; a platform admin counts as admin everywhere. The role thresholds the
+// matrix states for production are in MinRole; the extra production gates the API applies
+// (a fresh sign-in for a production destroy) are in production.go. Approvals are enforced by
+// GitHub and the pre-apply OPA gate (WBS 8.8).
 package rbac
 
 import "slices"
@@ -55,29 +56,30 @@ type Action string
 
 // Actions. They follow the rows of the docs/07 matrix.
 const (
-	ActionRead              Action = "read"               // browse catalog; view team stacks, requests, plans, drift
-	ActionRequestCreate     Action = "request.create"     // create / update / upgrade
-	ActionRequestDestroy    Action = "request.destroy"    // create a destroy request
-	ActionRequestCancelOwn  Action = "request.cancel_own" // cancel a request the caller authored
-	ActionRequestCancelAny  Action = "request.cancel_any" // cancel someone else's request
-	ActionApprove           Action = "request.approve"    // approve a PR / Environment
-	ActionRetry             Action = "request.retry"      // retry a failed apply, rollback
-	ActionTTLExtend         Action = "stack.extend_ttl"   // extend an ephemeral stack's TTL
-	ActionDriftReconcile    Action = "drift.reconcile"    // reconcile or codify drift
-	ActionDriftIgnore       Action = "drift.ignore"       // ignore drift
-	ActionExceptionRequest  Action = "exception.request"  // request a policy exception
-	ActionBudgetSet         Action = "budget.set"         // set a team budget
-	ActionBudgetOverride    Action = "budget.override"    // grant a budget override
-	ActionAuditViewTeam     Action = "audit.view_team"    // view the audit log of the caller's team
-	ActionAuditViewAll      Action = "audit.view_all"     // view all audit events, verify the chain, export
-	ActionModuleDeprecate   Action = "module.deprecate"   // deprecate a module version
-	ActionLockForceRelease  Action = "lock.force_release" // force-release a stack lock
-	ActionEnvironmentManage Action = "environment.manage" // manage environments and allowed regions
+	ActionRead              Action = "read"                           // browse catalog; view team stacks, requests, plans, drift
+	ActionRequestCreate     Action = "request.create"                 // create / update / upgrade
+	ActionRequestDestroy    Action = "request.destroy"                // create a destroy request
+	ActionStatefulDestroy   Action = "request.allow_stateful_destroy" // let a request delete stateful resources
+	ActionRequestCancelOwn  Action = "request.cancel_own"             // cancel a request the caller authored
+	ActionRequestCancelAny  Action = "request.cancel_any"             // cancel someone else's request
+	ActionApprove           Action = "request.approve"                // approve a PR / Environment
+	ActionRetry             Action = "request.retry"                  // retry a failed apply, rollback
+	ActionTTLExtend         Action = "stack.extend_ttl"               // extend an ephemeral stack's TTL
+	ActionDriftReconcile    Action = "drift.reconcile"                // reconcile or codify drift
+	ActionDriftIgnore       Action = "drift.ignore"                   // ignore drift
+	ActionExceptionRequest  Action = "exception.request"              // request a policy exception
+	ActionBudgetSet         Action = "budget.set"                     // set a team budget
+	ActionBudgetOverride    Action = "budget.override"                // grant a budget override
+	ActionAuditViewTeam     Action = "audit.view_team"                // view the audit log of the caller's team
+	ActionAuditViewAll      Action = "audit.view_all"                 // view all audit events, verify the chain, export
+	ActionModuleDeprecate   Action = "module.deprecate"               // deprecate a module version
+	ActionLockForceRelease  Action = "lock.force_release"             // force-release a stack lock
+	ActionEnvironmentManage Action = "environment.manage"             // manage environments and allowed regions
 )
 
 // Actions lists every action, for exhaustive tests and docs.
 var Actions = []Action{
-	ActionRead, ActionRequestCreate, ActionRequestDestroy, ActionRequestCancelOwn, ActionRequestCancelAny,
+	ActionRead, ActionRequestCreate, ActionRequestDestroy, ActionStatefulDestroy, ActionRequestCancelOwn, ActionRequestCancelAny,
 	ActionApprove, ActionRetry, ActionTTLExtend, ActionDriftReconcile, ActionDriftIgnore,
 	ActionExceptionRequest, ActionBudgetSet, ActionBudgetOverride, ActionAuditViewTeam, ActionAuditViewAll,
 	ActionModuleDeprecate, ActionLockForceRelease, ActionEnvironmentManage,
@@ -114,6 +116,7 @@ const (
 	ReasonRole     = "role_too_low"
 	ReasonSelf     = "own_work"
 	ReasonNoAction = "unknown_action"
+	ReasonReauth   = "reauth_required"
 )
 
 // MinRole returns the minimum team role that may perform a in env, and false for an
@@ -125,7 +128,7 @@ func MinRole(a Action, env string) (Role, bool) {
 		return RoleViewer, true
 	case ActionRequestCreate, ActionRequestCancelOwn, ActionTTLExtend, ActionDriftReconcile:
 		return RoleDeveloper, true
-	case ActionRequestDestroy, ActionApprove:
+	case ActionRequestDestroy, ActionStatefulDestroy, ActionApprove:
 		if nonProd {
 			return RoleDeveloper, true
 		}

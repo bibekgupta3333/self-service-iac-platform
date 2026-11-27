@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/auth"
@@ -27,12 +28,20 @@ type Authenticator interface {
 var ErrUnauthenticated = errors.New("unauthenticated")
 
 // DevAuthenticator treats every caller as one fixed local user. It is only used when
-// IACP_AUTH_MODE=dev is set explicitly.
-type DevAuthenticator struct{ Principal identity.Principal }
+// IACP_AUTH_MODE=dev is set explicitly. With Now set, every call counts as a fresh sign-in
+// (there is no login in dev mode), so the production re-authentication gate passes locally.
+type DevAuthenticator struct {
+	Principal identity.Principal
+	Now       func() time.Time
+}
 
 // Authenticate implements Authenticator.
 func (a DevAuthenticator) Authenticate(*http.Request) (identity.Principal, error) {
-	return a.Principal, nil
+	p := a.Principal
+	if a.Now != nil {
+		p.AuthenticatedAt = a.Now()
+	}
+	return p, nil
 }
 
 // DenyAuthenticator rejects every request.

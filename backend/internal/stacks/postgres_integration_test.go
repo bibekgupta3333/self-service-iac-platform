@@ -45,8 +45,9 @@ func TestVisibilityAndFilters(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Migration 0017 seeds production; the upsert keeps the test independent of that.
 	if _, err := pool.Exec(ctx, `INSERT INTO environments (name, aws_account_id, allowed_regions)
-		VALUES ('production', '111111111111', ARRAY['us-east-1'])`); err != nil {
+		VALUES ('production', '111111111111', ARRAY['us-east-1']) ON CONFLICT (name) DO NOTHING`); err != nil {
 		t.Fatal(err)
 	}
 	stack := func(teamSlug, env, name, status string) uuid.UUID {

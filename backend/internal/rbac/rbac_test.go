@@ -12,6 +12,7 @@ var grid = map[Action]struct{ dev, staging, prod string }{
 	ActionRead:              {"yyyy", "yyyy", "yyyy"},
 	ActionRequestCreate:     {"-yyy", "-yyy", "-yyy"},
 	ActionRequestDestroy:    {"-yyy", "-yyy", "--yy"},
+	ActionStatefulDestroy:   {"-yyy", "-yyy", "--yy"},
 	ActionRequestCancelOwn:  {"-yyy", "-yyy", "-yyy"},
 	ActionRequestCancelAny:  {"--yy", "--yy", "--yy"},
 	ActionApprove:           {"-yyy", "-yyy", "--yy"},

@@ -74,6 +74,10 @@ func (fakeTokenVerifier) Verify(_ context.Context, raw string) (auth.Claims, err
 		return workflowClaims("state-surgery.yml", "refs/heads/main", "workflow_dispatch"), nil
 	case "applydispatch.jwt.token":
 		return workflowClaims("apply.yml", "refs/heads/main", "workflow_dispatch"), nil
+	case "applyprod.jwt.token", "applystaging.jwt.token":
+		c := workflowClaims("apply.yml", "refs/heads/main", "push")
+		c.Environment = map[string]string{"applyprod.jwt.token": "production", "applystaging.jwt.token": "staging"}[raw]
+		return c, nil
 	case "badrun.jwt.token":
 		return auth.Claims{RunID: "x", RunAttempt: "1"}, nil
 	case "forbidden.jwt.token":
