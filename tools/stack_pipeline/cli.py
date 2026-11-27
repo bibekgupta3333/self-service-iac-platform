@@ -35,6 +35,7 @@ from .state_surgery import (
     error_excerpt,
     parse_request,
     refused_report,
+    with_triggering_actor,
 )
 from .report import (
     GitHubRun,
@@ -781,6 +782,7 @@ def _surgery_report(args: argparse.Namespace, env: Mapping[str, str]) -> int:
         payload = build_report(req, result, run)
     else:
         payload = refused_report(surgery_inputs(env), run)
+    payload = with_triggering_actor(payload, env.get("GITHUB_TRIGGERING_ACTOR", ""))
     if _unconfigured(args, "state surgery audit report"):
         print(json.dumps(payload, indent=2))
         return 0

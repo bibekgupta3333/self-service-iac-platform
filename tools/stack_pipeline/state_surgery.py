@@ -268,6 +268,16 @@ def refused_report(inputs: Mapping[str, str], run: Mapping[str, Any]) -> dict[st
     return body
 
 
+def with_triggering_actor(report: Mapping[str, Any], login: str) -> dict[str, Any]:
+    """The report plus ``triggered_by`` (``github.triggering_actor``: who started this attempt,
+    the re-runner on a re-run) when it is a valid login. The API names the verified OIDC actor
+    as ``requested_by`` and keeps this next to it. Pure."""
+    out = dict(report)
+    if _full(LOGIN_RE, login.strip()):
+        out["triggered_by"] = login.strip()
+    return out
+
+
 def state_digest(stack_dir: Path) -> str:
     """sha256 of the local state file, '' when there is none (local backend, ADR-0009)."""
     path = stack_dir / "terraform.tfstate"

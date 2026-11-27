@@ -25,6 +25,7 @@ from tools.stack_pipeline.state_surgery import (
     refused_report,
     terraform_argv,
     validate_args,
+    with_triggering_actor,
 )
 
 STACK = "environments/development/payments/orders"
@@ -154,6 +155,13 @@ def test_reports() -> None:
     assert refused["outcome"] == "refused" and refused["args"] == [] and refused["operation"] == "" and refused["ticket"] == ""
     assert refused["stack_path"] == STACK and refused["requested_by"] == "priya-s"
     assert refused_report(inputs(requested_by="a b"), RUN)["requested_by"] == "unknown"
+
+
+def test_with_triggering_actor() -> None:
+    body = refused_report(inputs(), RUN)
+    assert with_triggering_actor(body, "sre-rerun")["triggered_by"] == "sre-rerun"
+    assert "triggered_by" not in with_triggering_actor(body, "a b\n::x")
+    assert "triggered_by" not in body  # the input is not changed
 
 
 def test_result_from_untrusted_file() -> None:
