@@ -162,8 +162,13 @@ jobs:
     if: github.ref == 'refs/heads/main' && needs.detect.outputs.count != '0'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    # GitHub Environment per stack environment (required reviewers, OIDC subject
-    # bound to the iacp-apply role) arrives with WBS 6.6 / ADR-0009's end.
+    # One GitHub Environment per stack environment (WBS 8.8). production has required
+    # reviewers (.github/rulesets/environment-production.json), so a production leg waits
+    # for an approval, and its OIDC token then carries environment=production: the API
+    # hands a production stack's lock and approved hash only to such a token
+    # (requests.CheckApplyCaller). The iacp-apply role binding to the subject arrives with
+    # ADR-0009's end.
+    environment: ${{ matrix.stack.environment }}
     permissions:
       contents: read
       id-token: write
@@ -376,6 +381,7 @@ jobs:
         env:
           RECORDED_PLAN_HASH: ${{ steps.lock.outputs.approved_plan_hash }}
           INPUT_PLAN_HASH: ${{ inputs.approved_plan_hash }}
+          STACK_ENV: ${{ matrix.stack.environment }}
         run: |
           hex64='^[0-9a-f]{64}$'
           if [ -n "$RECORDED_PLAN_HASH" ] && [ -n "$INPUT_PLAN_HASH" ] && [ "$RECORDED_PLAN_HASH" != "$INPUT_PLAN_HASH" ]; then
@@ -393,6 +399,11 @@ jobs:
             exit 1
           fi
           if [ -z "$APPROVED_PLAN_HASH" ]; then
+            # Production is never applied unverified, not even local-first (WBS 8.8).
+            if [ "$STACK_ENV" != "development" ] && [ "$STACK_ENV" != "staging" ]; then
+              echo "::error title=Plan hash missing::$STACK_PATH is a production stack; it is applied only through an approved request whose plan hash the platform recorded"
+              exit 1
+            fi
             if [ -n "$IACP_API_URL" ]; then
               echo "::error title=Plan hash missing::no approved plan hash for $STACK_PATH; the API is configured, so the re-plan cannot be applied unverified"
               exit 1
