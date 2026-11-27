@@ -29,7 +29,7 @@ output "dashboard_url" {
 }
 
 output "alarm_arns" {
-  description = "ARNs of the alarms created by the helper inputs, keyed by <kind>-<key>-<metric> (for example sqs-orders-oldest-message-age)."
+  description = "ARNs of the alarms, keyed by <kind>-<key>-<metric> for the helper inputs (for example sqs-orders-oldest-message-age) and metric-<name> for metric_alarms."
   value       = { for k, a in aws_cloudwatch_metric_alarm.this : k => a.arn }
 }
 

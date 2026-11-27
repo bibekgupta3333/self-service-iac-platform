@@ -86,7 +86,46 @@ locals {
     }
   ]...)
 
-  alarms = merge(local.sqs_alarms, local.lambda_alarms, local.dynamodb_alarms)
+  # The helpers keep the v1.0.0 evaluation: one 5-minute period, a basic
+  # statistic, missing data not breaching.
+  helper_alarms = {
+    for k, a in merge(local.sqs_alarms, local.lambda_alarms, local.dynamodb_alarms) : k => merge(a, {
+      extended_statistic = null
+      period             = 300
+      evaluation_periods = 1
+      treat_missing_data = "notBreaching"
+    })
+  }
+
+  comparison_symbols = {
+    GreaterThanThreshold          = ">"
+    GreaterThanOrEqualToThreshold = ">="
+    LessThanThreshold             = "<"
+    LessThanOrEqualToThreshold    = "<="
+  }
+
+  # Custom-metric alarms. A percentile such as p95 is an extended statistic in
+  # the CloudWatch API; the basic statistics are not.
+  metric_alarms = {
+    for a in var.metric_alarms : "metric-${a.name}" => {
+      description = coalesce(
+        a.description,
+        "${a.namespace} ${a.metric_name} ${a.statistic} ${local.comparison_symbols[a.comparison]} ${a.threshold} for ${a.evaluation_periods} period(s) of ${a.period}s.",
+      )
+      namespace          = a.namespace
+      metric_name        = a.metric_name
+      dimensions         = a.dimensions
+      statistic          = startswith(a.statistic, "p") ? null : a.statistic
+      extended_statistic = startswith(a.statistic, "p") ? a.statistic : null
+      threshold          = a.threshold
+      comparison         = a.comparison
+      period             = a.period
+      evaluation_periods = a.evaluation_periods
+      treat_missing_data = a.treat_missing_data
+    }
+  }
+
+  alarms = merge(local.helper_alarms, local.metric_alarms)
 
   # ---- Dashboard ----
   # Each widget is rendered through jsonencode so text and metric widgets (which
