@@ -13,6 +13,11 @@
 #   cost      -> per stack: Infracost on the redacted plan; the only job with
 #                INFRACOST_API_KEY, and it runs no PR code (informational)
 #   cost-summary -> per stack: folds the estimate into the summary (no secrets)
+#   budget    -> per stack: the budget gate (policies/opa/budget.rego). Runs the BASE
+#                commit's tools and policies, takes the estimate only from the cost job's
+#                artifact and the budget from the Platform API, and denies a change that
+#                would push the team over a hard budget. Enforces nothing with no budget
+#                configured (docs/07 section 6.7)
 #   comment   -> sticky PR comment per stack (the only job that can write to the PR)
 #   code-scanning -> per stack: uploads the SARIF (the only job with
 #                security-events: write); skipped for fork and Dependabot PRs
@@ -158,8 +163,6 @@ jobs:
       AWS_ENDPOINT_URL: http://localhost:4566
       STACK_ID: ${{ matrix.stack.id }}
       STACK_PATH: ${{ matrix.stack.path }}
-      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform.d/plugin-cache
-      TFLINT_PLUGIN_DIR: ${{ github.workspace }}/.tflint.d/plugins
       # Steps run inside the stack root; keep `python -m tools.stack_pipeline` importable.
       PYTHONPATH: ${{ github.workspace }}
     defaults:
@@ -172,6 +175,15 @@ jobs:
           # Full history: module pins are checked against origin/main.
           fetch-depth: 0
           persist-credentials: false
+
+      # A plugin directory inside the checkout would let the PR commit provider (or TFLint
+      # plugin) binaries that `terraform init` / `tflint --init` reuse without any download or
+      # signature check; keep both outside it.
+      - name: Keep the Terraform and TFLint plugin directories outside the checkout
+        working-directory: .
+        run: |
+          echo "TF_PLUGIN_CACHE_DIR=$RUNNER_TEMP/terraform-plugin-cache" >> "$GITHUB_ENV"
+          echo "TFLINT_PLUGIN_DIR=$RUNNER_TEMP/tflint-plugins" >> "$GITHUB_ENV"
 
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
@@ -206,20 +218,44 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/bin" conftest
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
-      # Provider and TFLint plugin caches (WBS 5.4). Provider downloads are still
-      # verified against the committed .terraform.lock.hcl on init.
-      - name: Cache Terraform providers
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ${{ env.TF_PLUGIN_CACHE_DIR }}
-          key: tf-providers-${{ runner.os }}-${{ hashFiles(format('{0}/.terraform.lock.hcl', matrix.stack.path)) }}
-          restore-keys: tf-providers-${{ runner.os }}-
+      # No provider or TFLint plugin cache here. A PR's runs may restore caches saved on the
+      # PR's own ref, and an earlier run of the same PR (with a changed workflow) could have
+      # saved a provider package or a TFLint plugin binary under the key a later,
+      # clean-looking run restores: `terraform init` accepts that package when the lock lists
+      # its hash, and TFLint runs a cached plugin without checking it again. Both are
+      # downloaded and verified on every run instead (`tflint --init` below, with the job's
+      # GITHUB_TOKEN so the download is not rate limited).
 
-      - name: Cache TFLint plugins
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ${{ env.TFLINT_PLUGIN_DIR }}
-          key: tflint-${{ runner.os }}-${{ env.TFLINT_VERSION }}-${{ hashFiles('.tflint.hcl') }}
+      # `terraform plan` runs code: data "external" starts a program, data "http" calls out,
+      # and a provider is a binary. The stack root is written by the PR, so before init and
+      # plan its HCL is checked statically with the BASE commit's tools: only module calls
+      # pinned to platform releases, allow-listed providers and the local or s3 backend. The
+      # root may hold only the files the generator writes (no .terraform directory of provider
+      # binaries), and its lock file may carry only provider versions and hashes the base
+      # commit already has. No PR-authored program then runs on the runner that holds the
+      # plan, the tools and the policy (the OPA forbidden.* rules only see these constructs
+      # after plan time).
+      #
+      # The guard that runs is the base commit's, from a separate checkout, under `python -I`
+      # (no PYTHONPATH, no working directory on sys.path), so nothing in the PR's tree can
+      # shadow it. If the base has the guard and it fails or errors, the step fails: there is
+      # no fallback. Only the one change that introduces the guard has no base copy to run,
+      # and uses its own; delete that branch once this has merged.
+      - id: guard
+        name: Check the stack root for plan-time code
+        working-directory: .
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/base" "$BASE_SHA"
+          if git cat-file -e "$BASE_SHA:tools/stack_pipeline/stack_guard.py"; then
+            tools_root="$RUNNER_TEMP/base"
+          else
+            echo "::notice title=Base commit has no stack check::the change that introduces the check runs its own copy"
+            tools_root="$GITHUB_WORKSPACE"
+          fi
+          python -I -c 'import sys; sys.path.insert(0, sys.argv[1]); from tools.stack_pipeline.cli import main; sys.exit(main(sys.argv[2:]))' \
+            "$tools_root" check-stack "$GITHUB_WORKSPACE/$STACK_PATH" --lock-from "$RUNNER_TEMP/base"
 
       - id: fmt
         name: terraform fmt
@@ -239,6 +275,8 @@ jobs:
       - id: init
         name: terraform init (local backend)
         run: |
+          # Nothing a PR committed may be reused: no leftover providers or modules.
+          rm -rf .terraform
           mkdir -p "$TF_PLUGIN_CACHE_DIR"
           terraform init -input=false -lockfile=readonly -no-color
 
@@ -559,6 +597,147 @@ jobs:
             ${{ runner.temp }}/summary/summary.json
           retention-days: 7
 
+  # Budget gate (WBS 8.5, policies/opa/budget.rego): denies a stack whose estimated monthly
+  # cost, added to what the team has already committed, would push the month over a hard
+  # budget. It is the only place the estimate meets the policy. What it does and does not
+  # guarantee (docs/07 section 6.7):
+  #
+  # - It checks out the BASE commit (the target branch), so the policy, `tools/` and the
+  #   context builder it runs are main's, whatever this PR changes in them. (The workflow
+  #   file itself is the PR's; .github/, policies/ and tools/ are platform-owned in
+  #   CODEOWNERS, the same boundary every gate in this workflow relies on.)
+  # - The estimate is read only from the `cost-<id>` artifact of THIS run, and only when the
+  #   cost job succeeded: the output of the pinned Infracost binary in the isolated `cost`
+  #   job, the only job holding INFRACOST_API_KEY. This job never sees that key, and nothing
+  #   from the PR's tree (iacp.stack.json, summary.json, the stack directory) is read:
+  #   identity is the detected stack path.
+  # - The plan Infracost prices still comes from the validate job, which runs `terraform plan`
+  #   on the PR's stack root. The "Check the stack root for plan-time code" step there (base
+  #   commit tools) refuses everything that could run a program at plan time (data
+  #   "external"/"http", provisioners, resources, other providers, local or third-party
+  #   modules), so the plan is what Terraform makes of platform modules. The residual risk is
+  #   a change to .github/, tools/ or policies/ (platform review, CODEOWNERS) and a hole in
+  #   that check; the pre-apply gate that re-evaluates policy from main (WBS 8.8) is the
+  #   backstop, and until it exists this gate is a strong early check, not the last word.
+  # - The budget and any override come from the Platform API (OIDC), never from the PR.
+  # - A missing estimate is not a pass: with a budget set it is denied in staging and
+  #   production (a warning in development), see budget.rego. With Infracost disabled
+  #   (vars.INFRACOST_ENABLED not "true") that means every staging and production change of
+  #   a team with a budget is denied: enable Infracost before setting such budgets.
+  #
+  # With no budget configured (the local-first default, ADR-0009: vars.IACP_API_URL is
+  # empty) nothing is enforced and the job only reports. The PR's plan is evaluated as
+  # input so a destroy-only change always passes. id-token: write is safe here because
+  # only the base commit's code runs; contents is the only other permission.
+  budget:
+    name: budget (${{ matrix.stack.path }})
+    needs: [detect, validate, cost]
+    if: always() && needs.detect.result == 'success' && needs.detect.outputs.count != '0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: ${{ fromJSON(needs.detect.outputs.matrix) }}
+    env:
+      STACK_PATH: ${{ matrix.stack.path }}
+      IACP_API_URL: ${{ vars.IACP_API_URL }}
+      IACP_OIDC_AUDIENCE: ${{ vars.IACP_OIDC_AUDIENCE }}
+      PYTHONPATH: ${{ github.workspace }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install tool dependencies
+        run: python -m pip install --quiet "$(grep -E '^pyyaml==' tools/requirements.txt)"
+
+      - name: Install conftest (checksum verified)
+        run: |
+          tarball="conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSLo "$RUNNER_TEMP/$tarball" \
+            "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/${tarball}"
+          echo "${CONFTEST_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/bin" conftest
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # The target branch must already have the gate (this guard only matters for the
+      # change that introduces it). A PR cannot trigger it: the files are main's.
+      - id: ready
+        name: Check the target branch has the budget gate
+        run: |
+          help_text="$(python -m tools.stack_pipeline context --help)"
+          if grep -q -- '--budget-gate' <<<"$help_text" && [ -f policies/opa/budget.rego ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice title=Budget gate not on the target branch::the base commit has no budget gate yet; nothing is enforced for this run"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Only a cost job that succeeded in this run may supply the estimate; otherwise there is
+      # none, and budget.rego treats that as missing (denied in staging and production).
+      - name: Download the estimate (isolated cost job)
+        if: steps.ready.outputs.ready == 'true' && needs.cost.result == 'success'
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: cost-${{ matrix.stack.id }}
+          path: ${{ runner.temp }}/cost
+
+      - name: Download the plan the estimate was computed from
+        if: steps.ready.outputs.ready == 'true' && needs.cost.result == 'success'
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: cost-input-${{ matrix.stack.id }}
+          path: ${{ runner.temp }}/cost-input
+
+      # Skipped with a notice while vars.IACP_API_URL is empty (no budget then). When the
+      # API is configured a failure here fails the job: a budget that cannot be read is not
+      # a budget that is absent.
+      - name: Fetch the team budget
+        if: steps.ready.outputs.ready == 'true'
+        run: |
+          python -m tools.stack_pipeline fetch-budget-context --stack-path "$STACK_PATH" \
+            --out "$RUNNER_TEMP/api-context.json" --skip-if-unconfigured
+
+      - id: gate
+        name: Budget policy (conftest)
+        if: steps.ready.outputs.ready == 'true'
+        run: |
+          plan="$RUNNER_TEMP/cost-input/plan.json"
+          if [ ! -f "$plan" ]; then echo '{}' > "$RUNNER_TEMP/no-plan.json"; plan="$RUNNER_TEMP/no-plan.json"; fi
+          python -m tools.stack_pipeline context --budget-gate --stack-path "$STACK_PATH" \
+            --cost "$RUNNER_TEMP/cost/infracost.json" \
+            --api-context "$RUNNER_TEMP/api-context.json" > "$RUNNER_TEMP/budget-context.json"
+          if [ "$(jq '.iacp.context.budget != null' "$RUNNER_TEMP/budget-context.json")" != "true" ]; then
+            echo "::notice title=No budget configured::no team budget applies to $STACK_PATH, so the cost estimate is informational"
+          fi
+          status=0
+          conftest test "$plan" \
+            --policy "$GITHUB_WORKSPACE/policies/opa" \
+            --namespace iacp.budget \
+            --data "$RUNNER_TEMP/budget-context.json" \
+            --output json > "$RUNNER_TEMP/budget.json" || status=$?
+          {
+            echo "### Budget: \`$STACK_PATH\`"
+            jq -r '.[] | (.failures[]? | "- **deny** \(.msg)"), (.warnings[]? | "- warn \(.msg)")' "$RUNNER_TEMP/budget.json"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -r '.[] | (.failures[]? | "deny: \(.msg)"), (.warnings[]? | "warn: \(.msg)")' "$RUNNER_TEMP/budget.json" || true
+          exit "$status"
+
   comment:
     name: sticky PR comments
     needs: [detect, validate, cost-summary]
@@ -750,16 +929,18 @@ jobs:
 
   result:
     name: pr-validate-result
-    needs: [detect, validate]
+    needs: [detect, validate, budget]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
-      - name: Require detect to succeed and validate to succeed or skip
+      - name: Require detect to succeed and validate and budget to succeed or skip
         env:
           DETECT: ${{ needs.detect.result }}
           VALIDATE: ${{ needs.validate.result }}
+          BUDGET: ${{ needs.budget.result }}
         run: |
-          echo "detect=$DETECT validate=$VALIDATE"
+          echo "detect=$DETECT validate=$VALIDATE budget=$BUDGET"
           [ "$DETECT" = "success" ] || exit 1
           [ "$VALIDATE" = "success" ] || [ "$VALIDATE" = "skipped" ] || exit 1
+          [ "$BUDGET" = "success" ] || [ "$BUDGET" = "skipped" ] || exit 1

@@ -18,11 +18,12 @@ from .convergence import plan_problem, residual_changes
 from .cost import fold_cost, parse_infracost, redact_plan
 from .drift import MAX_CHANGED, DriftOutcome, build_outcome, outcome_from_dict
 from .detection import DEFAULT_MAX_STACKS, DetectionError, DetectionPolicy, DetectionResult, StackDetector
-from .models import StackMetadataError
+from .models import StackMetadataError, StackRef
 from .module_install import MANIFEST, ModuleInstallVerifier, parse_manifest
 from .module_pins import DEFAULT_REPO_URL, DEFAULT_TRUSTED_REF, ModulePinVerifier, PinError, Resolution, insteadof_config
 from .plan_summary import render_markdown, summarize
-from .policy_context import build_context
+from .stack_guard import LOCK_FILE, Violation, check_entries, check_stack, lock_allowlist
+from .policy_context import ContextError, build_budget_context, build_context
 from .sarif import SarifError, rebase_sarif, result_count
 from .smoke import SmokeTester
 from .state_surgery import (
@@ -80,8 +81,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     context = sub.add_parser("context", help="write the conftest --data context for a stack")
-    context.add_argument("stack_dir", type=Path)
+    context.add_argument("stack_dir", type=Path, nargs="?",
+                         help="stack root with iacp.stack.json (not used with --budget-gate)")
     context.add_argument("--allowed-region", action="append", default=[], help="override the policy default (repeatable)")
+    context.add_argument("--budget-gate", action="store_true",
+                         help="the budget gate's context (policies/opa/budget.rego): identity from --stack-path, "
+                              "budget from --api-context, the monthly cost from --cost; a missing estimate counts")
+    context.add_argument("--stack-path", help="environments/<env>/<team>/<stack>, from the detect job (--budget-gate)")
+    context.add_argument("--cost", type=Path,
+                         help="infracost breakdown --format json output of the isolated cost job (--budget-gate); "
+                              "absent or unusable means no estimate")
+    context.add_argument("--api-context", type=Path,
+                         help="`fetch-budget-context` output (--budget-gate); absent means no budget is configured")
+
+    guard = sub.add_parser("check-stack",
+                           help="static check of a stack root's HCL before init and plan (no plan-time code)")
+    guard.add_argument("stack_dir", type=Path)
+    guard.add_argument("--lock-from", type=Path, metavar="DIR",
+                       help="a checkout of the base commit: every .terraform.lock.hcl under DIR/environments is the "
+                            "allow-list of provider versions and hashes the stack's lock may carry")
+
+    fetch = sub.add_parser("fetch-budget-context",
+                           help="GET /v1/internal/budget-context for a stack root and write it to a file")
+    fetch.add_argument("--stack-path", required=True, help="environments/<env>/<team>/<stack>")
+    fetch.add_argument("--out", type=Path, required=True)
+    _api_arguments(fetch)
 
     summary = sub.add_parser("summary", help="summarise a plan and policy result as Markdown and JSON")
     summary.add_argument("stack_dir", type=Path)
@@ -292,8 +316,101 @@ def run_detect(args: argparse.Namespace) -> int:
 
 
 def run_context(args: argparse.Namespace) -> int:
+    if args.budget_gate:
+        return _run_budget_context(args)
+    if args.stack_dir is None or args.stack_path or args.cost or args.api_context:
+        raise ValueError("context needs a stack directory; --stack-path, --cost and --api-context go with --budget-gate")
     meta = FileSystemStackRepository(args.repo_root).load_dir(args.stack_dir)
     print(json.dumps(build_context(meta, args.allowed_region), indent=2))
+    return 0
+
+
+def _run_budget_context(args: argparse.Namespace) -> int:
+    """The budget gate's context. It reads no file from the stack's tree: identity is the path,
+    the budget is the API's, and the estimate is the cost job's (see policy_context)."""
+    ref = StackRef.from_root(args.stack_path or "")
+    if ref is None or args.stack_dir is not None:
+        raise ValueError("--budget-gate needs --stack-path environments/<env>/<team>/<stack> and no stack directory")
+    api_document = None
+    if args.api_context is not None and args.api_context.is_file():
+        api_document = _read_json(args.api_context)
+        if not isinstance(api_document, dict):
+            raise ContextError(f"{args.api_context} is not a JSON object")
+    estimate = parse_infracost(_read_json(args.cost))
+    document = build_budget_context(ref, estimate, api_document, args.allowed_region)
+    context = document["iacp"]["context"]
+    print(json.dumps(document, indent=2))
+    sys.stderr.write(
+        f"budget gate for {ref.path}: budget {'set' if context.get('budget') else 'not set'}, "
+        f"estimate {context.get('estimated_monthly_cost_usd', 'missing')}\n"
+    )
+    return 0
+
+
+MAX_GUARDED_FILE_BYTES = 1 << 20
+
+
+def _read_stack_files(root: Path) -> tuple[dict[str, str], list[Violation]]:
+    """The scannable top-level files of a stack root, and a violation for every entry that is not
+    a plain allow-listed file (a directory, a symlink, an oversized or non-UTF-8 file). I/O adapter."""
+    files: dict[str, str] = {}
+    refused: list[Violation] = []
+    if not root.is_dir():
+        raise ValueError(f"{root} is not a directory")
+    kinds: dict[str, str] = {}
+    for entry in sorted(root.iterdir()):
+        name = entry.name
+        kinds[name] = ("symlink" if entry.is_symlink() else "dir" if entry.is_dir() else
+                       "file" if entry.is_file() else "other")
+    refused += check_entries(kinds)
+    for entry in sorted(root.iterdir()):
+        name = entry.name
+        if kinds[name] == "file" and (name.endswith((".tf", ".tf.json")) or name == LOCK_FILE):
+            if entry.stat().st_size > MAX_GUARDED_FILE_BYTES:
+                refused.append(Violation(name, 1, "size", f"the file is larger than {MAX_GUARDED_FILE_BYTES} bytes"))
+                continue
+            try:
+                files[name] = entry.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                refused.append(Violation(name, 1, "unreadable", "the file is not UTF-8"))
+    return files, refused
+
+
+def _read_lock_pins(base: Path) -> dict:
+    """The lock allow-list from every stack lock file of the base checkout. I/O adapter."""
+    locks = sorted((base / "environments").glob(f"*/*/*/{LOCK_FILE}"))
+    texts = []
+    for p in locks:
+        if p.is_file() and not p.is_symlink() and p.stat().st_size <= MAX_GUARDED_FILE_BYTES:
+            texts.append(p.read_text(encoding="utf-8", errors="replace"))
+    return lock_allowlist(texts)
+
+
+def run_check_stack(args: argparse.Namespace) -> int:
+    files, refused = _read_stack_files(args.stack_dir)
+    pins = None
+    if args.lock_from is not None:
+        pins = _read_lock_pins(args.lock_from)
+        if not pins:
+            raise ValueError(f"no provider pins found under {args.lock_from}/environments: the lock cannot be checked")
+    violations = refused + check_stack(files, pins=pins)
+    for v in violations:
+        print(f"::error file={args.stack_dir / v.path},line={v.line}::{annotation(v.render())}")
+    if violations:
+        print(f"error: {len(violations)} problem(s) in {args.stack_dir}: the stack root may only call pinned "
+              "platform modules (no resources, data sources, provisioners, other providers or backends)",
+              file=sys.stderr)
+        return 1
+    print(f"{args.stack_dir}: {len(files)} file(s) checked, no plan-time code")
+    return 0
+
+
+def run_fetch_budget_context(args: argparse.Namespace) -> int:
+    if _unconfigured(args, "budget context"):
+        return 0
+    document = _client(args, os.environ).get_budget_context(args.stack_path)
+    args.out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    print(f"wrote the budget context of {args.stack_path} to {args.out}")
     return 0
 
 
@@ -794,6 +911,8 @@ def _surgery_report(args: argparse.Namespace, env: Mapping[str, str]) -> int:
 COMMANDS = {
     "detect": run_detect,
     "context": run_context,
+    "fetch-budget-context": run_fetch_budget_context,
+    "check-stack": run_check_stack,
     "summary": run_summary,
     "verify-pins": run_verify_pins,
     "verify-modules": run_verify_modules,
@@ -817,7 +936,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # These can quote server responses; keep them on one line.
         print(f"error: {annotation(str(exc))}", file=sys.stderr)
         return 1
-    except (DetectionError, StackMetadataError, PinError, SurgeryInputError) as exc:
+    except (DetectionError, StackMetadataError, PinError, ContextError, SurgeryInputError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:

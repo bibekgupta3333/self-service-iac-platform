@@ -30,6 +30,7 @@ LOCK_PATH = "/v1/internal/stacks/{stack_id}/lock"
 REQUEST_BY_PATH = "/v1/internal/requests/by-path"
 STATE_SURGERY_PATH = "/v1/internal/state-surgery"
 
+BUDGET_CONTEXT_PATH = "/v1/internal/budget-context"
 DRIFT_PATH = "/v1/internal/drift"
 DRIFT_STACKS_PATH = "/v1/internal/drift/stacks"
 USER_AGENT = "iacp-stack-pipeline"
@@ -248,6 +249,18 @@ class IacpApiClient:
         the API records one event per run attempt (a resend answers 200 duplicate)."""
         return self._call("POST", STATE_SURGERY_PATH, payload, ok=(200, 201))
 
+    def get_budget_context(self, stack_path: str) -> dict[str, Any]:
+        """GET /v1/internal/budget-context: the conftest --data document of a stack root. Read-only
+        and idempotent, so it is retried on 429/5xx. An answer that is not a policy context
+        (no ``iacp.context`` object) is an ApiError."""
+        if not STACK_PATH_RE.match(stack_path):
+            raise ValueError(f"stack path must look like environments/<env>/<team>/<stack>, got {stack_path!r}")
+        path = BUDGET_CONTEXT_PATH + "?" + urllib.parse.urlencode({"stack_path": stack_path})
+        body = self._call("GET", path, None, ok=(200,)).body
+        iacp = body.get("iacp")
+        if not isinstance(iacp, dict) or not isinstance(iacp.get("context"), dict):
+            raise ApiError(f"GET {BUDGET_CONTEXT_PATH}: the response is not a policy context")
+        return body
     def drift_stacks(self, limit: int = 256) -> list[DueStack]:
         """GET /v1/internal/drift/stacks: the stacks the API wants checked now (settled, not
         locked by a request). An answer that is not a list of valid stack paths is an ApiError:

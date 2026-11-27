@@ -32,6 +32,11 @@ const (
 	// RouteStateSurgery: POST /v1/internal/state-surgery. Only the break-glass
 	// state-surgery.yml, dispatched by hand on main; it records what the surgery did.
 	RouteStateSurgery RouteClass = "state_surgery"
+	// RouteBudgetActuals: POST /v1/internal/budget-actuals. Records a team's actual spend.
+	// No workflow is allowed: only a caller holding the shared internal token (the future
+	// Cost Explorer worker, WBS 8.5) may write it, so a token minted by a workflow file a
+	// pull-request author controls can never move the spend a budget gate reads.
+	RouteBudgetActuals RouteClass = "budget_actuals"
 	// RouteDrift: GET /v1/internal/drift/stacks and POST /v1/internal/drift. Only drift.yml
 	// on main, on its schedule or by dispatch: a report moves a stack's health and the list
 	// names what to scan, and a pull-request token comes from a workflow file the PR author
@@ -87,6 +92,7 @@ var RoutePolicies = map[RouteClass]RoutePolicy{
 		Events:    []string{"workflow_dispatch"},
 		OIDCOnly:  true,
 	},
+	RouteBudgetActuals: {}, // shared internal token only: no workflow is on the list
 	RouteTTL: {
 		Workflows: []string{"ttl-reaper.yml"},
 		MainOnly:  true,
