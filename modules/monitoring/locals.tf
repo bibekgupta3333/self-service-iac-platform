@@ -1,6 +1,6 @@
 locals {
   module_name    = "monitoring"
-  module_version = "1.0.0"
+  module_version = "1.1.0"
 
   full_name     = "${var.team}-${var.environment}-${var.name}"
   is_production = var.environment == "production"

@@ -3,6 +3,25 @@
 All notable changes to this module. Versions follow SemVer and are released
 as git tags `modules/monitoring/vX.Y.Z`.
 
+## [1.1.0] - 2026-11-26
+
+### Added
+- `metric_alarms`: an optional list of alarms on any CloudWatch metric, such
+  as a custom `IACP/Platform` metric. Each entry names its alarm with a stable,
+  unique `name` and sets the namespace, metric name, dimensions, statistic
+  (basic or a percentile such as `p95`, sent as the extended statistic),
+  threshold, comparison, period, evaluation periods and missing-data
+  treatment. Every field is validated at plan time. The alarms notify the
+  module's topic on alarm and on recovery, carry the platform tags, appear in
+  `alarm_arns` as `metric-<name>` and on the dashboard's alarm status widget.
+
+### Upgrade notes
+- Backward compatible: the default is an empty list, and the helper alarms
+  keep one 5-minute period, their statistic and `notBreaching`. A stack that
+  does not set `metric_alarms` plans no change besides the `iacp_metadata`
+  output, which now reports version 1.1.0.
+- Change `?ref=modules/monitoring/v1.0.0` to `?ref=modules/monitoring/v1.1.0`.
+
 ## [1.0.0] - 2026-11-26
 
 ### Added
