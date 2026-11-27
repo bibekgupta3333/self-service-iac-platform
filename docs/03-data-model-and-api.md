@@ -1134,7 +1134,7 @@ The route class is `apply.yml` only, from main, on `push` or `workflow_dispatch`
 }
 ```
 
-Apply callback adds `"outputs": {...}` (sensitive outputs replaced with `"<sensitive>"`), `"terraform_exit_code"`, and on failure `"error": {"class": "transient|permanent", "message": "...", "log_excerpt": "..."}`.
+Apply callback adds `"outputs": {...}` (sensitive outputs replaced with `"<sensitive>"`), `"terraform_exit_code"`, and on failure `"error": {"class": "transient|permanent", "message": "...", "signals": ["..."]}`: `message` is a redacted summary (Terraform `Error:` lines cut after the resource identifier, at most 500 characters) and `signals` are fixed-vocabulary classification signals; the API redacts both again before storing (`runs.RedactError`) and drops any other field.
 
 Response `200 {"accepted": true, "run_id": "…", "run_status": "succeeded", "request_status": "plan_ready"}`; `409 stale_fencing_token` aborts the job.
 
