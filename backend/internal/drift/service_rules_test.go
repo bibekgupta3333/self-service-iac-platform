@@ -2,6 +2,7 @@ package drift
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -52,7 +53,7 @@ func TestErrorTextIsSummarisedAndKeptOutOfTheAuditLog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Entry.Error != "Error: reading SSM Parameter (/db/password): operation error SSM: GetParameter, api error ValidationException: bad request" {
+	if res.Entry.Error != "Error: reading SSM Parameter (/db/password)" {
 		t.Fatalf("stored error = %q", res.Entry.Error)
 	}
 	for _, e := range f.repo.audits {
@@ -136,6 +137,36 @@ func TestResolveUpdatesOnlyTheReportsItLocked(t *testing.T) {
 	}
 	if st := f.repo.reports[1].Status; second.Entry.ID != f.repo.reports[1].ID || *st != StatusOpen {
 		t.Fatal("a report that was not locked with the target must stay open for its own decision")
+	}
+}
+
+func TestAFailedCheckInBetweenDoesNotBreakSuppression(t *testing.T) {
+	f := newFixture(t, rbac.RoleMaintainer)
+	id := seedOpen(t, f)
+	if _, err := f.svc.Resolve(context.Background(), f.user, id, ResolveInput{Action: ActionIgnore, Reason: "known provider noise"}); err != nil {
+		t.Fatal(err)
+	}
+	f.bot.Workflow.RunID = 960
+	failed := Report{StackPath: testPath, GitHub: validReport().GitHub, Result: ResultError, TerraformExitCode: ExitError, Error: "Error: boom"}
+	failed.GitHub.RunID = 960
+	if _, err := f.svc.Record(context.Background(), f.bot, failed); err != nil {
+		t.Fatal(err)
+	}
+	f.bot.Workflow.RunID = 961
+	back := validReport()
+	back.GitHub.RunID = 961
+	res, err := f.svc.Record(context.Background(), f.bot, back)
+	if err != nil || !res.Suppressed {
+		t.Fatalf("the same difference after a failed check = %+v, %v", res, err)
+	}
+	var detected map[string]any
+	for _, e := range f.repo.audits {
+		if e.Action == "drift.detected" {
+			_ = json.Unmarshal(e.Payload, &detected)
+		}
+	}
+	if detected["suppressed"] != true {
+		t.Fatalf("the suppressed copy's audit payload = %v, want suppressed: true", detected)
 	}
 }
 

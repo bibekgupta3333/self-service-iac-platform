@@ -316,14 +316,36 @@ const MaxSummaryLen = 200
 // GenericFailure is stored when terraform's output has no "Error:" line.
 const GenericFailure = "terraform plan -refresh-only failed; see the workflow log"
 
-// SummarizeError reduces terraform's failure output to one short, redacted line for
-// drift_reports.error_message. Terraform prints a diagnostic as a box (the box characters
-// are stripped) whose first line is "Error: <summary>"; the lines after it carry source
-// snippets and provider detail, which can hold attribute values and request bodies. Only
-// the first line that starts with "Error:" is kept, and when there is none the fixed
-// GenericFailure is used: never "the first non-empty line", which on a full log is a
-// "Refreshing state" line and on a tail is source text. Credential-shaped text is replaced
-// as defence in depth, control characters become spaces and the result is capped. Pure.
+// platformMessages is the explicit allow-list of messages the scan itself writes (not
+// terraform's output): they are fixed text with at most a number, they carry no terraform
+// or provider text, and they have no "Error:" prefix. Anything else is treated as terraform
+// output and reduced to its Error line. Keep in step with tools/stack_pipeline/drift.py.
+var platformMessages = regexp.MustCompile(`^(?:` +
+	`(?:module pins|terraform init|installed module verification|the plan step) failed before the refresh-only plan could run` +
+	`|terraform exited with the unexpected code \d{1,4}` +
+	`|terraform exited \d{1,4} but wrote no readable plan JSON` +
+	`|terraform plan -refresh-only failed; see the workflow log` +
+	`|the plan must be a JSON object \(terraform show -json\)` +
+	`|plan resource_drift must be a list` +
+	`|plan resource_drift\[\d{1,6}\] (?:must be an object|has no address or actions)` +
+	`)$`)
+
+// SummarizeError reduces a failure to one short, redacted line for
+// drift_reports.error_message. A message the scan itself wrote (platformMessages, an
+// explicit allow-list) passes unchanged. Otherwise the text is terraform's output: it prints
+// a diagnostic as a box (the box characters are stripped) whose first line is
+// "Error: <summary>", and the lines after it carry source snippets and provider detail,
+// which can hold attribute values and request bodies. Only the first line that starts with
+// "Error:" is kept, cut after the resource identifier (at the first ": " after the prefix:
+// "Error: putting SSM Parameter (/app/db)"), because what follows is the provider's own
+// message, which can echo input. With no such line the fixed GenericFailure is used: never
+// "the first non-empty line", which on a full log is a "Refreshing state" line and on a tail
+// is source text. Credential-shaped text is replaced as defence in depth, control
+// characters become spaces and the result is capped (tferror, shared with apply
+// failures). Pure.
 func SummarizeError(text string) string {
+	if t := strings.TrimSpace(text); platformMessages.MatchString(t) {
+		return t
+	}
 	return tferror.Summary(text, 1, MaxSummaryLen, GenericFailure)
 }

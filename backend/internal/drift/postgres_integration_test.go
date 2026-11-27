@@ -297,7 +297,7 @@ func TestPostgresDriftLifecycle(t *testing.T) {
 	// Terraform's text never reaches the audit log; the report keeps one redacted line.
 	failed := report(2001, drift.ResultError)
 	failed.Error = "Error: AccessDenied for token: abc123\n  detail line that must not be stored"
-	if res, err := svc.Record(ctx, driftBot(2001), failed); err != nil || res.Entry.Error != "Error: AccessDenied for token: <redacted>" {
+	if res, err := svc.Record(ctx, driftBot(2001), failed); err != nil || res.Entry.Error != "Error: AccessDenied for token" {
 		t.Fatalf("error report = %+v, %v", res.Entry, err)
 	}
 	var leaked int

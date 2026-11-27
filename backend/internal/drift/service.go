@@ -125,8 +125,8 @@ type Store interface {
 	// NewerRunExists reports whether the stack already has a drift report from a workflow run
 	// with a higher run id than runID, so a report arriving now is stale.
 	NewerRunExists(ctx context.Context, stackID uuid.UUID, runID int64) (bool, error)
-	// NewestReport returns the stack's newest report of any result; ok is false when it has
-	// none.
+	// NewestReport returns the stack's newest report that is not a failed check (an error
+	// says nothing about drift); ok is false when it has none.
 	NewestReport(ctx context.Context, stackID uuid.UUID) (e Entry, ok bool, err error)
 	// SetStackCheck records a finished check: health, and last_drift_check_at unless the
 	// check failed (checkedAt is nil then).
@@ -253,8 +253,9 @@ func (s *Service) Record(ctx context.Context, by identity.Principal, r Report) (
 		}
 		var ignored *Resolved2
 		if r.Result == ResultDrifted && !stale {
-			// Against the newest report of any result: ignore X, a clean night, then X again
-			// is a new finding, because the clean report is the newest.
+			// Against the newest report that is not a failed check: ignore X, a clean night,
+			// then X again is a new finding, because the clean report is the newest; a failed
+			// check in between says nothing, so it does not break the suppression.
 			newest, ok, err := st.NewestReport(ctx, stack.ID)
 			if err != nil {
 				return fmt.Errorf("load the newest report: %w", err)
@@ -281,7 +282,7 @@ func (s *Service) Record(ctx context.Context, by identity.Principal, r Report) (
 		if !inserted {
 			return nil
 		}
-		return s.apply(ctx, st, by, stack, entry, stale, now)
+		return s.apply(ctx, st, by, stack, entry, stale, ignored != nil, now)
 	})
 	if err != nil {
 		return Recorded{}, err
@@ -292,7 +293,7 @@ func (s *Service) Record(ctx context.Context, by identity.Principal, r Report) (
 // apply moves the stack's health for a freshly stored report and audits it. A stale report
 // (a newer run already reported) is kept for the history but moves nothing: a delayed job
 // must not undo a newer finding or close newer reports.
-func (s *Service) apply(ctx context.Context, st Store, by identity.Principal, stack StackRow, e Entry, stale bool, now time.Time) error {
+func (s *Service) apply(ctx context.Context, st Store, by identity.Principal, stack StackRow, e Entry, stale, suppressed bool, now time.Time) error {
 	if !stale {
 		var checked *time.Time
 		if e.Result != ResultError {
@@ -306,6 +307,9 @@ func (s *Service) apply(ctx context.Context, st Store, by identity.Principal, st
 		payload["report_id"], payload["stack_path"], payload["run_id"] = e.ID, e.StackPath, e.PipelineRunID
 		if stale {
 			payload["stale"] = true
+		}
+		if suppressed {
+			payload["suppressed"] = true // auto-accepted: it matched an ignored finding
 		}
 		b, err := json.Marshal(payload)
 		if err != nil {
