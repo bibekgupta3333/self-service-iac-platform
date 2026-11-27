@@ -266,3 +266,85 @@ variable "dynamodb_table_alarms" {
     error_message = "At most 25 tables keyed by 1-40 lowercase letters, digits and hyphens; table_name must be a DynamoDB table name and throttle_events_threshold at least 1."
   }
 }
+
+variable "metric_alarms" {
+  description = <<-EOT
+    Alarms on any CloudWatch metric, typically a custom one such as IACP/Platform RequestFailureRatePercent (at most 25).
+    name: stable key, 1-40 lowercase letters, digits and hyphens, unique in the list. The alarm is named
+    <team>-<environment>-<name>-metric-<key> and appears in alarm_arns as metric-<key>.
+    namespace, metric_name, dimensions (at most 30): the metric to watch.
+    statistic: SampleCount, Average (default), Sum, Minimum, Maximum or a percentile such as p95.
+    threshold, and comparison: GreaterThanThreshold, GreaterThanOrEqualToThreshold, LessThanThreshold or
+    LessThanOrEqualToThreshold.
+    period: 10, 20, 30 or a multiple of 60 seconds (default 300). evaluation_periods: a whole number of at
+    least 1 (default 1). period times evaluation_periods may be at most one day.
+    treat_missing_data: notBreaching (default), breaching, ignore or missing.
+    description: optional alarm description (at most 1,024 characters); a generated one is used otherwise.
+    Every alarm notifies the topic when it fires and when it recovers.
+  EOT
+  type = list(object({
+    name               = string
+    namespace          = string
+    metric_name        = string
+    dimensions         = optional(map(string), {})
+    statistic          = optional(string, "Average")
+    threshold          = number
+    comparison         = string
+    period             = optional(number, 300)
+    evaluation_periods = optional(number, 1)
+    treat_missing_data = optional(string, "notBreaching")
+    description        = optional(string)
+  }))
+  default  = []
+  nullable = false
+
+  validation {
+    condition = length(var.metric_alarms) <= 25 && alltrue([
+      for a in var.metric_alarms : try(can(regex("^[a-z0-9][a-z0-9-]{0,39}$", a.name)), false)
+    ]) && length(distinct([for a in var.metric_alarms : a.name])) == length(var.metric_alarms)
+    error_message = "At most 25 metric alarms, each with a unique name of 1-40 lowercase letters, digits and hyphens."
+  }
+
+  validation {
+    condition = alltrue([
+      for a in var.metric_alarms : try(
+        can(regex("^[A-Za-z0-9/_.#:-]{1,255}$", a.namespace)) &&
+        can(regex("^\\S.{0,254}$", a.metric_name)) &&
+        length(a.dimensions) <= 30 &&
+        alltrue([for k, v in a.dimensions : can(regex("^\\S.{0,254}$", k)) && length(v) >= 1 && length(v) <= 1024]),
+        false,
+      )
+    ])
+    error_message = "Each metric alarm needs a namespace of 1-255 letters, digits and / _ . # : -, a metric_name of 1-255 characters, and at most 30 dimensions with 1-255 character names and 1-1,024 character values."
+  }
+
+  validation {
+    condition = alltrue([
+      for a in var.metric_alarms : try(
+        a.threshold != null &&
+        can(regex("^(SampleCount|Average|Sum|Minimum|Maximum|p[0-9]{1,2}(\\.[0-9]{1,2})?|p100)$", a.statistic)) &&
+        contains(["GreaterThanThreshold", "GreaterThanOrEqualToThreshold", "LessThanThreshold", "LessThanOrEqualToThreshold"], a.comparison) &&
+        contains(["notBreaching", "breaching", "ignore", "missing"], a.treat_missing_data),
+        false,
+      )
+    ])
+    error_message = "Each metric alarm needs a threshold; statistic must be SampleCount, Average, Sum, Minimum, Maximum or a percentile such as p95; comparison GreaterThanThreshold, GreaterThanOrEqualToThreshold, LessThanThreshold or LessThanOrEqualToThreshold; treat_missing_data notBreaching, breaching, ignore or missing."
+  }
+
+  validation {
+    condition = alltrue([
+      for a in var.metric_alarms : try(
+        (contains([10, 20, 30], a.period) || (a.period >= 60 && a.period % 60 == 0)) &&
+        a.evaluation_periods >= 1 && floor(a.evaluation_periods) == a.evaluation_periods &&
+        a.period * a.evaluation_periods <= 86400,
+        false,
+      )
+    ])
+    error_message = "period must be 10, 20, 30 or a multiple of 60 seconds, evaluation_periods a whole number of at least 1, and period times evaluation_periods at most 86400 seconds."
+  }
+
+  validation {
+    condition     = alltrue([for a in var.metric_alarms : a.description == null || try(length(a.description) <= 1024, false)])
+    error_message = "A metric alarm description may be at most 1,024 characters."
+  }
+}

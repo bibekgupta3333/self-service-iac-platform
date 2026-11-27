@@ -2,14 +2,14 @@ apiVersion: iacp.dev/v1
 kind: Module
 metadata:
   name: monitoring
-  version: 1.0.0
+  version: 1.1.0
   displayName: Monitoring
-  description: KMS-encrypted SNS alarm topic with subscriptions, a CloudWatch dashboard from typed widgets, and alarm helpers for SQS, Lambda and DynamoDB.
+  description: KMS-encrypted SNS alarm topic with subscriptions, a CloudWatch dashboard from typed widgets, and alarm helpers for SQS, Lambda and DynamoDB, and alarms on any custom metric.
   category: observability
   maturity: beta
   owners:
     - "@bibekgupta3333/platform"
-  documentation: https://github.com/bibekgupta3333/self-service-iac-platform/tree/modules/monitoring/v1.0.0/modules/monitoring
+  documentation: https://github.com/bibekgupta3333/self-service-iac-platform/tree/modules/monitoring/v1.1.0/modules/monitoring
 
 compatibility:
   terraform: ">= 1.10, < 2.0"
@@ -153,6 +153,38 @@ inputs:
         properties:
           table_name: { type: string, pattern: "^[A-Za-z0-9_.-]{3,255}$", x-iacp-ui: stack-output }
           throttle_events_threshold: { type: integer, minimum: 1, default: 1 }
+    metric_alarms:
+      type: array
+      maxItems: 25
+      default: []
+      description: Alarms on any CloudWatch metric, typically a custom one (for example IACP/Platform RequestFailureRatePercent), each named by a unique stable key and notifying the topic on alarm and recovery.
+      x-iacp-group: Alarms
+      items:
+        type: object
+        additionalProperties: false
+        required: [name, namespace, metric_name, threshold, comparison]
+        properties:
+          name: { type: string, pattern: "^[a-z0-9][a-z0-9-]{0,39}$" }
+          namespace: { type: string, pattern: "^[A-Za-z0-9/_.#:-]{1,255}$" }
+          metric_name: { type: string, pattern: "^\\S.{0,254}$" }
+          dimensions:
+            type: object
+            maxProperties: 30
+            propertyNames: { pattern: "^\\S.{0,254}$" }
+            additionalProperties: { type: string, minLength: 1, maxLength: 1024 }
+            default: {}
+          statistic: { type: string, pattern: "^(SampleCount|Average|Sum|Minimum|Maximum|p[0-9]{1,2}(\\.[0-9]{1,2})?|p100)$", default: Average }
+          threshold: { type: number }
+          comparison: { type: string, enum: [GreaterThanThreshold, GreaterThanOrEqualToThreshold, LessThanThreshold, LessThanOrEqualToThreshold] }
+          period:
+            type: integer
+            default: 300
+            anyOf:
+              - { enum: [10, 20, 30] }
+              - { minimum: 60, maximum: 86400, multipleOf: 60 }
+          evaluation_periods: { type: integer, minimum: 1, maximum: 8640, default: 1 }
+          treat_missing_data: { type: string, enum: [notBreaching, breaching, ignore, missing], default: notBreaching }
+          description: { type: [string, "null"], maxLength: 1024 }
     tags:
       type: object
       additionalProperties: { type: string }
@@ -185,4 +217,7 @@ upgrade:
   from: ">= 1.0.0, < 2.0.0"
   requires_migration: false
   notes: |
-    Initial release.
+    Backward compatible. 1.1.0 adds the optional metric_alarms input; existing
+    alarms, the topic and the dashboard plan no changes besides the
+    iacp_metadata version. Change ?ref=modules/monitoring/v1.0.0 to
+    ?ref=modules/monitoring/v1.1.0.

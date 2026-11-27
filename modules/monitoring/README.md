@@ -2,14 +2,15 @@
 
 An SNS alarm topic encrypted with a customer managed key, optional
 subscriptions, a CloudWatch dashboard built from typed widgets, and alarm
-helpers for common SQS, Lambda and DynamoDB metrics. Part of the iacp module
+helpers for common SQS, Lambda and DynamoDB metrics, and alarms on any custom
+metric. Part of the iacp module
 registry (see [docs/04-module-registry.md](../../docs/04-module-registry.md)).
 
 ## Usage
 
 ```hcl
 module "alerts" {
-  source = "git::https://github.com/bibekgupta3333/self-service-iac-platform.git//modules/monitoring?ref=modules/monitoring/v1.0.0"
+  source = "git::https://github.com/bibekgupta3333/self-service-iac-platform.git//modules/monitoring?ref=modules/monitoring/v1.1.0"
 
   name        = "orders"
   team        = "payments"     # injected by the platform
@@ -27,6 +28,18 @@ module "alerts" {
   lambda_function_alarms = {
     worker = { function_name = "payments-development-orders-worker" }
   }
+
+  metric_alarms = [
+    {
+      name        = "orders-failed"
+      namespace   = "Payments/Orders"
+      metric_name = "OrdersFailed"
+      statistic   = "Sum"
+      threshold   = 10
+      comparison  = "GreaterThanOrEqualToThreshold"
+      period      = 900
+    },
+  ]
 
   dashboard_widgets = [
     {
@@ -78,6 +91,33 @@ period and one evaluation period.
 | `lambda_function_alarms` | `Errors` and `Throttles` (Sum) at or above `errors_threshold` / `throttles_threshold` | 1 and 1 |
 | `dynamodb_table_alarms` | `ReadThrottleEvents` and `WriteThrottleEvents` (Sum) at or above `throttle_events_threshold` | 1 |
 
+## Metric alarms
+
+`metric_alarms` (since v1.1.0) is a list of alarms on any CloudWatch metric,
+typically one your application publishes under its own namespace. Each entry
+has a stable `name` (unique in the list), so adding or removing one entry never
+replaces the others. The alarm is named
+`<team>-<environment>-<name>-metric-<name>` and appears in `alarm_arns` as
+`metric-<name>`. Like the helper alarms, it notifies the topic when it fires
+and when it recovers, carries the platform tags, and is listed on the
+dashboard's alarm status widget.
+
+| Field | Required | Default | Rules |
+|---|:---:|---|---|
+| `name` | yes | | 1-40 lowercase letters, digits and hyphens, unique |
+| `namespace` | yes | | 1-255 letters, digits and `/ _ . # : -` |
+| `metric_name` | yes | | 1-255 characters |
+| `dimensions` | no | `{}` | at most 30; names 1-255, values 1-1,024 characters |
+| `statistic` | no | `Average` | `SampleCount`, `Average`, `Sum`, `Minimum`, `Maximum`, or a percentile such as `p95` (sent as the extended statistic) |
+| `threshold` | yes | | a number |
+| `comparison` | yes | | `GreaterThanThreshold`, `GreaterThanOrEqualToThreshold`, `LessThanThreshold`, `LessThanOrEqualToThreshold` |
+| `period` | no | `300` | 10, 20, 30 or a multiple of 60 seconds |
+| `evaluation_periods` | no | `1` | whole number, at least 1; `period` x `evaluation_periods` at most 86,400 s |
+| `treat_missing_data` | no | `notBreaching` | `notBreaching`, `breaching`, `ignore`, `missing` |
+| `description` | no | generated | at most 1,024 characters |
+
+Anomaly-detection and metric-math alarms are not supported.
+
 ## Dashboard widgets
 
 `dashboard_widgets` is an ordered list. A widget is either a metric graph
@@ -105,6 +145,7 @@ is at least one widget or alarm.
 | `sqs_queue_alarms` | Up to 25 queues: `queue_name`, `oldest_message_age_seconds` (>= 60), optional `visible_messages_threshold`. | `map(object)` | `{}` | no |
 | `lambda_function_alarms` | Up to 25 functions: `function_name`, `errors_threshold`, `throttles_threshold` (>= 1). | `map(object)` | `{}` | no |
 | `dynamodb_table_alarms` | Up to 25 tables: `table_name`, `throttle_events_threshold` (>= 1). | `map(object)` | `{}` | no |
+| `metric_alarms` | Up to 25 alarms on any metric: `name`, `namespace`, `metric_name`, `threshold`, `comparison`, and optional `dimensions`, `statistic`, `period`, `evaluation_periods`, `treat_missing_data`, `description`. See [Metric alarms](#metric-alarms). | `list(object)` | `[]` | no |
 
 ## Outputs
 
@@ -116,10 +157,10 @@ is at least one widget or alarm.
 | `sns_topic_arn` | Alarm topic ARN, for other modules' `alarm_actions`. |
 | `dashboard_name` | Dashboard name, or null without widgets and alarms. |
 | `dashboard_url` | Console URL of the dashboard, or null. |
-| `alarm_arns` | Alarm ARNs keyed by `<kind>-<key>-<metric>`. |
+| `alarm_arns` | Alarm ARNs keyed by `<kind>-<key>-<metric>` (helpers) or `metric-<name>` (`metric_alarms`). |
 | `kms_key_arn` | ARN of the KMS key encrypting the topic. |
 | `publisher_policy_json` | IAM policy document for principals that publish to the topic. |
-| `iacp_metadata` | `{ module = "monitoring", version = "1.0.0" }` for inventory and drift correlation. |
+| `iacp_metadata` | `{ module = "monitoring", version = "1.1.0" }` for inventory and drift correlation. |
 
 ## Resources
 
