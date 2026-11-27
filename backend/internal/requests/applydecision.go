@@ -67,6 +67,9 @@ type ApplyProgress struct {
 	FailureDetail json.RawMessage
 	// ReleaseFailure is the error message of a failed lock release (PhaseObserved).
 	ReleaseFailure string
+	// LeaveStack, for PhaseFailed, fails the request without touching its stack: recovery
+	// sets it when the stack lock already belongs to another request, which may be applying.
+	LeaveStack bool
 }
 
 // StackChange is what an apply does to its stack row.
@@ -162,7 +165,9 @@ func DecideApply(status Status, kind Kind, stack StackStatus, p ApplyProgress) (
 		d.Stack = change
 	case PhaseFailed:
 		d.Events = append(d.Events, EventApplyFailed)
-		d.Stack = &StackChange{To: StackStatusAfterApply(kind, false)}
+		if !p.LeaveStack {
+			d.Stack = &StackChange{To: StackStatusAfterApply(kind, false)}
+		}
 	default:
 		return ApplyDecision{}, fmt.Errorf("unknown apply phase %q", p.Phase)
 	}
