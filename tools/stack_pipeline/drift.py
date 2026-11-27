@@ -128,21 +128,41 @@ GENERIC_FAILURE = "terraform plan -refresh-only failed; see the workflow log"
 
 
 _ERROR_LINE_RE = re.compile(r"Error:\s+\S")
+# The messages this tool and the workflow write themselves (not terraform's output): fixed
+# text with at most a number and no terraform or provider text, and no "Error:" prefix.
+# An explicit allow-list; anything else is terraform output and is reduced to its Error line.
+# Keep in step with platformMessages in backend/internal/drift/classify.go.
+_PLATFORM_MESSAGE_RE = re.compile(
+    r"(?:(?:module pins|terraform init|installed module verification|the plan step) failed before the refresh-only plan could run"
+    r"|terraform exited with the unexpected code \d{1,4}"
+    r"|terraform exited \d{1,4} but wrote no readable plan JSON"
+    r"|terraform plan -refresh-only failed; see the workflow log"
+    r"|the plan must be a JSON object \(terraform show -json\)"
+    r"|plan resource_drift must be a list"
+    r"|plan resource_drift\[\d{1,6}\] (?:must be an object|has no address or actions))")
 _BOX = " \t\u2502\u2577\u2575"
 
 
 def summarize_error(text: str) -> str:
-    """One redacted line of terraform's failure output, at most ``MAX_SUMMARY`` characters. Pure.
+    """One redacted line of a failure, at most ``MAX_SUMMARY`` characters. Pure.
+
+    A message the scan itself wrote (``_PLATFORM_MESSAGE_RE``, an explicit allow-list) passes
+    unchanged. Everything else is terraform's output and is reduced as follows.
 
     Terraform prints a diagnostic as a box (``\u2577`` ... ``\u2575``, each line prefixed with
     ``\u2502``) whose first line is ``Error: <summary>``; the lines after it carry source
     snippets and provider detail, which can hold attribute values and request bodies. Only the
-    first line that starts with ``Error:`` (after the box characters) is kept; with none, the
+    first line that starts with ``Error:`` (after the box characters) is kept, cut after the
+    resource identifier (at the first ``": "`` after the prefix, so ``Error: putting SSM
+    Parameter (/app/db)``), because what follows is the provider's own message, which can echo
+    input; with none, the
     fixed ``GENERIC_FAILURE`` is used, never "the first non-empty line" (on a full log that is
     a "Refreshing state" line, on a tail it is source text). Credential-shaped text is replaced
     as defence in depth and control characters become spaces. Mirrors ``drift.SummarizeError``
     in the backend.
     """
+    if _PLATFORM_MESSAGE_RE.fullmatch(text.strip()):
+        return text.strip()
     for raw in text.splitlines():
         line = raw.strip().strip(_BOX).strip()
         if not _ERROR_LINE_RE.match(line):
@@ -153,6 +173,9 @@ def summarize_error(text: str) -> str:
             return (m.group(1).rstrip() + " <redacted>") if m.group(1) else "<redacted>"
 
         line = _SECRET_RE.sub(redact, line)
+        cut = line.find(": ", len("Error:"))
+        if cut >= 0:
+            line = line[:cut].rstrip()
         return line if len(line) <= MAX_SUMMARY else line[: MAX_SUMMARY - 3] + "..."
     return GENERIC_FAILURE
 
