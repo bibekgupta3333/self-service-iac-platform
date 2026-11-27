@@ -172,6 +172,8 @@ def test_redact_outputs():
 def test_error_block():
     assert error_block("  ") is None
     assert error_block("boom") == {"class": "permanent", "message": "boom"}
+    assert error_block("boom", "permanent", ["Rate exceeded"]) == {"class": "permanent", "message": "boom", "signals": ["Rate exceeded"]}
+    assert "signals" not in error_block("boom", "permanent", [])
     assert error_block("x" * 5000, "transient")["message"].endswith("(truncated)")
     with pytest.raises(ReportError):
         error_block("boom", "fatal")

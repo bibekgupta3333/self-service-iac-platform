@@ -323,9 +323,13 @@ def error_excerpt(log: str) -> str:
     """The error message of a failed apply or destroy stage, safe to send and store. Pure.
 
     Only Terraform's ``Error:`` lines (at most three diagnostics), cut after the resource
-    identifier and redacted, plus the classification signals the backend needs (AWS error
-    codes, HTTP status, known phrases), at most ``MAX_EXCERPT`` characters; a fixed message
-    when the log has no ``Error:`` line. The same rules as the drift summary
-    (``tf_error``), and the API applies them again before storing.
+    identifier and redacted, one per line, at most ``MAX_EXCERPT`` characters; a fixed message
+    when the log has no ``Error:`` line. The same rules as the drift summary (``tf_error``),
+    and the API applies them again before storing.
     """
-    return tf_error.excerpt(log, 3, MAX_EXCERPT, APPLY_FAILURE)
+    return tf_error.summary(log, 3, MAX_EXCERPT, APPLY_FAILURE)
+
+
+def error_signals(log: str) -> list[str]:
+    """The classification signals of a failed stage's log (fixed vocabulary strings only). Pure."""
+    return tf_error.signals(log)

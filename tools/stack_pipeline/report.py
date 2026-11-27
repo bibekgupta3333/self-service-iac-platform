@@ -214,8 +214,10 @@ def redact_outputs(outputs: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
-def error_block(message: str, error_class: str = "permanent") -> dict[str, Any] | None:
-    """The ``error`` object for a failed stage, or None for an empty message. Pure."""
+def error_block(message: str, error_class: str = "permanent", signals: list[str] | None = None) -> dict[str, Any] | None:
+    """The ``error`` object for a failed stage, or None for an empty message. ``signals`` are the
+    classification signals of a Terraform failure (``tf_error.signals``), sent as their own
+    field so the message stays the plain summary. Pure."""
     message = message.strip()
     if not message:
         return None
@@ -223,7 +225,10 @@ def error_block(message: str, error_class: str = "permanent") -> dict[str, Any] 
         raise ReportError(f"error class must be transient or permanent, got {error_class!r}")
     if len(message) > MAX_ERROR_MESSAGE:
         message = message[:MAX_ERROR_MESSAGE] + " ... (truncated)"
-    return {"class": error_class, "message": message}
+    block: dict[str, Any] = {"class": error_class, "message": message}
+    if signals:
+        block["signals"] = list(signals)
+    return block
 
 
 def api_base_url(value: str) -> str:

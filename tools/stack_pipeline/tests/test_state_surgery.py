@@ -21,6 +21,7 @@ from tools.stack_pipeline.state_surgery import (
     TerraformRunner,
     build_report,
     error_excerpt,
+    error_signals,
     parse_request,
     refused_report,
     terraform_argv,
@@ -180,11 +181,12 @@ def test_error_excerpt_keeps_only_redacted_error_lines_and_signals() -> None:
            "\u2502 Error: creating SQS Queue (q): https response error StatusCode: 503, api error ThrottlingException: Rate exceeded\n"
            "::set-output name=x::y\n")
     out = error_excerpt(log)
-    assert out.startswith("Error: creating RDS DB Instance (orders-db) | Error: creating SQS Queue (q) [")
+    assert out == "Error: creating RDS DB Instance (orders-db)\nError: creating SQS Queue (q)"
+    sig = error_signals(log)
+    assert sig == ["ThrottlingException", "Throttling", "Rate exceeded", "InvalidParameterValue", "StatusCode: 400", "StatusCode: 503"]
+    joined = out + "\n".join(sig)
     for leak in ("hunter2", "abc", "AKIA", "s3cr3t", "master_password", "MasterUserPassword", "\u2502", "\x1b", "set-output"):
-        assert leak not in out, leak
-    for signal in ("api error InvalidParameterValue", "api error ThrottlingException", "StatusCode: 503", "Rate exceeded"):
-        assert signal in out, signal
+        assert leak not in joined, leak
     assert len(error_excerpt("Error: " + "x" * 5000)) == 500
 
 

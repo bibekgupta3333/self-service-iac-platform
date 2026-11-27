@@ -34,6 +34,7 @@ from .state_surgery import (
     TerraformRunner,
     build_report,
     error_excerpt,
+    error_signals,
     parse_request,
     refused_report,
     with_triggering_actor,
@@ -680,6 +681,7 @@ def _build_report(args: argparse.Namespace, env: Mapping[str, str]) -> RunReport
     if token is None and args.pipeline == "validate":
         token = meta.fencing_token
     status = stage_status(args.status) if args.status else summary_status(summary)
+    message, signals = _error_message(args, status)
     return RunReport(
         pipeline=args.pipeline,
         stack_path=meta.ref.path,
@@ -692,16 +694,17 @@ def _build_report(args: argparse.Namespace, env: Mapping[str, str]) -> RunReport
         policy=policy_block(summary) if summary else None,
         outputs=redact_outputs(outputs) if isinstance(outputs, dict) else None,
         terraform_exit_code=args.terraform_exit_code,
-        error=error_block(_error_message(args, status), args.error_class),
+        error=error_block(message, args.error_class, signals),
     )
 
 
-def _error_message(args: argparse.Namespace, status: str) -> str:
-    """--error-message, else the excerpt of --error-log for a failed stage."""
+def _error_message(args: argparse.Namespace, status: str) -> tuple[str, list[str] | None]:
+    """--error-message, else the redacted excerpt of --error-log for a failed stage, with its
+    classification signals (sent as their own field)."""
     if args.error_message or status != "failed" or args.error_log is None:
-        return args.error_message
+        return args.error_message, None
     text = _read_text(args.error_log)
-    return error_excerpt(text) if text else ""
+    return (error_excerpt(text), error_signals(text)) if text else ("", None)
 
 
 def _client(args: argparse.Namespace, env: Mapping[str, str]) -> IacpApiClient:
