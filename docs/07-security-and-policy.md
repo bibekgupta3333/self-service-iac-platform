@@ -103,7 +103,7 @@ policies/
 │   ├── placement.rego                 # iacp.placement   (allowed regions; instance sizes are planned)
 │   ├── forbidden.rego                 # iacp.forbidden   (pinned module source, force_destroy outside development, data external/http, provisioners)
 │   ├── modules.rego                   # iacp.modules     (module calls pinned to a yanked version, from the API context)
-│   ├── budget.rego                    # iacp.budget      (planned; input = infracost JSON)
+│   ├── budget.rego                    # iacp.budget      (team budget: context.budget + the Infracost estimate in context.estimated_monthly_cost_usd)
 │   ├── prod_approval.rego             # iacp.approval    (planned; pre-apply gate)
 │   └── *_test.rego                    # opa test cases; CI gate: coverage >= 90 %
 ├── example-plan.sh                    # plans a module's examples/complete and runs conftest with its policy-context*.json
@@ -128,7 +128,8 @@ curl -sf -H "Authorization: Bearer $OIDC" "$IACP_API/v1/internal/budget-context?
 # Default namespace `main` aggregates every iacp.* plan package (tags, encryption, s3,
 # iam, placement, forbidden), so no rule can be left out by a missing --namespace.
 conftest test plan.json      --policy policies/opa --data context.json --output json > opa-plan.json
-conftest test infracost.json --policy policies/opa --data context.json --namespace iacp.budget --output json > opa-budget.json
+# The budget gate is its own job (`budget` in pr-validate.yml, see 6.7): it runs after the
+# cost job, because the estimate does not exist when the plan is evaluated.
 ```
 
 `context.json` (served by the API) — exposed in Rego as `data.iacp.context`:
@@ -141,8 +142,11 @@ conftest test infracost.json --policy policies/opa --data context.json --namespa
       "team": "payments",
       "stack": "order-events",
       "allowed_regions": ["us-east-1", "us-west-2"],
-      "budget": { "limit_usd": 2000.0, "spent_usd": 1450.10, "hard_block": true },
-      "budget_override": null,
+      "budget": { "month": "2026-11", "limit_usd": 2000.0, "spent_usd": 1450.10, "actual_usd": null, "hard_block": true },
+      "budget_override": { "granted_by": "ada", "reason": "launch week capacity", "expires_at": "2026-12-01T00:00:00Z", "max_delta_usd": 750 },
+      "current_committed_usd": 1450.10,
+      "estimated_monthly_cost_usd": 120.50,
+      "budget_gate": true,
       "yanked_module_versions": [ { "module": "s3", "version": "1.1.0", "tag": "modules/s3/v1.1.0" } ],
       "exceptions": [
         { "rule_id": "iacp.encryption.sqs_kms", "resource_address": "module.legacy_queue.aws_sqs_queue.this",
@@ -154,9 +158,9 @@ conftest test infracost.json --policy policies/opa --data context.json --namespa
 }
 ```
 
-The API serves this document from `GET /v1/internal/budget-context` ([03 §6.9](03-data-model-and-api.md#69-pipeline-runs-actions-callbacks)) to `pr-validate.yml` and `apply.yml` (route class `budget_context`). Until the workflows call it (WBS 5.2/5.6), CI builds a reduced context from `iacp.stack.json` with `tools.stack_pipeline context`, which has no budget and no yanked versions.
+The API serves this document from `GET /v1/internal/budget-context` ([03 §6.9](03-data-model-and-api.md#69-pipeline-runs-actions-callbacks)) to `pr-validate.yml` and `apply.yml` (route class `budget_context`). The validate job still builds a reduced context from `iacp.stack.json` with `tools.stack_pipeline context`, which has no budget and no yanked versions; the budget job builds its own with `context --budget-gate` (6.7). `estimated_monthly_cost_usd` and `budget_gate` appear only in the budget job's context, and only `tools.stack_pipeline` sets them: the API never does.
 
-**Accepted exposure.** The `budget_context` route class is not bound to the stacks a pull request changes: a `pr-validate.yml` token (whose workflow file the PR author controls) can read the context of any `stack_path`, and so any team's monthly budget, spend estimate, allowed regions and the yanked-version list. The data is read-only and low sensitivity, and nothing is written. Binding `stack_path` to the PR's changed stacks (from the webhook-recorded PR files) is the planned tightening if budgets become sensitive.
+**Accepted exposure.** The `budget_context` route class is not bound to the stacks a pull request changes: a `pr-validate.yml` token (whose workflow file the PR author controls) can read the context of any `stack_path`, and so any team's monthly budget, spend estimate, allowed regions and the yanked-version list. The data is read-only and low sensitivity, and nothing is written. Since WBS 8.5 the document also carries the team's `actual_usd`, the committed cost of its other stacks and any budget override (the admin's login, the reason text, the expiry and the bound), so the reason must not hold anything sensitive. Binding `stack_path` to the PR's changed stacks (from the webhook-recorded PR files) is the planned tightening if budgets become sensitive.
 
 Rules emit `deny` (blocking) and `warn` (comment only). Each message is prefixed by a stable rule ID used by exceptions and metrics.
 
@@ -433,50 +437,42 @@ deny contains m if {
 
 ### 6.7 Budget limit
 
-Input is Infracost's JSON output (`infracost breakdown --format json --compare-to infracost-base.json`).
+`policies/opa/budget.rego` (`iacp.budget`) denies a change whose estimated monthly cost would push the team's month over a hard budget, denies a single stack above a cap, and warns near the limit. It reads `data.iacp.context` only; the plan is input only to recognise a change that adds nothing. Decisions and deferrals: [ADR-0014](adr/0014-budget-gate-inputs-and-deferrals.md).
 
-```rego
-# policies/opa/budget.rego
-package iacp.budget
+| Context key | Source | Meaning |
+|---|---|---|
+| `budget` | API (`GET /v1/internal/budget-context`) | `limit_usd`, `spent_usd` (committed estimates), `actual_usd` (recorded actual, may be null), `hard_block`, `month`, optional `single_change_cap_usd` (none unless set). Absent or null: no budget, nothing to enforce. An optional `warn_pct` overrides the 80 percent warning threshold. |
+| `current_committed_usd` | API | The committed monthly cost of the team's *other* active stacks in the budget's scope (this stack excluded; one environment for an environment budget, all for a team-wide one). |
+| `budget_override` | API | An admin override (`granted_by`, `reason`, `expires_at`, `max_delta_usd`), granted with `PUT /v1/teams/{slug}/budgets/{month}`. |
+| `estimated_monthly_cost_usd` | `tools.stack_pipeline context --budget-gate`, from the isolated cost job's Infracost output | One plain number: the stack's whole monthly cost as planned (not a delta). Missing when Infracost did not run, reported no total, a negative total or a non-USD currency. |
+| `budget_gate` | `tools.stack_pipeline` | `true` only in the budget job. Only then does a missing estimate count; the validate job evaluates every rule before any estimate exists. |
 
-import rego.v1
+Already used is the largest of `spent_usd`, `actual_usd` and `current_committed_usd`; projected is used plus the estimate. Rules (every message names the stack and the fix):
 
-ctx := data.iacp.context
+| Rule | Level | When |
+|---|---|---|
+| `iacp.budget.exceeded` | deny | Estimate above zero, projected above the limit, the budget is a hard block (`hard_block` is anything but `false`) and no override is in effect. |
+| `iacp.budget.exceeded_waived` | warn | The same, but the budget is advisory or an override is in effect. |
+| `iacp.budget.single_change_cap` | deny | The budget sets a `single_change_cap_usd` and the estimate is above it, whatever the headroom, **even on an advisory budget** (`hard_block` false only turns the over-limit rule into a warning; the cap still denies), and no override covers the excess. There is no default cap: the estimate is the whole stack, not the change, so a default would block every update of an existing stack above it; an admin opts in per budget. |
+| `iacp.budget.single_change_cap_waived` | warn | The same, with an override in effect. |
+| `iacp.budget.near_limit` | warn | Projected is at or above 80 percent of the limit and not over it. |
+| `iacp.budget.no_estimate` | deny / warn | A budget is set, the gate is on and there is no usable estimate. **Development: warn** (the estimate is informational there; a development budget holds only while Infracost succeeds). **Staging, production and an unknown environment: deny** while the budget is a hard block, otherwise warn. Cost data that cannot be read never reads as free, and an override cannot waive it. |
+| `iacp.budget.invalid` | deny | The budget object has no numeric `limit_usd`. |
 
-delta := to_number(input.diffTotalMonthlyCost)
+A plan that creates or updates nothing (destroy only, or no change) adds no cost and always passes, so a team over budget can free budget; a missing plan is not assumed to be one. **The override** waives a hard limit or the cap in development and staging only, until its `expires_at` (judged against the API's `now`), and only while the overrun it allows is at most its `max_delta_usd` (`projected - limit` for the limit, `estimate - cap` for the cap), so several stacks under one override cannot overrun by more than that each; without an estimate there is nothing to bound, so it never makes a missing estimate acceptable. It never waives anything in production, and an unknown environment counts as production: the denial message then says so. The API refuses an override on a production-scoped budget. Budget rules are not waivable through policy exceptions (they do not use `exempt()`). Usage-based resources are priced at zero usage by Infracost, so the estimate is a floor. With Infracost disabled (`vars.INFRACOST_ENABLED` not `true`), every staging and production change of a team that has a hard budget is denied (`no_estimate`): enable Infracost before setting such a budget.
 
-projected := ctx.budget.spent_usd + delta
+**The limit is per stack until the committed cost is recorded.** `current_committed_usd` is read from `stacks.committed_monthly_usd`, written by `POST /v1/internal/budget-committed`. Nothing calls it yet (`apply.yml` does not price a plan; ADR-0014), and `spent_usd` is not filled either, so today `used` is 0 and each stack is compared alone with the team's whole limit: spend split over several stacks, each under the limit, is not caught. This is a known gap with a tracked follow-up (WBS 8.5), not a property of the design.
 
-override_ok if {
-	o := ctx.budget_override
-	o != null
-	delta <= o.max_delta_usd
-	time.parse_rfc3339_ns(o.expires_at) > time.parse_rfc3339_ns(ctx.now)
-}
+**Trust boundary.** `pr-validate.yml` runs the PR's own workflow, `tools/`, `policies/` and *stack root*, so a gate that took its inputs from them could be talked out of its answer. What is and is not guaranteed:
 
-deny contains msg if {
-	ctx.budget.hard_block
-	delta > 0
-	projected > ctx.budget.limit_usd
-	not override_ok
-	msg := sprintf("[iacp.budget.exceeded] change adds %.2f %s/month; projected %.2f exceeds %s budget %.2f (remaining %.2f). Ask an admin for an override.",
-		[delta, "USD", projected, ctx.team, ctx.budget.limit_usd, ctx.budget.limit_usd - ctx.budget.spent_usd])
-}
+- **No PR program runs at plan time.** `terraform plan` runs code (`data "external"` starts a program, `data "http"` calls out, a provider is a binary), and the OPA `iacp.forbidden.*` rules only see those constructs in the plan JSON, after they ran. The `validate` job therefore runs `tools.stack_pipeline check-stack` from the **base commit** before `terraform init`: a stack root may contain only `terraform`, `provider`, `module`, `variable`, `output`, `locals` and `moved` blocks (so no `resource`, `data` or provisioner), providers only from `hashicorp/aws` and `hashicorp/random` (in code and in `.terraform.lock.hcl`), the `local` or `s3` backend, module sources only the platform repository at an exact `modules/<name>/vX.Y.Z` tag, no JSON configuration and no symlinks. The root may hold **only the files the generator writes** (plus the lock): any directory, so no committed `.terraform/providers/...` binary that `terraform init -lockfile=readonly` would reuse without a download or signature check, no `.terraform.d`, no dotfile, no extra file. The lock's **pins** must already exist on the base commit: every provider version and every quoted string in its `hashes` list must appear in a lock file of the base checkout, so a lock that names a provider package the PR made up is refused. Because Terraform decodes HCL string escapes and templates and a scanner does not, any backslash, `${`, `%{` or heredoc (`<<`) in the lock file is refused outright (`terraform init` never writes one), the lock is read with `#`, `//` and `/* */` comments stripped outside strings (a commented-out `hashes = [...]`, or a `]` in a comment, cannot steer the pin check), the `hashes` list is read to its real end with the string scanner, and a provider block with zero or several `version` or `hashes` attributes is refused: `"h1:...\u003d"` would otherwise read as a hash the pin check never saw. The Terraform plugin cache lives under `$RUNNER_TEMP`, not in the checkout, `rm -rf .terraform` precedes `init`, and `pr-validate.yml` restores no provider cache and no TFLint plugin cache at all, and keeps both plugin directories under `$RUNNER_TEMP`: caches saved on a PR's own ref are restorable by that PR's later runs, so a poisoned provider package or TFLint plugin binary saved by an earlier run (with a changed workflow) would otherwise sit where a later, clean-looking run's `init` or `tflint` finds it (TFLint runs before `terraform plan`, so it could rewrite the tools or the plan). `apply.yml` and `drift.yml` run on `main` and restore only with an exact key. (Not done: recomputing the `h1:` of each package under `.terraform/providers` after `init` and comparing it with the base allow-list.) The check runs under `python -I` from the base checkout, so nothing in the PR's tree can shadow it, and if the base has the guard and it fails the step fails (there is no fallback; only the one change that introduces the guard, which has no base copy, uses its own). Generated stacks satisfy it by construction. Without it a team-owned stack root could rewrite `cost.py` or `plan.json` at plan time and have the isolated cost job price a forged plan.
+- The `budget` job checks out the **base commit**: the policy, the context builder and the parser it runs are the target branch's, whatever the PR changes in `policies/` or `tools/`.
+- The estimate comes **only** from the `cost-<id>` artifact of this run, and only when the `cost` job succeeded: the output of the pinned, checksum-verified Infracost binary on the redacted plan, in the one job with `INFRACOST_API_KEY`. The budget job has no key and reads nothing from the PR's stack directory: identity is the detected stack path (`--stack-dir` is refused). Any `estimated_monthly_cost_usd` or `budget_gate` found elsewhere, including in the API's document, is discarded, and a total that is not a non-negative USD number becomes "missing", which is denied in staging and production.
+- The budget, the override, the committed total and the clock come from the Platform API over OIDC; the document must name the same environment, team, stack and path or the job fails.
+- **Residual risk, stated plainly.** The workflow file itself is the PR's version, so a PR that edits `.github/workflows/`, `tools/` or `policies/` could change the gate; those paths are platform-owned in CODEOWNERS and need a platform review, the boundary every gate in this workflow rests on. A hole in the static check would reopen the plan-time path. The artifact hand-off between jobs is only as strong as the workflow that uploads and downloads it. **The pre-apply gate that re-evaluates policy from `main` at apply time (WBS 8.8) is the only backstop** for these; until it exists, the `pr-validate` budget job is a strong early check, not the last word.
+- With the API unconfigured (local-first, ADR-0009) there is no budget, nothing is enforced and the cost stays informational. With it configured, a failed budget fetch fails the job (an unreadable budget is not an absent one); a fork PR, which gets no OIDC token, therefore cannot pass the gate once budgets exist. `pr-validate-result` requires the budget job to succeed or be skipped.
 
-warn contains msg if {
-	delta > 0
-	projected > 0.8 * ctx.budget.limit_usd
-	projected <= ctx.budget.limit_usd
-	msg := sprintf("[iacp.budget.near_limit] projected spend %.2f is above 80%% of budget %.2f", [projected, ctx.budget.limit_usd])
-}
-
-# Single change sanity cap regardless of budget headroom.
-deny contains msg if {
-	delta > 5000
-	not override_ok
-	msg := sprintf("[iacp.budget.single_change_cap] change adds %.2f/month (> 5000); admin override required", [delta])
-}
-```
+**Actuals and committed cost.** `POST /v1/internal/budget-actuals` records `actual_usd` and `POST /v1/internal/budget-committed` records a stack's committed monthly cost. Both accept only the shared internal token (no OIDC workflow is in their route class, so a workflow token minted from a pull-request workflow file cannot call them). The token is a repository secret: a same-repo PR that edits a workflow can read it, which is the same known limit as above, so it should live in a GitHub Environment restricted to `main` before budgets are relied on. Pulling Cost Explorer by the `iacp:team` tag into `actual_usd` is not built: Cost Explorer is not available under LocalStack (ADR-0009).
 
 ### 6.8 Production requires approvals (pre-apply gate)
 

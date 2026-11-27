@@ -154,6 +154,9 @@ func run() error {
 		return err
 	}
 
+	budgetAdmin := httpapi.NewBudgetAdminHandler(budgets.NewAdminService(
+		budgets.NewPostgresAdminRepository(pool, auditWriter, clock), clock))
+
 	deps := httpapi.Deps{
 		Logger:   logger,
 		Auth:     ua.Authenticator,
@@ -167,6 +170,7 @@ func run() error {
 			httpapi.NewDriftHandler(driftSvc),
 			httpapi.NewTTLHandler(ttlSvc),
 			httpapi.NewAuditHandler(audit.NewVerifier(pool)),
+			budgetAdmin,
 			ua.Handler,
 		},
 		PublicHandlers: ua.Public,
@@ -179,6 +183,7 @@ func run() error {
 			httpapi.NewRequestLookupHandler(requestSvc),
 			httpapi.NewTTLReaperHandler(ttlSvc),
 			httpapi.NewBudgetContextHandler(budgets.NewService(budgets.NewPostgresRepository(pool), clock)),
+			budgetAdmin.Internal(),
 			httpapi.NewDriftIngestHandler(driftSvc),
 		},
 		Webhooks:         []httpapi.RouteRegistrar{webhookHandler},

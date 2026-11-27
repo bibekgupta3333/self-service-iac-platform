@@ -38,27 +38,58 @@ func (r *PostgresRepository) Environment(ctx context.Context, name string) (Envi
 // MonthlyBudget implements Repository.
 func (r *PostgresRepository) MonthlyBudget(ctx context.Context, team, env string, month time.Time) (*Budget, error) {
 	b := Budget{Month: month}
-	var envSpecific bool
+	var (
+		envSpecific bool
+		ov          struct {
+			by     *string
+			reason *string
+			expiry *time.Time
+			delta  *float64
+		}
+	)
 	err := r.db.QueryRow(ctx, `
-		SELECT b.limit_usd::float8, b.spent_usd::float8, b.hard_block, b.environment_id IS NOT NULL
+		SELECT b.limit_usd::float8, b.spent_usd::float8, b.actual_usd::float8, b.hard_block, b.environment_id IS NOT NULL,
+		       o.github_login::text, b.override_reason, b.override_expires_at, b.override_max_delta_usd::float8,
+		       b.single_change_cap_usd::float8
 		FROM budgets b
 		JOIN teams t ON t.id = b.team_id
 		LEFT JOIN environments e ON e.id = b.environment_id
+		LEFT JOIN users o ON o.id = b.override_by
 		WHERE t.slug = $1 AND b.month = $3::date
 		  AND (b.environment_id IS NULL OR e.name::text = $2)
 		ORDER BY b.environment_id IS NULL
-		LIMIT 1`, team, env, month).Scan(&b.LimitUSD, &b.SpentUSD, &b.HardBlock, &envSpecific)
+		LIMIT 1`, team, env, month).Scan(&b.LimitUSD, &b.SpentUSD, &b.ActualUSD, &b.HardBlock, &envSpecific,
+		&ov.by, &ov.reason, &ov.expiry, &ov.delta, &b.SingleChangeCapUSD)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("load budget for %s/%s: %w", team, env, err)
 	}
+	if ov.by != nil && ov.reason != nil && ov.expiry != nil && ov.delta != nil {
+		b.Override = &Override{GrantedBy: *ov.by, Reason: *ov.reason, ExpiresAt: *ov.expiry, MaxDeltaUSD: *ov.delta}
+	}
 	b.Scope = ScopeTeam
 	if envSpecific {
 		b.Scope = ScopeEnvironment
 	}
 	return &b, nil
+}
+
+// CommittedUSD implements Repository.
+func (r *PostgresRepository) CommittedUSD(ctx context.Context, team, env, excludePath string) (float64, error) {
+	var total float64
+	err := r.db.QueryRow(ctx, `
+		SELECT coalesce(sum(s.committed_monthly_usd), 0)::float8
+		FROM stacks s
+		JOIN teams t ON t.id = s.team_id
+		JOIN environments e ON e.id = s.environment_id
+		WHERE t.slug = $1 AND s.status <> 'destroyed' AND s.path <> $3
+		  AND ($2 = '' OR e.name::text = $2)`, team, env, excludePath).Scan(&total)
+	if err != nil {
+		return 0, fmt.Errorf("sum committed cost of %s: %w", team, err)
+	}
+	return total, nil
 }
 
 // YankedVersions implements Repository.

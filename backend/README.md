@@ -28,7 +28,7 @@ internal/
   stacks/                read side of stacks: list/show scoped to the caller's teams, Postgres repo
   locks/                 per-stack platform lock: pure Decide/NextInQueue/CheckToken, Service, Postgres repo
   auth/                  GitHub Actions OIDC: claim allow-lists (pure), JWKSCache, Verifier, jti ReplayGuard
-  budgets/               policy context for conftest: pure ParseStackPath / BuildContext, Service, Postgres repo
+  budgets/               policy context for conftest (pure ParseStackPath / BuildContext, Service, Postgres repo) and budget administration (pure NewWrite validation and AuditEvents, AdminService, PostgresAdminRepository)
   drift/                 drift reports: pure ClassifyExit/NextHealth/Allowed/Validate, Service (Record, Resolve), Postgres repo,
                          RequestReconciler adapter onto requests.Service.ReconcileStack
   runs/                  POST /v1/runs reports: pure Validate/CheckProvenance/RunStatus/Progress, Service (drives apply reports into requests and stacks), Postgres repo
@@ -85,6 +85,7 @@ together apply each migration once.
 | `0010_outbox_purge.sql` | `purge_processed_outbox(cutoff, max_rows)`, a `SECURITY DEFINER` function that deletes only processed outbox rows; `iacp_app` gets `EXECUTE` on it and still no `DELETE` on `outbox` |
 | `0011_stack_health.sql` | `stacks.health` (`unknown`, `healthy`, `degraded`), set from the post-apply smoke test |
 | `0013_drift_reports.sql` | `drift_result`, `drift_status`, `drift_reports` (one row per drift.yml run and stack, CHECKs tie result, status, counts and resolution together) and `stacks.health` widened with `drifted` ([ADR-0013](../docs/adr/0013-drift-in-stack-health.md)); `iacp_app` gets SELECT/INSERT and UPDATE on the resolution columns only, no DELETE |
+| `0014_budget_admin.sql` | `budgets`: `updated_by`, `updated_at`, `override_reason`, `override_expires_at`, `override_max_delta_usd` (set or null with `override_by`; a half-made override from 0007 is cleared), `single_change_cap_usd`, `actual_usd`, `actual_recorded_at`; limit, cap and threshold bounds; `stacks.committed_monthly_usd` and `committed_at` |
 
 ### Database roles
 
@@ -193,6 +194,8 @@ docker run --rm -p 127.0.0.1:8080:8080 -e IACP_AUTH_MODE=dev \
 | GET | `/v1/internal/drift/stacks?limit=` | machine auth (`drift` class: `drift.yml` on main, `schedule`/`workflow_dispatch`); the stacks to check: settled, not locked, least recently checked first, at most 256 |
 | POST | `/v1/internal/drift` | machine auth (`drift` class); one drift check of one stack from `drift.yml`: stores a `drift_reports` row, sets `stacks.health`, audits it; `409 stack_not_checkable` for a stack that is mid-change, `403 run_mismatch` / `workflow_not_allowed`; a replay of the same run returns the stored report (`replayed: true`) |
 | GET | `/v1/internal/budget-context?stack_path=` | machine auth (`budget_context` class); conftest `--data` document for the stack (below) |
+| GET, PUT | `/v1/teams/{slug}/budgets[/{month}]` | admin only: `GET` lists, `PUT /v1/teams/{slug}/budgets/{month}` sets a monthly budget (below) |
+| POST | `/v1/internal/budget-actuals`, `/v1/internal/budget-committed` | shared internal token only (`budget_actuals` class, no workflow); record `actual_usd` and a stack's committed monthly cost |
 | GET | `/v1/catalog/modules?category=&status=` | modules with `latest_version` |
 | GET | `/v1/catalog/modules/{name}` | module + latest version detail |
 | GET | `/v1/catalog/modules/{name}/versions` | SemVer descending |
@@ -338,9 +341,9 @@ keep `/metrics` off the proxied listener. A separate internal metrics listener i
 `GET /v1/internal/budget-context?stack_path=environments/<env>/<team>/<stack>` (alias `stack=`)
 returns `{"iacp": {"context": {…}}}`, ready for `conftest --data`, where the policies read it as
 `data.iacp.context`: `environment`, `team`, `stack`, `stack_path`, `allowed_regions` (from
-`environments`), `budget` (`month`, `limit_usd`, `spent_usd`, `hard_block`, `scope`; the
+`environments`), `budget` (`month`, `limit_usd`, `spent_usd`, `actual_usd`, `hard_block`, `scope`; the
 environment-specific row wins over a team-wide one; `null` when no budget is set), `budget_override`
-(always `null` until WBS 8.5), `exceptions` (always `[]` until policy exceptions are stored),
+(`granted_by`, `reason`, `expires_at`, or `null`), `exceptions` (always `[]` until policy exceptions are stored),
 `yanked_module_versions` (`module`, `version`, `tag`; every version of a yanked module too) and
 `now`. Everything is derived from the path, so it works for a stack a PR is about to create.
 `422 invalid_stack_path`, `404 environment_not_found`.
@@ -369,6 +372,26 @@ environment-specific row wins over a team-wide one; `null` when no budget is set
   (logged at startup). `ttl.WarningNotifier` is the outbox handler for `ttl.warning`.
 - The caller is the hourly `.github/workflows/ttl-reaper.yml` through `tools/ttl_reaper`; there is no
   in-process scheduler, so a stopped API simply catches up on the next run.
+
+## Budgets (docs/06 §10, docs/07 §6.7)
+
+`PUT /v1/teams/{slug}/budgets/{month}` (`month` = `YYYY-MM`) and `GET /v1/teams/{slug}/budgets[/{month}]`
+are admin only. `DefaultPolicies` requires the admin role in some team (`budget.set`) and
+`budgets.AdminService` requires it in the team named in the path (platform admins count
+everywhere); a route with no policy entry is a `403`. `budgets.NewWrite` validates everything in
+one pure pass and reports every problem as a field error: `limit_usd` 0 to 1,000,000 with at most
+two decimals, `currency` empty or `USD`, `environment` one of the three or omitted (team-wide),
+`alert_thresholds` 1 to 200 (default 50, 80, 100), an optional `single_change_cap_usd` (none unless set), and an
+`override` (`reason` 20 to 500 characters, `expires_at` within 31 days, a required `max_delta_usd`
+bound) that waives a hard limit or the cap outside production only and is refused on a
+production-scoped budget. The budget context also sums `stacks.committed_monthly_usd` over the
+team's other active stacks (`current_committed_usd`, `Repository.CommittedUSD`); nothing records it
+yet (ADR-0014), so until then the limit is effectively per stack. Writes and their
+audit events (`budget.set`, `budget.override.granted`, `budget.override.revoked`) share one
+transaction. `POST /v1/internal/budget-actuals` takes `{team, environment?, month, actual_usd}` and
+accepts only the shared internal token: no OIDC workflow is in its route class, so a pull-request
+token cannot move the spend the budget gate reads. Cost Explorer is not wired (not available under
+LocalStack), so nothing calls it yet. Field-level API: [03 §6.7](../docs/03-data-model-and-api.md#67-budgets-and-exceptions).
 
 ## Stack lock (docs/06 §3)
 

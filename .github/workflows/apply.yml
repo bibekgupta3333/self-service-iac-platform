@@ -199,7 +199,6 @@ jobs:
       AWS_ENDPOINT_URL: http://localhost:4566
       STACK_ID: ${{ matrix.stack.id }}
       STACK_PATH: ${{ matrix.stack.path }}
-      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform.d/plugin-cache
       PYTHONPATH: ${{ github.workspace }}
       IACP_API_URL: ${{ vars.IACP_API_URL }}
       IACP_OIDC_AUDIENCE: ${{ vars.IACP_OIDC_AUDIENCE }}
@@ -214,6 +213,12 @@ jobs:
           # Full history: module pins are checked against origin.
           fetch-depth: 0
           persist-credentials: false
+
+      # A plugin cache inside the checkout would let the PR commit provider binaries that
+      # `terraform init` reuses without any download or signature check; keep it outside.
+      - name: Keep the Terraform plugin cache outside the checkout
+        working-directory: .
+        run: echo "TF_PLUGIN_CACHE_DIR=$RUNNER_TEMP/terraform-plugin-cache" >> "$GITHUB_ENV"
 
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
@@ -239,16 +244,16 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/bin" conftest
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
-      # Same provider cache and key as pr-validate (WBS 5.4). A cache saved here on
-      # main is also restorable by every PR; init still verifies the providers
-      # against the committed .terraform.lock.hcl. apply runs no TFLint, so it needs
-      # no plugin cache.
+      # Provider cache (WBS 5.4), exact key only: this workflow runs on main, so the cache it
+      # restores is main's own (a PR cannot save into main's scope), and there is no
+      # restore-keys fallback to a cache saved under another lock. init still verifies the
+      # providers against the committed .terraform.lock.hcl. apply runs no TFLint, so it
+      # needs no plugin cache.
       - name: Cache Terraform providers
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ env.TF_PLUGIN_CACHE_DIR }}
           key: tf-providers-${{ runner.os }}-${{ hashFiles(format('{0}/.terraform.lock.hcl', matrix.stack.path)) }}
-          restore-keys: tf-providers-${{ runner.os }}-
 
       # The lock and request-lookup routes accept OIDC tokens only from apply.yml on
       # main via push or workflow_dispatch (auth.RouteLocks, auth.RouteRequestLookup).
@@ -285,6 +290,7 @@ jobs:
       - id: init
         name: terraform init (local backend)
         run: |
+          rm -rf .terraform
           mkdir -p "$TF_PLUGIN_CACHE_DIR"
           terraform init -input=false -lockfile=readonly -no-color
 

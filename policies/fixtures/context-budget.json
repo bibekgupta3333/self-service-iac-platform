@@ -1,0 +1,30 @@
+{
+  "iacp": {
+    "context": {
+      "environment": "staging",
+      "team": "payments",
+      "stack": "orders",
+      "stack_path": "environments/staging/payments/orders",
+      "allowed_regions": [
+        "us-east-1",
+        "us-west-2"
+      ],
+      "exceptions": [],
+      "now": "2026-11-24T10:05:00Z",
+      "yanked_module_versions": [],
+      "budget": {
+        "month": "2026-11",
+        "limit_usd": 2000,
+        "spent_usd": 1500,
+        "actual_usd": null,
+        "hard_block": true,
+        "scope": "team",
+        "single_change_cap_usd": 5000
+      },
+      "current_committed_usd": 0,
+      "budget_override": null,
+      "budget_gate": true,
+      "estimated_monthly_cost_usd": 600
+    }
+  }
+}
