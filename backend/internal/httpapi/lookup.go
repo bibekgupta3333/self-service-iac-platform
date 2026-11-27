@@ -9,6 +9,7 @@ import (
 
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/auth"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/requests"
 )
 
@@ -31,16 +32,21 @@ func (h *RequestLookupHandler) Routes(r chi.Router) {
 }
 
 type applyTargetDTO struct {
-	StackID          uuid.UUID         `json:"stack_id"`
-	StackPath        string            `json:"stack_path"`
-	RequestID        uuid.UUID         `json:"request_id"`
-	RequestShortID   string            `json:"request_short_id"`
-	Kind             requests.Kind     `json:"kind"`
-	Status           requests.Status   `json:"status"`
-	FencingToken     int64             `json:"fencing_token"`
-	ApprovedPlanHash string            `json:"approved_plan_hash,omitempty"`
-	MergeCommitSHA   string            `json:"merge_commit_sha,omitempty"`
-	Links            map[string]string `json:"links"`
+	StackID          uuid.UUID       `json:"stack_id"`
+	StackPath        string          `json:"stack_path"`
+	RequestID        uuid.UUID       `json:"request_id"`
+	RequestShortID   string          `json:"request_short_id"`
+	Kind             requests.Kind   `json:"kind"`
+	Status           requests.Status `json:"status"`
+	FencingToken     int64           `json:"fencing_token"`
+	ApprovedPlanHash string          `json:"approved_plan_hash,omitempty"`
+	MergeCommitSHA   string          `json:"merge_commit_sha,omitempty"`
+	Environment      string          `json:"environment"`
+	RequestedBy      string          `json:"requested_by,omitempty"`
+	PRNumber         int             `json:"pr_number,omitempty"`
+	// AllowStatefulDestroy is always present: the pre-apply gate reads it as a boolean.
+	AllowStatefulDestroy bool              `json:"allow_stateful_destroy"`
+	Links                map[string]string `json:"links"`
 }
 
 // get answers ?stack_path=environments/<env>/<team>/<stack>[&head_sha=<40 hex>]. Both
@@ -63,10 +69,22 @@ func (h *RequestLookupHandler) get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
+	// The answer is the lock credential and the approved hash: for a production stack only
+	// a job that passed the production Environment's reviewers may have it (WBS 8.8).
+	p, err := identity.FromContext(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	if err := requests.CheckApplyCaller(t.Environment, p.Workflow); err != nil {
+		writeError(w, r, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, applyTargetDTO{
 		StackID: t.StackID, StackPath: t.StackPath, RequestID: t.RequestID, RequestShortID: t.RequestShortID,
 		Kind: t.Kind, Status: t.Status, FencingToken: t.FencingToken, ApprovedPlanHash: t.ApprovedPlanHash,
-		MergeCommitSHA: t.MergeCommitSHA,
+		MergeCommitSHA: t.MergeCommitSHA, Environment: t.Environment, RequestedBy: t.RequestedBy, PRNumber: t.PRNumber,
+		AllowStatefulDestroy: t.AllowStatefulDestroy,
 		Links: map[string]string{"request": "/v1/requests/" + t.RequestID.String(),
 			"lock": "/v1/internal/stacks/" + t.StackID.String() + "/lock"},
 	})

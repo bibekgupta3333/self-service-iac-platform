@@ -49,6 +49,10 @@ type CreateInput struct {
 	// AcknowledgeBreaking confirms that the caller read the migration notes of an upgrade
 	// that crosses a major; such an upgrade is refused without it.
 	AcknowledgeBreaking bool `json:"acknowledge_breaking,omitempty"`
+	// AllowStatefulDestroy lets an update or destroy delete stateful resources (databases,
+	// buckets, tables, KMS keys) in production. Without it the pre-apply gate denies such a
+	// plan (policies/opa/prod_approval.rego); setting it in production needs a maintainer.
+	AllowStatefulDestroy bool `json:"allow_stateful_destroy,omitempty"`
 }
 
 // Ephemeral requests a stack that is destroyed after TTLHours (non-production only). Zero
@@ -99,6 +103,7 @@ func ValidateShape(in CreateInput) []apperr.FieldError {
 	}
 	validateResourceShapes(in, add)
 	validateUpgradeShapes(in, add)
+	validateStatefulDestroy(in, add)
 	return errs
 }
 
@@ -169,6 +174,14 @@ func validateExistingStackTarget(in CreateInput, add fieldAdder) {
 		if in.ConfirmStackName != "" {
 			add("/confirm_stack_name", "not_allowed", "only a destroy confirms the stack name")
 		}
+	}
+}
+
+// validateStatefulDestroy allows allow_stateful_destroy only on the kinds that can delete
+// resources (update and destroy). Pure.
+func validateStatefulDestroy(in CreateInput, add fieldAdder) {
+	if in.AllowStatefulDestroy && in.Kind != KindUpdate && in.Kind != KindDestroy {
+		add("/allow_stateful_destroy", "not_allowed", "only an update or a destroy can delete stateful resources")
 	}
 }
 
@@ -333,6 +346,9 @@ type NormalizedSpec struct {
 	RollbackOf string `json:"rollback_of,omitempty"`
 	// Upgrades records what an upgrade request moved (absent for other kinds).
 	Upgrades []UpgradeChange `json:"upgrades,omitempty"`
+	// AllowStatefulDestroy is the request's allow_stateful_destroy (update and destroy only),
+	// handed to the pre-apply gate through GET /v1/internal/requests/by-path.
+	AllowStatefulDestroy bool `json:"allow_stateful_destroy,omitempty"`
 }
 
 // Normalize returns the spec to store, with resources sorted by name. Pure.
@@ -349,7 +365,8 @@ func Normalize(in CreateInput, region string) NormalizedSpec {
 		deps = []string{}
 	}
 	return NormalizedSpec{Team: in.Team, Environment: in.Environment, Stack: in.Stack, Region: region,
-		Ephemeral: in.Ephemeral, Resources: res, DependsOn: deps, RollbackOf: in.RollbackOf}
+		Ephemeral: in.Ephemeral, Resources: res, DependsOn: deps, RollbackOf: in.RollbackOf,
+		AllowStatefulDestroy: in.AllowStatefulDestroy}
 }
 
 // NormalizeForStack returns the spec to store for an update or destroy of an existing

@@ -18,9 +18,14 @@ type fakeLookup struct{ calls [][2]string }
 
 func (f *fakeLookup) ApplyTargetByPath(_ context.Context, path, head string) (requests.ApplyTarget, error) {
 	f.calls = append(f.calls, [2]string{path, head})
+	env := ""
+	if parts := strings.Split(path, "/"); len(parts) == 4 {
+		env = parts[1]
+	}
 	return requests.ApplyTarget{StackID: lockStack, StackPath: path, RequestID: lockHolder, RequestShortID: "req-7k3p9x",
 		Kind: requests.KindUpdate, Status: requests.StatusApproved, FencingToken: 48214,
-		ApprovedPlanHash: strings.Repeat("ab", 32)}, nil
+		ApprovedPlanHash: strings.Repeat("ab", 32), Environment: env, RequestedBy: "ada", PRNumber: 812,
+		AllowStatefulDestroy: env == "production"}, nil
 }
 
 func lookupRouter(svc RequestLookupService) http.Handler {
@@ -50,6 +55,46 @@ func TestRequestLookupRouteClass(t *testing.T) {
 	}
 	if rec := do(t, h, "GET", lookupURL, ""); rec.Code != 401 {
 		t.Fatalf("the dev user authenticator must not open a machine route: %d", rec.Code)
+	}
+}
+
+// A production stack's lock credential and approved hash go only to an apply.yml job that
+// ran in the production GitHub Environment, i.e. after its required reviewers approved it
+// (WBS 8.8). A job bound to another Environment cannot read a stack of a different one.
+func TestRequestLookupProductionNeedsTheEnvironment(t *testing.T) {
+	h := lookupRouter(&fakeLookup{})
+	const prodURL = "/v1/internal/requests/by-path?stack_path=environments/production/payments/orders"
+	const stagingURL = "/v1/internal/requests/by-path?stack_path=environments/staging/payments/orders"
+	tests := []struct {
+		url, token string
+		status     int
+		code       string
+	}{
+		{prodURL, "applyprod.jwt.token", 200, ""},
+		{prodURL, "apply.jwt.token", 403, "production_environment_required"},
+		{prodURL, "applystaging.jwt.token", 403, "production_environment_required"},
+		{prodURL, testInternalToken, 403, "oidc_required"},
+		{stagingURL, "applystaging.jwt.token", 200, ""},
+		{stagingURL, "apply.jwt.token", 200, ""}, // no Environment: still accepted outside production
+		{stagingURL, "applyprod.jwt.token", 403, "environment_mismatch"},
+		{lookupURL, "applystaging.jwt.token", 403, "environment_mismatch"},
+	}
+	for _, tt := range tests {
+		rec := do(t, h, "GET", tt.url, "", "Authorization", "Bearer "+tt.token)
+		if rec.Code != tt.status || (tt.code != "" && !strings.Contains(rec.Body.String(), `"code":"`+tt.code+`"`)) {
+			t.Errorf("%s with %s: %d %s, want %d %s", tt.url, tt.token, rec.Code, rec.Body, tt.status, tt.code)
+		}
+	}
+	rec := do(t, h, "GET", prodURL, "", "Authorization", "Bearer applyprod.jwt.token")
+	var got struct {
+		Environment          string `json:"environment"`
+		RequestedBy          string `json:"requested_by"`
+		PRNumber             int    `json:"pr_number"`
+		AllowStatefulDestroy *bool  `json:"allow_stateful_destroy"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || got.Environment != "production" || got.RequestedBy != "ada" ||
+		got.PRNumber != 812 || got.AllowStatefulDestroy == nil || !*got.AllowStatefulDestroy {
+		t.Fatalf("production body = %s (%+v, %v)", rec.Body, got, err)
 	}
 }
 

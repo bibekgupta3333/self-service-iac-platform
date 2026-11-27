@@ -44,5 +44,9 @@ func (r *PostgresRepository) StackHolder(ctx context.Context, path string) (Stac
 		return StackHolder{}, err
 	}
 	h.Lock, h.Request = &l, req
+	err = tx.QueryRow(ctx, `SELECT github_login FROM users WHERE id = $1`, req.CreatedBy).Scan(&h.RequesterLogin)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return StackHolder{}, fmt.Errorf("query request author: %w", err)
+	}
 	return h, nil
 }
