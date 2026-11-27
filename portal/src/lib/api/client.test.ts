@@ -85,6 +85,16 @@ describe("ApiClient catalog", () => {
     expect(await client(f.fetch).listVersions("sqs")).toEqual([{ version: "1.0.0" }]);
     expect(f.calls[0]?.url).toBe("http://api.test/v1/catalog/modules/sqs/versions");
   });
+
+  it("asks for an upgrade path from the pinned version, optionally up to a target", async () => {
+    const f = fakeFetch(json(200, { module: "sqs", from: "1.2.0", steps: [] }), json(200, { module: "sqs" }));
+    expect((await client(f.fetch).getUpgradePath("sqs", "1.2.0")).from).toBe("1.2.0");
+    await client(f.fetch).getUpgradePath("sqs", "1.2.0", "2.0.0");
+    expect(f.calls.map((c) => c.url)).toEqual([
+      "http://api.test/v1/catalog/modules/sqs/upgrade-path?from=1.2.0",
+      "http://api.test/v1/catalog/modules/sqs/upgrade-path?from=1.2.0&to=2.0.0",
+    ]);
+  });
 });
 
 describe("ApiClient requests", () => {

@@ -145,6 +145,63 @@ func TestGoldenDestroy(t *testing.T) {
 	}
 }
 
+// upgradeSpec is orderEventsSpec after an upgrade request moved orders_queue from sqs 1.3.0
+// to 2.0.0: same inputs, a new pinned ref and commit, the next fencing token.
+func upgradeSpec() StackSpec {
+	s := orderEventsSpec()
+	s.RequestID, s.FencingToken = "req-u8n2qa", 48350
+	s.Resources = slices.Clone(s.Resources)
+	for i := range s.Resources {
+		if s.Resources[i].Name == "orders_queue" {
+			s.Resources[i].Version = catalog.SemVer{Major: 2}
+			s.Resources[i].GitSHA = "3f2e1d0c9b8a7f6e5d4c3b2a1f0e9d8c7b6a5f4e"
+		}
+	}
+	return s
+}
+
+// TestGoldenUpgrade: an upgrade renders exactly like the create it starts from, except for
+// the upgraded module's ref and commit and the request's id and token.
+func TestGoldenUpgrade(t *testing.T) {
+	g := New(repoURL, LocalBackend{}, LocalStackProvider{Endpoint: "http://localhost:4566"})
+	files, err := g.Render(upgradeSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	main := string(files[FileMain])
+	if !strings.Contains(main, "?ref=modules/sqs/v2.0.0") || strings.Contains(main, "modules/sqs/v1.3.0") ||
+		!strings.Contains(main, "?ref=modules/s3/v1.2.0") {
+		t.Fatalf("main.tf must pin only the upgraded module anew:\n%s", main)
+	}
+	before, err := g.Render(orderEventsSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before[FileVariables], files[FileVariables]) || !bytes.Equal(before[FileBackend], files[FileBackend]) {
+		t.Fatal("an upgrade must not change the stack's variables or backend")
+	}
+	dir := filepath.Join("testdata", "golden", "upgrade")
+	for _, name := range files.Names() {
+		path := filepath.Join(dir, name)
+		if *update {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, files[name], 0o644); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		golden, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read golden (run go test ./internal/generator -update): %v", err)
+		}
+		if !bytes.Equal(golden, files[name]) {
+			t.Errorf("%s differs from golden file %s:\n--- got ---\n%s\n--- want ---\n%s", name, path, files[name], golden)
+		}
+	}
+}
+
 func TestLifecycleValidation(t *testing.T) {
 	g := New(repoURL, LocalBackend{}, LocalStackProvider{Endpoint: "http://localhost:4566"})
 	bad := orderEventsSpec()

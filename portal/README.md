@@ -241,6 +241,35 @@ pull request; nothing changes until it is merged.
   tab order as `aria-disabled` with its reason as the description. The API remains the
   authority; a disagreement shows its 403.
 
+## Version upgrades (WBS 8.2)
+
+The stack page has a **Module versions** section. It loads the stack's current spec the same
+way the update page does, then calls `GET /v1/catalog/modules/{module}/upgrade-path?from=<pinned>`
+for each resource (server side; a path that fails to load shows "Upgrade status unknown"
+instead of failing the page).
+
+- `planResourceUpgrade` (`src/lib/request/upgrade.ts`, pure) picks the target: the path's
+  `next`, the newest version at most one major up, because the API refuses an upgrade across
+  two majors. It keeps the steps up to that target and the major steps among them. Versions
+  beyond it are mentioned as a later, separate upgrade.
+- `UpgradeResource` shows the pinned version, a badge ("Up to date", "Patch available",
+  "Upgrade available" or "Major upgrade available"), the path with each step's class
+  (patch/minor/major, deprecated versions flagged) and each version's changelog in a
+  `<details>`. Notes are Markdown from the module's CHANGELOG and are rendered as plain text,
+  never as HTML.
+- **Upgrade to X** opens a modal `<dialog>` (same pattern as Destroy). For a major the
+  migration notes of every major step come first, in an amber panel, and the submit button stays
+  disabled until "I read the migration notes" is ticked; the body then carries
+  `acknowledge_breaking: true`. It posts
+  `{kind: "upgrade", stack_id, upgrades: [{resource, to_version}], justification?}` with an
+  Idempotency-Key bound to the body, as the other forms do, and opens the new request's page.
+- **Errors**: `acknowledge_breaking_required`, `major_jump_too_large`,
+  `upgrade_requires_input_changes`, `invalid_ref`, `module_version_unavailable`,
+  `not_an_upgrade`, `spec_changed` and `no_current_spec` get a title and a next step
+  (`explainUpgradeError`); the rest fall back to the update wording. The API's field errors are
+  listed in the error summary, which takes focus.
+- **Roles and state**: the action follows the Update rules (`stackActions(...).update`).
+
 ## Security headers
 
 Every response carries `Content-Security-Policy` (`src/lib/security/csp.ts`):
@@ -261,7 +290,7 @@ src/components/           presentational components; request/ holds the form
 src/lib/api/              ApiClient (I/O), types, errors, config, proxy rules, factory
 src/lib/auth/             AuthProvider, DevAuthProvider, GithubAuthProvider
 src/lib/schema/           pure schema -> field model, form values <-> inputs, SchemaAdapter
-src/lib/request/          pure stack-field checks, payload builders (create, update, destroy), pointer -> field mapping, Idempotency-Key rules, lifecycle error wording
+src/lib/request/          pure stack-field checks, payload builders (create, update, upgrade, destroy), upgrade targets, pointer -> field mapping, Idempotency-Key rules, lifecycle error wording
 src/lib/events/           SSE parser and status reducer (pure), StatusStream, IdleWatchdog, RequestPoller (injected I/O)
 src/lib/stacks.ts         pure stack filters, health wording, output rows, available actions
 src/lib/format.ts         pure dates, labels, tones, categories, status timeline

@@ -8,9 +8,13 @@ import { ErrorPanel } from "@/components/ErrorPanel";
 import { StatusBadge } from "@/components/StatusTimeline";
 import { DestroyStack } from "@/components/DestroyStack";
 import { StackActionLink } from "@/components/StackActionLink";
+import { UpgradeResource } from "@/components/UpgradeResource";
 import { serverApi, serverAuth } from "@/lib/api/server";
 import { attempt, isNotFound } from "@/lib/api/result";
+import type { ResourceInput, StackSummary } from "@/lib/api/types";
 import { formatDateTime, requestStatusLabel, shortSha } from "@/lib/format";
+import { currentSpecRequest } from "@/lib/request/lifecycle";
+import { planResourceUpgrade, upgradesAvailable } from "@/lib/request/upgrade";
 import { outputRows, stackActions, stackHealth, stackStatusLabel } from "@/lib/stacks";
 
 export const dynamic = "force-dynamic";
@@ -30,6 +34,8 @@ export default async function StackPage({ params }: Props) {
   const health = stackHealth(s.status);
   const outputs = outputRows(s.outputs);
   const actions = stackActions(s, await serverAuth().capabilities());
+  const upgrades = await resourceUpgrades(s);
+  const available = upgradesAvailable(upgrades);
 
   return (
     <article aria-labelledby="stack-title" className="space-y-8">
@@ -71,6 +77,33 @@ export default async function StackPage({ params }: Props) {
           </p>
         )}
       </section>
+
+      {upgrades.length > 0 && (
+        <section aria-labelledby="versions-title" className="space-y-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <h2 id="versions-title" className="text-base font-semibold">
+              Module versions
+            </h2>
+            {available > 0 && (
+              <Badge tone="info">{available === 1 ? "1 upgrade available" : `${available} upgrades available`}</Badge>
+            )}
+          </div>
+          <p className="text-sm text-slate-600">
+            Each resource pins an exact module version. An upgrade keeps the inputs, pins a newer version and opens a pull
+            request; a major version is upgraded one at a time, after its migration notes.
+          </p>
+          <div className="space-y-3">
+            {upgrades.map((u) => (
+              <UpgradeResource
+                key={u.resource}
+                stack={{ id: s.id, name: s.name, environment: s.environment }}
+                upgrade={u}
+                state={actions.update}
+              />
+            ))}
+          </div>
+        </section>
+      )}
 
       <section aria-labelledby="health-title" className="space-y-2 rounded-lg border border-slate-200 bg-white p-5">
         <h2 id="health-title" className="text-base font-semibold">
@@ -166,6 +199,29 @@ export default async function StackPage({ params }: Props) {
         <p className="text-xs text-slate-500">Shown exactly as the platform returns them; sensitive values are never included.</p>
       </section>
     </article>
+  );
+}
+
+/**
+ * resourceUpgrades loads the stack's current resources (the spec of the request that carries
+ * it, as the update page does) and each resource's upgrade path. A path that cannot be loaded
+ * is shown as unknown rather than failing the page.
+ */
+async function resourceUpgrades(stack: StackSummary) {
+  const api = serverApi();
+  let specRequestId = currentSpecRequest(stack, []);
+  if (!specRequestId) {
+    const recent = await attempt(() => api.listRequests({ team: stack.team, limit: 100 }));
+    if (recent.ok) specRequestId = currentSpecRequest(stack, recent.data.data);
+  }
+  if (!specRequestId) return [];
+  const spec = await attempt(() => api.getRequest(specRequestId));
+  const resources: ResourceInput[] = spec.ok ? (spec.data.spec?.resources ?? []) : [];
+  return Promise.all(
+    resources.map(async (r) => {
+      const path = await attempt(() => api.getUpgradePath(r.module, r.version));
+      return planResourceUpgrade(r, path.ok ? path.data : undefined);
+    }),
   );
 }
 

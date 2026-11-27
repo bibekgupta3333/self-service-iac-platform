@@ -16,6 +16,7 @@ import type {
   RequestSummary,
   StackFilter,
   StackSummary,
+  UpgradePath,
   VersionSummary,
 } from "./types";
 
@@ -108,6 +109,13 @@ export class ApiClient {
   async getVersion(name: string, version: string): Promise<ModuleVersion> {
     return (await this.send<ModuleVersion>("GET", `/v1/catalog/modules/${seg(name)}/versions/${seg(version)}`))
       .data;
+  }
+
+  /** getUpgradePath lists the versions after `from` up to `to` (default: the latest), oldest first. */
+  async getUpgradePath(name: string, from: string, to?: string): Promise<UpgradePath> {
+    return (
+      await this.send<UpgradePath>("GET", `/v1/catalog/modules/${seg(name)}/upgrade-path`, { query: { from, to } })
+    ).data;
   }
 
   // ---- requests ----

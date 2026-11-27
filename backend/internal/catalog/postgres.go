@@ -67,7 +67,7 @@ func (r *PostgresRepository) GetModule(ctx context.Context, name string) (Module
 }
 
 const versionCols = `v.id, v.module_id, m.name, v.version, v.git_tag, v.git_sha, v.manifest, v.inputs_schema,
-	v.outputs, v.cost_hints, v.tf_version_range, v.aws_provider_range, coalesce(v.changelog_md, ''), v.status,
+	v.outputs, v.cost_hints, v.tf_version_range, v.aws_provider_range, coalesce(v.changelog_md, ''), coalesce(v.upgrade_notes, ''), v.status,
 	coalesce(v.deprecation_note, ''), v.released_by, v.released_at`
 
 func scanVersion(row pgx.Row) (ModuleVersion, error) {
@@ -79,7 +79,7 @@ func scanVersion(row pgx.Row) (ModuleVersion, error) {
 		costHints        []byte
 	)
 	err := row.Scan(&v.ID, &v.ModuleID, &v.ModuleName, &version, &v.GitTag, &v.GitSHA, &manifest, &schema,
-		&outputs, &costHints, &v.TFVersionRange, &v.AWSProviderRange, &v.Changelog, &v.Status,
+		&outputs, &costHints, &v.TFVersionRange, &v.AWSProviderRange, &v.Changelog, &v.UpgradeNotes, &v.Status,
 		&v.DeprecationNote, &v.ReleasedBy, &v.ReleasedAt)
 	if err != nil {
 		return ModuleVersion{}, err
@@ -182,12 +182,12 @@ func (r *PostgresRepository) Index(ctx context.Context, m Module, v ModuleVersio
 		}
 		tag, err := tx.Exec(ctx, `
 			INSERT INTO module_versions (module_id, version, major, minor, patch, git_tag, git_sha, manifest,
-				inputs_schema, outputs, cost_hints, tf_version_range, aws_provider_range, changelog_md, released_by)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, nullif($14, ''), $15)
+				inputs_schema, outputs, cost_hints, tf_version_range, aws_provider_range, changelog_md, released_by, upgrade_notes)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, nullif($14, ''), $15, nullif($16, ''))
 			ON CONFLICT (module_id, version) DO NOTHING`,
 			moduleID, v.Version.String(), v.Version.Major, v.Version.Minor, v.Version.Patch, v.GitTag, v.GitSHA,
 			[]byte(v.Manifest), []byte(v.InputsSchema), outputs, costHints, v.TFVersionRange, v.AWSProviderRange,
-			v.Changelog, v.ReleasedBy)
+			v.Changelog, v.ReleasedBy, v.UpgradeNotes)
 		if err != nil {
 			if db.IsUniqueViolation(err, "module_versions_git_tag_key") {
 				return apperr.Conflict("version_immutable", "git tag "+v.GitTag+" is already indexed")

@@ -1,0 +1,25 @@
+{
+  "backend": "local",
+  "depends_on": [],
+  "environment": "development",
+  "fencing_token": 48350,
+  "lifecycle": "active",
+  "modules": {
+    "events_bucket": {
+      "ref": "modules/s3/v1.2.0",
+      "sha": "4e1c9a7b2d8f0e3a5c6b7d8e9f0a1b2c3d4e5f60"
+    },
+    "order_processor": {
+      "ref": "modules/lambda/v2.0.1",
+      "sha": "8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c"
+    },
+    "orders_queue": {
+      "ref": "modules/sqs/v2.0.0",
+      "sha": "3f2e1d0c9b8a7f6e5d4c3b2a1f0e9d8c7b6a5f4e"
+    }
+  },
+  "region": "us-east-1",
+  "request_id": "req-u8n2qa",
+  "stack": "order-events",
+  "team": "payments"
+}
