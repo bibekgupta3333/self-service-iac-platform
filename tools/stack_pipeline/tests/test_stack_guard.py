@@ -18,6 +18,7 @@ from tools.stack_pipeline.stack_guard import (
     lock_entries,
     parse_blocks,
     provider_sources,
+    strip_comments,
 )
 
 SRC = "git::https://github.com/bibekgupta3333/self-service-iac-platform.git//modules/s3?ref=modules/s3/v1.0.0"
@@ -136,7 +137,7 @@ class TestCheckStack:
 class TestCheckLock:
     def test_allowed_providers(self):
         assert check_lock("l", GOOD[".terraform.lock.hcl"]) == []
-        assert check_lock("l", 'provider "registry.terraform.io/hashicorp/random" {\n}\n') == []
+        assert check_lock("l", 'provider "registry.terraform.io/hashicorp/random" {\n  version = "3.7.2"\n}\n') == []
 
     @pytest.mark.parametrize("address", ["registry.terraform.io/hashicorp/external", "registry.terraform.io/hashicorp/http",
                                          "evil.example/x/aws", "registry.terraform.io/evil/aws"])
@@ -148,7 +149,7 @@ class TestCheckLock:
         assert [v.rule for v in check_lock("l", 'provider "x" {')] == ["unreadable"]
 
     def test_the_lock_file_is_scanned_through_check_stack(self):
-        files = {**GOOD, ".terraform.lock.hcl": 'provider "registry.terraform.io/hashicorp/external" {\n}\n'}
+        files = {**GOOD, ".terraform.lock.hcl": 'provider "registry.terraform.io/hashicorp/external" {\n  version = "2.3.0"\n}\n'}
         assert rules(files) == ["provider"]
 
 
@@ -388,3 +389,79 @@ class TestEscapedHashes:
             (root / name).write_text(text, encoding="utf-8")
         assert main(["check-stack", str(root), "--lock-from", str(tmp_path / "base")]) == 1
         assert "[lock]" in capsys.readouterr().out
+
+
+def raw_lock(hashes_block, version='version = "5.100.0"', before=""):
+    return (f'provider "registry.terraform.io/hashicorp/aws" {{\n{before}  {version}\n  constraints = "~> 5.80"\n'
+            f'{hashes_block}}}\n')
+
+
+class TestLockComments:
+    """Comments must not steer what the pin check reads (reviewed PoCs: Terraform ignores them, a regex did not)."""
+
+    def pins(self):
+        return lock_allowlist([lock_text()])
+
+    def test_a_comment_hiding_a_closing_bracket_does_not_end_the_list(self):
+        text = raw_lock('  hashes = [\n    "zh:1111", # ]\n    "h1:evil",\n  ]\n')
+        assert lock_entries(text)[0][2] == {"zh:1111", "h1:evil"}
+        (v,) = check_lock_pins("l", text, self.pins())
+        assert v.rule == "lock" and "h1:evil" in v.message
+
+    def test_a_commented_out_hashes_above_the_real_one_is_ignored(self):
+        text = raw_lock('  # hashes = ["zh:1111"]\n  hashes = [\n    "h1:evil",\n  ]\n')
+        assert lock_entries(text)[0][2] == {"h1:evil"}
+        assert [v.rule for v in check_lock_pins("l", text, self.pins())] == ["lock"]
+
+    @pytest.mark.parametrize("comment", ['// hashes = ["zh:1111"]\n', '/* hashes = ["zh:1111"] */\n',
+                                         '/* multi\n line\n hashes = ["zh:1111"]\n */\n', '# version = "5.100.0"\n'])
+    def test_every_comment_form_is_ignored(self, comment):
+        text = raw_lock('  hashes = [\n    "h1:evil",\n  ]\n', before=comment)
+        assert lock_entries(text)[0][2] == {"h1:evil"}
+        assert check_lock_pins("l", text, self.pins()) != []
+
+    def test_a_commented_version_does_not_stand_in_for_the_real_one(self):
+        text = raw_lock('  hashes = [\n    "zh:1111",\n  ]\n', version='# version = "5.100.0"\n  version = "9.9.9"')
+        assert lock_entries(text)[0][1] == "9.9.9"
+        assert [v.rule for v in check_lock_pins("l", text, self.pins())] == ["lock"]
+
+    def test_comment_markers_inside_strings_are_kept(self):
+        text = raw_lock('  hashes = [\n    "zh:11//11",\n    "h1:a#b",\n    "h1:c/*d*/",\n  ]\n')
+        assert lock_entries(text)[0][2] == {"zh:11//11", "h1:a#b", "h1:c/*d*/"}
+
+    def test_a_bracket_inside_a_string_does_not_end_the_list(self):
+        text = raw_lock('  hashes = [\n    "zh:1111]",\n    "h1:evil",\n  ]\n')
+        assert lock_entries(text)[0][2] == {"zh:1111]", "h1:evil"}
+
+    def test_a_heredoc_in_the_lock_is_refused(self):
+        text = raw_lock('  hashes = [\n    <<EOT\nzh:1111\nEOT\n    ,\n  ]\n')
+        found = check_lock("l", text)
+        assert any("heredoc" in v.message for v in found)
+        assert check_stack({**GOOD, ".terraform.lock.hcl": text}, pins=self.pins()) != []
+
+    @pytest.mark.parametrize("hashes", ['  hashes = ["zh:1"]\n  hashes = ["h1:evil"]\n', '  hashes = "zh:1"\n',
+                                        '  hashes = [["zh:1"]]\n'])
+    def test_an_unreadable_hash_list_is_refused(self, hashes):
+        text = raw_lock(hashes)
+        assert any(v.rule == "unreadable" for v in check_lock("l", text))
+        assert check_stack({**GOOD, ".terraform.lock.hcl": text}, pins=self.pins()) != []
+
+    def test_two_version_attributes_are_refused(self):
+        text = raw_lock('  hashes = ["zh:1111"]\n', before='  version = "1.0.0"\n')
+        assert any(v.rule == "unreadable" for v in check_lock("l", text))
+
+    def test_a_missing_hashes_attribute_means_no_hashes_not_a_pass(self):
+        text = raw_lock("")
+        assert lock_entries(text)[0][2] == frozenset()
+        assert [v.rule for v in check_lock_pins("l", text, self.pins())] == ["lock"]
+
+    def test_strip_comments_keeps_line_numbers(self):
+        text = 'a\n/* x\ny */ b # c\n"#" // d\n'
+        out = strip_comments(text)
+        assert out.count("\n") == text.count("\n") and '"#"' in out and "c" not in out.replace("\n", "")
+        with pytest.raises(HclScanError):
+            strip_comments("/* never closed")
+
+    def test_a_real_lock_file_is_unchanged(self):
+        assert lock_entries(lock_text()) == [("hashicorp/aws", "5.100.0", frozenset(AWS_HASHES))]
+        assert check_lock("l", lock_text()) == []

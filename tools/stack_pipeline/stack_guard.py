@@ -283,11 +283,16 @@ def check_lock(path: str, text: str, providers: Iterable[str] = ALLOWED_PROVIDER
     # Terraform decodes HCL string escapes and templates, this scanner does not: "h1:...\u003d" or
     # an interpolation would be a different hash to Terraform than to the pin check. A lock file
     # written by `terraform init` has neither, so refuse them outright.
-    for marker, what in (("\\", "a backslash escape"), ("${", "a ${ template"), ("%{", "a %{ template")):
+    for marker, what in (("\\", "a backslash escape"), ("${", "a ${ template"), ("%{", "a %{ template"),
+                         ("<<", "a heredoc")):
         if marker in text:
             line = text[:text.index(marker)].count("\n") + 1
             found.append(Violation(path, line, "lock", f"the lock file contains {what}, which Terraform decodes but the pin "
                                    "check does not; `terraform init` never writes one"))
+    try:
+        lock_entries(text)
+    except HclScanError as exc:
+        found.append(Violation(path, 1, "unreadable", f"the lock file cannot be read the way the pin check reads it ({exc})"))
     for b in blocks:
         if b.depth != 0:
             continue
@@ -299,9 +304,63 @@ def check_lock(path: str, text: str, providers: Iterable[str] = ALLOWED_PROVIDER
     return found
 
 
-_LOCK_VERSION = re.compile(r'(?m)^[ \t]*version[ \t]*=[ \t]*"([^"\n]*)"')
-_LOCK_HASHES = re.compile(r'(?s)\bhashes[ \t]*=[ \t]*\[(.*?)\]')
-_LOCK_STRING = re.compile(r'"([^"\n]*)"')
+def strip_comments(text: str) -> str:
+    """``text`` with ``#``, ``//`` and ``/* */`` comments removed outside strings (newlines kept,
+    so line numbers stay). A commented-out ``hashes = [...]`` or a ``]`` in a comment must not
+    steer what the pin check reads. Heredocs are not understood: refuse them first. Pure."""
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == '"':
+            j = _skip_string(text, i)
+            out.append(text[i:j])
+            i = j
+        elif c == "#" or text.startswith("//", i):
+            while i < n and text[i] != "\n":
+                i += 1
+        elif text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            if end < 0:
+                raise HclScanError("unterminated comment")
+            out.append("\n" * text.count("\n", i, end))
+            i = end + 2
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def _attribute_value_start(body: str, name: str) -> int:
+    """Index just after ``name =`` of the one attribute called ``name`` in a comment-free provider
+    block body. Zero or several of them is an error: Terraform rejects a duplicate attribute, and a
+    second one must never hide behind the first. Pure."""
+    found = [m.end() for m in re.finditer(rf"(?m)^[ \t]*{name}[ \t]*=[ \t]*", body)]
+    if len(found) != 1:
+        raise HclScanError(f"the provider block has {len(found)} {name!r} attributes, want exactly one")
+    return found[0]
+
+
+def _quoted_strings_in_list(body: str, start: int) -> list[str]:
+    """The string literals of the ``[ ... ]`` list that starts at ``start``, read with the string
+    scanner so a ``]`` or a comma inside a string cannot end it early. Pure."""
+    if start >= len(body) or body[start] != "[":
+        raise HclScanError("hashes is not a list")
+    out: list[str] = []
+    i, n = start + 1, len(body)
+    while i < n:
+        c = body[i]
+        if c == '"':
+            j = _skip_string(body, i)
+            out.append(body[i + 1:j - 1])
+            i = j
+        elif c == "]":
+            return out
+        elif c in "[{(":
+            raise HclScanError("the hashes list holds something other than strings")
+        else:
+            i += 1
+    raise HclScanError("unterminated hashes list")
 
 PinTable = Mapping[tuple[str, str], frozenset[str]]
 
@@ -311,12 +370,22 @@ def lock_entries(text: str) -> list[tuple[str, str, frozenset[str]]]:
     out = []
     for b in parse_blocks(text):
         if b.depth == 0 and b.kind == "provider" and b.labels:
-            m = _LOCK_VERSION.search(b.body)
-            listed = _LOCK_HASHES.search(b.body)
-            # Every quoted string in the list counts, valid hash or not: one that is not a plain hash
-            # is then simply not in the allow-list, instead of vanishing from the comparison.
-            hashes = frozenset(_LOCK_STRING.findall(listed.group(1))) if listed else frozenset()
-            out.append((_normalise_source(b.labels[0]), m.group(1) if m else "", hashes))
+            body = strip_comments(b.body)
+            v = _attribute_value_start(body, "version")
+            if body[v] != '"':
+                raise HclScanError("version is not a string")
+            version = body[v + 1:_skip_string(body, v) - 1]
+            try:
+                hashes_at = _attribute_value_start(body, "hashes")
+            except HclScanError as exc:
+                if "0 'hashes'" not in str(exc):
+                    raise
+                hashes = frozenset()
+            else:
+                # Every quoted string in the list counts, valid hash or not: one that is not a plain
+                # hash is then simply not in the allow-list, instead of vanishing from the comparison.
+                hashes = frozenset(_quoted_strings_in_list(body, hashes_at))
+            out.append((_normalise_source(b.labels[0]), version, hashes))
     return out
 
 
