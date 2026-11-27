@@ -116,13 +116,25 @@ func (s *pgStore) FailApply(ctx context.Context, requestID uuid.UUID, retryNumbe
 	if s.applier == nil {
 		return fmt.Errorf("fail request %s: no request lifecycle configured", requestID)
 	}
-	detail, err := json.Marshal(map[string]any{"stage": "retry", "retry_number": retryNumber, "reason": reason})
+	// When a waiting request already took the stack lock it may be applying: fail only
+	// this request and leave the stack to the lock holder's run.
+	var stackID uuid.UUID
+	if err := s.tx.QueryRow(ctx, `SELECT stack_id FROM requests WHERE id = $1`, requestID).Scan(&stackID); err != nil {
+		return fmt.Errorf("load request %s: %w", requestID, err)
+	}
+	lock, err := s.CurrentLock(ctx, stackID)
+	if err != nil {
+		return fmt.Errorf("read stack lock: %w", err)
+	}
+	leave := lock != nil && !lock.HeldBy(requestID)
+	detail, err := json.Marshal(map[string]any{"stage": "retry", "retry_number": retryNumber, "reason": reason,
+		"stack_left_to_lock_holder": leave})
 	if err != nil {
 		return fmt.Errorf("encode failure detail: %w", err)
 	}
 	_, err = s.applier(s.tx).Apply(ctx, requests.ApplyInput{RequestID: requestID, By: recoveryPrincipal, CorrelationID: correlationID,
 		Retry: noRetry{}, Progress: requests.ApplyProgress{Phase: requests.PhaseFailed, Run: requests.RunRef{Stage: "retry"},
-			FailureReason: FailureRetryNotRun, FailureDetail: detail}})
+			FailureReason: FailureRetryNotRun, FailureDetail: detail, LeaveStack: leave}})
 	if err != nil {
 		return fmt.Errorf("fail request %s: %w", requestID, err)
 	}

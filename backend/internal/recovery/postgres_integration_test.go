@@ -188,6 +188,15 @@ func TestPostgresDispatchFailureIsRecordedAndFinal(t *testing.T) {
 	if state != DispatchFailed || !strings.Contains(detail, "github is down") {
 		t.Fatalf("state %s detail %q", state, detail)
 	}
+	// The request held its lock (taken back before the dispatch), so it fails with its stack
+	// and the lock is released.
+	var status, stackStatus string
+	var locked bool
+	mustScan(t, pool.QueryRow(ctx, `SELECT r.status::text, s.status::text, EXISTS (SELECT 1 FROM locks l WHERE l.stack_id = s.id)
+		FROM requests r JOIN stacks s ON s.id = r.stack_id WHERE r.id = $1`, reqID).Scan(&status, &stackStatus, &locked))
+	if status != "failed" || stackStatus != "failed" || locked {
+		t.Fatalf("request %s stack %s locked %v", status, stackStatus, locked)
+	}
 }
 
 func TestPostgresRetryRefusedWhenAnotherRequestHoldsTheLock(t *testing.T) {

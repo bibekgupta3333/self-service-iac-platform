@@ -89,7 +89,8 @@ func TestRunReportsRetryATransientApplyFailure(t *testing.T) {
 	var reason string
 	mustScan(t, pool.QueryRow(ctx, `SELECT r.status::text, coalesce(r.failure_reason, ''), s.status::text FROM requests r
 		JOIN stacks s ON s.id = r.stack_id WHERE r.id = $1`, reqID).Scan(&status, &reason, &stackStatus))
-	if status != "failed" || reason != FailureRetryNotRun || stackStatus != "failed" {
+	// The waiter holds the lock and may be applying: the stack is left to it.
+	if status != "failed" || reason != FailureRetryNotRun || stackStatus != "updating" {
 		t.Fatalf("request %s (%s), stack %s", status, reason, stackStatus)
 	}
 }
