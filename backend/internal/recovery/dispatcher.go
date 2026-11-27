@@ -193,6 +193,13 @@ func (d *Dispatcher) finish(ctx context.Context, t Target, n int, dispatch publi
 		state, action, detail = DispatchFailed, "request.apply_retry_dispatch_failed", truncate(derr.Error(), 2000)
 	}
 	return d.repo.InTx(fctx, func(st RetryStore) error {
+		// Same lock order as claim and every stack-lock operation: stack row, request row,
+		// then the apply_failures row (FinishDispatch). A lock decision made in FailApply below
+		// then sees a lock that cannot change before commit, and a redelivered job's claim
+		// cannot deadlock with this transaction.
+		if _, err := st.TargetByID(fctx, t.ID); err != nil {
+			return fmt.Errorf("lock request: %w", err)
+		}
 		now := d.clock.Now()
 		if err := st.FinishDispatch(fctx, t.ID, n, state, detail, now); err != nil {
 			return err

@@ -118,9 +118,14 @@ func (s *pgStore) FailApply(ctx context.Context, requestID uuid.UUID, retryNumbe
 	}
 	// When a waiting request already took the stack lock it may be applying: fail only
 	// this request and leave the stack to the lock holder's run.
+	// The lock decision is made under the stack row lock (taken here even if the caller
+	// already holds it), since every lock change takes that row first.
 	var stackID uuid.UUID
 	if err := s.tx.QueryRow(ctx, `SELECT stack_id FROM requests WHERE id = $1`, requestID).Scan(&stackID); err != nil {
 		return fmt.Errorf("load request %s: %w", requestID, err)
+	}
+	if _, err := s.tx.Exec(ctx, `SELECT 1 FROM stacks WHERE id = $1 FOR UPDATE`, stackID); err != nil {
+		return fmt.Errorf("lock stack row: %w", err)
 	}
 	lock, err := s.CurrentLock(ctx, stackID)
 	if err != nil {
