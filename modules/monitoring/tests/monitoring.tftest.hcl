@@ -95,7 +95,7 @@ run "topic_only" {
   }
 
   assert {
-    condition     = output.iacp_metadata == { module = "monitoring", version = "1.0.0" }
+    condition     = output.iacp_metadata == { module = "monitoring", version = "1.1.0" }
     error_message = "iacp_metadata must report the module name and version."
   }
 }
@@ -126,6 +126,29 @@ run "alarms_dashboard_subscriptions" {
         ]
       },
     ]
+    metric_alarms = [
+      {
+        name               = "failure-rate"
+        namespace          = "IACP/Platform"
+        metric_name        = "RequestFailureRatePercent"
+        dimensions         = { Environment = "development" }
+        threshold          = 20
+        comparison         = "GreaterThanThreshold"
+        period             = 3600
+        treat_missing_data = "notBreaching"
+        description        = "More than 20 % of finished requests failed in the last hour."
+      },
+      {
+        name               = "lead-time-p95"
+        namespace          = "IACP/Platform"
+        metric_name        = "RequestLeadTimeSeconds"
+        statistic          = "p95"
+        threshold          = 900
+        comparison         = "GreaterThanOrEqualToThreshold"
+        period             = 300
+        evaluation_periods = 3
+      },
+    ]
   }
 
   assert {
@@ -133,8 +156,45 @@ run "alarms_dashboard_subscriptions" {
       "sqs-orders-oldest-message-age", "sqs-orders-visible-messages",
       "lambda-worker-errors", "lambda-worker-throttles",
       "dynamodb-orders-read-throttles", "dynamodb-orders-write-throttles",
+      "metric-failure-rate", "metric-lead-time-p95",
     ])
-    error_message = "Every alarm helper entry must produce its alarms."
+    error_message = "Every alarm helper entry and every metric alarm must produce its alarms."
+  }
+
+  assert {
+    condition = (
+      aws_cloudwatch_metric_alarm.this["metric-failure-rate"].alarm_name == "platform-development-tftest-mon-full-metric-failure-rate" &&
+      aws_cloudwatch_metric_alarm.this["metric-failure-rate"].namespace == "IACP/Platform" &&
+      aws_cloudwatch_metric_alarm.this["metric-failure-rate"].metric_name == "RequestFailureRatePercent" &&
+      aws_cloudwatch_metric_alarm.this["metric-failure-rate"].dimensions == tomap({ Environment = "development" }) &&
+      aws_cloudwatch_metric_alarm.this["metric-failure-rate"].statistic == "Average" &&
+      aws_cloudwatch_metric_alarm.this["metric-failure-rate"].threshold == 20 &&
+      aws_cloudwatch_metric_alarm.this["metric-failure-rate"].comparison_operator == "GreaterThanThreshold" &&
+      aws_cloudwatch_metric_alarm.this["metric-failure-rate"].period == 3600 &&
+      aws_cloudwatch_metric_alarm.this["metric-failure-rate"].evaluation_periods == 1 &&
+      aws_cloudwatch_metric_alarm.this["metric-failure-rate"].treat_missing_data == "notBreaching" &&
+      aws_cloudwatch_metric_alarm.this["metric-failure-rate"].alarm_description == "More than 20 % of finished requests failed in the last hour."
+    )
+    error_message = "A metric alarm must use the namespace, metric, dimensions, statistic, threshold, comparison, period and description from the input."
+  }
+
+  assert {
+    condition = (
+      aws_cloudwatch_metric_alarm.this["metric-lead-time-p95"].extended_statistic == "p95" &&
+      (aws_cloudwatch_metric_alarm.this["metric-lead-time-p95"].statistic == null || aws_cloudwatch_metric_alarm.this["metric-lead-time-p95"].statistic == "") &&
+      aws_cloudwatch_metric_alarm.this["metric-lead-time-p95"].evaluation_periods == 3 &&
+      length(coalesce(aws_cloudwatch_metric_alarm.this["metric-lead-time-p95"].dimensions, {})) == 0 &&
+      aws_cloudwatch_metric_alarm.this["metric-lead-time-p95"].alarm_description == "IACP/Platform RequestLeadTimeSeconds p95 >= 900 for 3 period(s) of 300s."
+    )
+    error_message = "A percentile must be sent as the extended statistic, and a missing description must be generated."
+  }
+
+  assert {
+    condition = alltrue([
+      for k, a in aws_cloudwatch_metric_alarm.this :
+      a.period == 300 && a.evaluation_periods == 1 && a.treat_missing_data == "notBreaching" if !startswith(k, "metric-")
+    ])
+    error_message = "The helper alarms must keep one 5-minute period with missing data not breaching."
   }
 
   assert {
@@ -409,4 +469,144 @@ run "rejects_reserved_tag_prefix" {
   }
 
   expect_failures = [var.tags]
+}
+
+run "metric_alarm_alone_creates_dashboard" {
+  command = plan
+
+  variables {
+    metric_alarms = [
+      { name = "stuck-lock", namespace = "IACP/Platform", metric_name = "LockOldestHolderAgeSeconds", statistic = "Maximum", threshold = 86400, comparison = "GreaterThanThreshold" },
+    ]
+  }
+
+  assert {
+    condition     = keys(aws_cloudwatch_metric_alarm.this) == ["metric-stuck-lock"] && length(aws_cloudwatch_dashboard.this) == 1
+    error_message = "A metric alarm alone must create its alarm and the dashboard with the alarm status widget."
+  }
+
+  assert {
+    condition = (
+      aws_cloudwatch_metric_alarm.this["metric-stuck-lock"].statistic == "Maximum" &&
+      aws_cloudwatch_metric_alarm.this["metric-stuck-lock"].extended_statistic == null &&
+      aws_cloudwatch_metric_alarm.this["metric-stuck-lock"].period == 300 &&
+      aws_cloudwatch_metric_alarm.this["metric-stuck-lock"].evaluation_periods == 1 &&
+      aws_cloudwatch_metric_alarm.this["metric-stuck-lock"].treat_missing_data == "notBreaching"
+    )
+    error_message = "A metric alarm must default to one 5-minute period with missing data not breaching."
+  }
+
+  assert {
+    condition     = { for k, v in aws_cloudwatch_metric_alarm.this["metric-stuck-lock"].tags : k => v if startswith(k, "iacp:") } == { "iacp:team" = "platform", "iacp:environment" = "development", "iacp:stack" = "tftest", "iacp:managed-by" = "iacp", "iacp:module" = "monitoring" }
+    error_message = "A metric alarm must carry the platform tags."
+  }
+}
+
+run "rejects_duplicate_metric_alarm_names" {
+  command = plan
+
+  variables {
+    metric_alarms = [
+      { name = "rate", namespace = "IACP/Platform", metric_name = "RequestFailureRatePercent", threshold = 20, comparison = "GreaterThanThreshold" },
+      { name = "rate", namespace = "IACP/Platform", metric_name = "RequestsFinished", threshold = 1, comparison = "GreaterThanThreshold" },
+    ]
+  }
+
+  expect_failures = [var.metric_alarms]
+}
+
+run "rejects_invalid_metric_alarm_name" {
+  command = plan
+
+  variables {
+    metric_alarms = [
+      { name = "Failure Rate", namespace = "IACP/Platform", metric_name = "RequestFailureRatePercent", threshold = 20, comparison = "GreaterThanThreshold" },
+    ]
+  }
+
+  expect_failures = [var.metric_alarms]
+}
+
+run "rejects_invalid_metric_alarm_namespace" {
+  command = plan
+
+  variables {
+    metric_alarms = [
+      { name = "rate", namespace = "IACP Platform", metric_name = "RequestFailureRatePercent", threshold = 20, comparison = "GreaterThanThreshold" },
+    ]
+  }
+
+  expect_failures = [var.metric_alarms]
+}
+
+run "rejects_invalid_metric_alarm_comparison" {
+  command = plan
+
+  variables {
+    metric_alarms = [
+      { name = "rate", namespace = "IACP/Platform", metric_name = "RequestFailureRatePercent", threshold = 20, comparison = "GreaterThan" },
+    ]
+  }
+
+  expect_failures = [var.metric_alarms]
+}
+
+run "rejects_invalid_metric_alarm_statistic" {
+  command = plan
+
+  variables {
+    metric_alarms = [
+      { name = "rate", namespace = "IACP/Platform", metric_name = "RequestFailureRatePercent", statistic = "Median", threshold = 20, comparison = "GreaterThanThreshold" },
+    ]
+  }
+
+  expect_failures = [var.metric_alarms]
+}
+
+run "rejects_null_metric_alarm_threshold" {
+  command = plan
+
+  variables {
+    metric_alarms = [
+      { name = "rate", namespace = "IACP/Platform", metric_name = "RequestFailureRatePercent", threshold = null, comparison = "GreaterThanThreshold" },
+    ]
+  }
+
+  expect_failures = [var.metric_alarms]
+}
+
+run "rejects_invalid_metric_alarm_period" {
+  command = plan
+
+  variables {
+    metric_alarms = [
+      { name = "rate", namespace = "IACP/Platform", metric_name = "RequestFailureRatePercent", threshold = 20, comparison = "GreaterThanThreshold", period = 45 },
+    ]
+  }
+
+  expect_failures = [var.metric_alarms]
+}
+
+run "rejects_metric_alarm_window_over_one_day" {
+  command = plan
+
+  variables {
+    metric_alarms = [
+      { name = "rate", namespace = "IACP/Platform", metric_name = "RequestFailureRatePercent", threshold = 20, comparison = "GreaterThanThreshold", period = 3600, evaluation_periods = 25 },
+    ]
+  }
+
+  expect_failures = [var.metric_alarms]
+}
+
+run "rejects_invalid_metric_alarm_missing_data" {
+  command = plan
+
+  variables {
+    metric_alarms = [
+      { name = "rate", namespace = "IACP/Platform", metric_name = "RequestFailureRatePercent", threshold = 20, comparison = "GreaterThanThreshold", treat_missing_data = "zero" },
+    ]
+  }
+
+  expect_failures = [var.metric_alarms]
 }

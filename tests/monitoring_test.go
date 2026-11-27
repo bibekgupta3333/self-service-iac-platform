@@ -78,7 +78,7 @@ func TestMonitoringComplete(t *testing.T) {
 	})
 
 	t.Run("alarms", func(t *testing.T) {
-		wantKeys := []string{"lambda-worker-errors", "lambda-worker-throttles", "sqs-jobs-oldest-message-age", "sqs-jobs-visible-messages"}
+		wantKeys := []string{"lambda-worker-errors", "lambda-worker-throttles", "metric-jobs-failed", "sqs-jobs-oldest-message-age", "sqs-jobs-visible-messages"}
 		var keys []string
 		for k := range alarmArns {
 			keys = append(keys, k)
@@ -101,6 +101,12 @@ func TestMonitoringComplete(t *testing.T) {
 		for _, a := range out.MetricAlarms {
 			if len(a.AlarmActions) != 1 || a.AlarmActions[0] != topicArn || len(a.OKActions) != 1 || a.OKActions[0] != topicArn {
 				t.Errorf("alarm %s actions = %v / %v, want the topic on alarm and OK", aws.ToString(a.AlarmName), a.AlarmActions, a.OKActions)
+			}
+			if aws.ToString(a.AlarmName) == prefix+"-metric-jobs-failed" {
+				if aws.ToString(a.Namespace) != "Example/Jobs" || aws.ToString(a.MetricName) != "JobsFailed" || string(a.Statistic) != "Sum" || aws.ToInt32(a.Period) != 600 || aws.ToFloat64(a.Threshold) != 5 {
+					t.Errorf("metric alarm = %s %s %s period %d threshold %v, want Example/Jobs JobsFailed Sum period 600 threshold 5",
+						aws.ToString(a.Namespace), aws.ToString(a.MetricName), a.Statistic, aws.ToInt32(a.Period), aws.ToFloat64(a.Threshold))
+				}
 			}
 		}
 	})
