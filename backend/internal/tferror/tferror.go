@@ -1,7 +1,8 @@
 // Package tferror reduces Terraform failure output to short, redacted text that is safe to
 // store and to classify. It is shared by drift reports (drift.SummarizeError) and apply
 // failures (run reports, recovery), so a tightening of the rules benefits both. It mirrors
-// tools/stack_pipeline/tf_error.py. Pure.
+// tools/stack_pipeline/tf_error.py; testdata/vectors.json holds the cases both suites run.
+// Pure.
 //
 // Terraform prints a diagnostic as a box (the lines are prefixed with the box characters
 // U+2502, U+2577 and U+2575) whose first line is "Error: <summary>". The lines after it
@@ -11,9 +12,10 @@
 // which can echo input. Credential-shaped text is replaced as defence in depth and control
 // characters become spaces.
 //
-// What recovery needs to classify a failure (an AWS error code, an HTTP status, a known
-// Terraform phrase) is carried separately by Signals: tokens matched against a fixed
-// vocabulary, never free text.
+// What recovery needs to classify a failure travels separately, as signals: entries of the
+// fixed Vocabulary (AWS error codes and Terraform phrases, each tagged with the class and
+// reason recovery gives it) found in the "Error:" lines, plus "StatusCode: <nnn>". A signal
+// is always one of those fixed strings, never text copied from the output.
 package tferror
 
 import (
@@ -25,6 +27,8 @@ import (
 var (
 	secretRe = regexp.MustCompile(`(?i)((?:secret|token|password|passwd|authorization|api[_-]?key|access[_-]?key)[A-Za-z_-]*\s*[=:]\s*)(?:bearer\s+)?\S+|AKIA[0-9A-Z]{16}|bearer\s+\S+`)
 	errorRe  = regexp.MustCompile(`^Error:\s+\S`)
+	statusRe = regexp.MustCompile(`(?i)\bstatus ?code:? ?([1-5][0-9]{2})\b`)
+	signalRe = regexp.MustCompile(`^StatusCode: [1-5][0-9]{2}$`)
 )
 
 const boxChars = "│╷╵ \t"
@@ -49,6 +53,7 @@ func Redact(line string) string {
 
 // CutAfterIdentifier keeps an "Error:" line up to the first ": " after the prefix
 // ("Error: putting SSM Parameter (/app/db): ..." becomes "Error: putting SSM Parameter (/app/db)").
+// It is idempotent.
 func CutAfterIdentifier(line string) string {
 	if !strings.HasPrefix(line, "Error:") {
 		return line
@@ -92,85 +97,70 @@ func Cap(s string, limit int) string {
 	return s
 }
 
-// Summary joins the first maxLines "Error:" lines with " | ", capped at limit runes; with no
-// "Error:" line it returns fallback, never other lines of the output.
+// Summary returns the first maxLines "Error:" lines, one per line, capped at limit runes;
+// with no "Error:" line it returns fallback, never other lines of the output. Summary of a
+// summary is the same summary.
 func Summary(text string, maxLines, limit int, fallback string) string {
 	lines := ErrorLines(text, maxLines)
 	if len(lines) == 0 {
 		return fallback
 	}
-	return Cap(strings.Join(lines, " | "), limit)
+	return Cap(strings.Join(lines, "\n"), limit)
 }
 
-// signalRes match the parts of a failure that classify it. Each match is reduced to a
-// fixed-shape token: an AWS error code name, an HTTP status, or a phrase from a fixed list.
-var (
-	apiErrorRe   = regexp.MustCompile(`\bapi error ([A-Z][A-Za-z0-9]{2,63})\b`)
-	codeColonRe  = regexp.MustCompile(`\b([A-Z][A-Za-z0-9]{2,63}(?:Exception|Exceeded|Error|Failure|Denied|Unavailable|AlreadyExists|Throttling|Capacity))\b`)
-	statusCodeRe = regexp.MustCompile(`(?i)\bstatus ?code:? ?([1-5][0-9]{2})\b`)
-	phrases      = []string{
-		"Error acquiring the state lock", "Error locking state", "i/o timeout", "context deadline exceeded",
-		"TLS handshake timeout", "connection reset by peer", "connection refused", "no such host",
-		"Rate exceeded", "SlowDown", "Throttling", "role cannot be assumed",
-		"role defined for the function cannot be assumed", "runner has received a shutdown signal",
-		"lost communication with the server", "plan_mismatch", "differs from the approved plan",
-		"Invalid value for variable", "Unsupported argument", "Missing required argument",
-		"Reference to undeclared", "Unsupported attribute", "Invalid reference", "already exists",
-		"is not authorized to perform", "explicit deny",
-	}
-)
+// MaxSignals bounds how many signals one failure carries.
+const MaxSignals = 12
 
-// MaxSignals bounds how many tokens Signals returns.
-const MaxSignals = 8
-
-// Signals returns the classification tokens found in the "Error:" lines of text (never in
-// the source and detail lines below them), in a stable order and without duplicates: "api error <Code>", "StatusCode: <nnn>", AWS-style error code names and the
-// fixed phrases above. They carry no input values: a code name is one identifier, a status
-// is three digits and a phrase is fixed text, so they are safe to store next to a summary.
+// Signals returns the Vocabulary entries found in the "Error:" lines of text (never in the
+// source and detail lines below them), in Vocabulary order, then "StatusCode: <nnn>" for
+// each HTTP status, without duplicates and at most MaxSignals. Matching is case-insensitive.
 func Signals(text string) []string {
+	text = strings.Join(fullErrorLines(text, 16), "\n")
+	lower := strings.ToLower(text)
 	var out []string
 	add := func(s string) {
 		if len(out) < MaxSignals && !slices.Contains(out, s) {
 			out = append(out, s)
 		}
 	}
-	text = strings.Join(fullErrorLines(text, 16), "\n")
-	for _, m := range apiErrorRe.FindAllStringSubmatch(text, -1) {
-		add("api error " + m[1])
+	for _, v := range Vocabulary {
+		if strings.Contains(lower, strings.ToLower(v.Text)) {
+			add(v.Text)
+		}
 	}
-	for _, m := range statusCodeRe.FindAllStringSubmatch(text, -1) {
+	for _, m := range statusRe.FindAllStringSubmatch(text, -1) {
 		add("StatusCode: " + m[1])
 	}
-	for _, m := range codeColonRe.FindAllStringSubmatch(text, -1) {
-		add(m[1])
-	}
-	lower := strings.ToLower(text)
-	for _, p := range phrases {
-		if strings.Contains(lower, strings.ToLower(p)) {
-			add(p)
+	return out
+}
+
+// FilterSignals keeps the reported signals that are Vocabulary entries or HTTP statuses,
+// without duplicates and at most MaxSignals: the server's guard on what a pipeline sent.
+func FilterSignals(reported []string) []string {
+	var out []string
+	for _, s := range reported {
+		if len(out) >= MaxSignals {
+			break
+		}
+		if (IsVocabulary(s) || signalRe.MatchString(s)) && !slices.Contains(out, s) {
+			out = append(out, s)
 		}
 	}
 	return out
 }
 
-// Excerpt is what an apply failure stores and classifies: Summary of up to maxLines
-// "Error:" lines, plus the Signals in brackets, capped at limit runes; fallback (with any
-// signals) when there is no "Error:" line.
-func Excerpt(text string, maxLines, limit int, fallback string) string {
-	s := Summary(text, maxLines, limit, fallback)
-	if sig := Signals(text); len(sig) > 0 {
-		s += " [" + strings.Join(sig, "; ") + "]"
-	}
-	return Cap(s, limit)
+// IsVocabulary reports whether s is exactly one Vocabulary entry.
+func IsVocabulary(s string) bool {
+	return slices.ContainsFunc(Vocabulary, func(v Signal) bool { return v.Text == s })
 }
 
 // Clean is the server-side guard for an error message a pipeline reported. Terraform output
-// (text with "Error:" lines) becomes its Excerpt. Any other text is kept as one redacted line
-// only when it is short single-line platform text; otherwise a fixed message replaces it.
-// The result is capped at limit runes.
+// (text with "Error:" lines) becomes its Summary (idempotent on a summary the pipeline
+// already made). Any other text is kept as one redacted line only when it is short
+// single-line platform text; otherwise a fixed message replaces it. Capped at limit runes.
 func Clean(text string, maxLines, limit int) string {
-	if len(ErrorLines(text, 1)) > 0 {
-		return Excerpt(text, maxLines, limit, "")
+	if lines := ErrorLines(text, maxLines); len(lines) > 0 {
+		return Cap(strings.Join(lines, "\n"), limit)
 	}
 	flat := strings.Join(strings.Fields(Redact(text)), " ")
 	if !strings.Contains(strings.TrimSpace(text), "\n") && len(flat) <= 200 {
