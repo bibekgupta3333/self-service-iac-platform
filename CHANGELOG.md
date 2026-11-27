@@ -6,6 +6,10 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-27
+
+MVP release: module catalog, request to generated PR, validate, scan, price and plan in GitHub Actions, apply with fencing-token locks, live status, drift detection, TTL teardown, budgets, module upgrades, recovery and rollback, RBAC with production gates, and the hash-chained audit log, all running locally against LocalStack (ADR-0009).
+
 ### Added
 - Production environment enablement (WBS 8.8, 8.6 production gates):
   - Migration `0017_production_environment` seeds the `staging` and `production` environment rows (LocalStack placeholder accounts, ADR-0009); a trigger and a CHECK force production to `requires_approval` with a `maintainer` (or `admin`) approver role, next to the 0012 rule that production is never ephemeral.
