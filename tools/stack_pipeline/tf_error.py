@@ -2,7 +2,9 @@
 
 Shared by the drift scan (``drift.summarize_error``) and apply failure reports
 (``report --error-log``), so a tightening of the rules benefits both. Mirrors
-``backend/internal/tferror`` (the API applies the same rules again before storing). Pure.
+``backend/internal/tferror`` (the API applies the same rules again before storing);
+``backend/internal/tferror/testdata/vectors.json`` holds the cases both test suites run.
+Pure.
 
 Terraform prints a diagnostic as a box (``╷`` ... ``╵``, each line prefixed with
 ``│``) whose first line is ``Error: <summary>``. The lines after it carry source snippets
@@ -11,9 +13,10 @@ lines are kept, each cut after the resource identifier (at the first ``": "`` af
 prefix), because what follows is the provider's own message, which can echo input.
 Credential-shaped text is replaced as defence in depth and control characters become spaces.
 
-What the backend needs to classify a failure (an AWS error code, an HTTP status, a known
-Terraform phrase) travels separately as ``signals``: tokens matched against a fixed
-vocabulary in the ``Error:`` lines, never free text.
+What the backend needs to classify a failure travels separately as ``signals``: entries of
+the fixed ``VOCABULARY`` (AWS error codes and Terraform phrases the backend's classifier is
+built from) found in the ``Error:`` lines, plus ``StatusCode: <nnn>``. A signal is always one
+of those fixed strings, never text copied from the output.
 """
 
 from __future__ import annotations
@@ -24,23 +27,33 @@ SECRET_RE = re.compile(
     r"((?:secret|token|password|passwd|authorization|api[_-]?key|access[_-]?key)[A-Za-z_-]*\s*[=:]\s*)(?:bearer\s+)?\S+"
     r"|AKIA[0-9A-Z]{16}|bearer\s+\S+", re.IGNORECASE)
 _ERROR_LINE_RE = re.compile(r"Error:\s+\S")
-_BOX = " \t│╷╵"
-
-_API_ERROR_RE = re.compile(r"\bapi error ([A-Z][A-Za-z0-9]{2,63})\b")
-_CODE_RE = re.compile(
-    r"\b([A-Z][A-Za-z0-9]{2,63}(?:Exception|Exceeded|Error|Failure|Denied|Unavailable|AlreadyExists|Throttling|Capacity))\b")
 _STATUS_RE = re.compile(r"\bstatus ?code:? ?([1-5][0-9]{2})\b", re.IGNORECASE)
-PHRASES = (
-    "Error acquiring the state lock", "Error locking state", "i/o timeout", "context deadline exceeded",
-    "TLS handshake timeout", "connection reset by peer", "connection refused", "no such host",
-    "Rate exceeded", "SlowDown", "Throttling", "role cannot be assumed",
-    "role defined for the function cannot be assumed", "runner has received a shutdown signal",
-    "lost communication with the server", "plan_mismatch", "differs from the approved plan",
-    "Invalid value for variable", "Unsupported argument", "Missing required argument",
-    "Reference to undeclared", "Unsupported attribute", "Invalid reference", "already exists",
-    "is not authorized to perform", "explicit deny",
+_STATUS_SIGNAL_RE = re.compile(r"StatusCode: [1-5][0-9]{2}")
+_BOX = " \t│╷╵"
+MAX_SIGNALS = 12
+
+# The failure vocabulary, in the backend's order (tferror.Vocabulary, where each entry is
+# tagged with the class and reason recovery gives it). The shared vectors pin this list.
+VOCABULARY = (
+    "role cannot be assumed", "role defined for the function cannot be assumed", "InvalidInstanceProfile",
+    "Invalid IAM Instance Profile", "ThrottlingException", "Throttling", "RequestLimitExceeded",
+    "TooManyRequestsException", "Rate exceeded", "SlowDown", "ProvisionedThroughputExceeded", "RequestThrottled",
+    "PriorRequestNotComplete", "InternalError", "InternalFailure", "InternalServerError", "ServiceUnavailable",
+    "ServiceFailure", "Bad Gateway", "Service Unavailable", "Gateway Timeout", "i/o timeout",
+    "context deadline exceeded", "TLS handshake timeout", "connection reset by peer", "connection refused",
+    "no such host", "RequestTimeout", "request canceled", "unexpected EOF", "use of closed network connection",
+    "Error acquiring the state lock", "Error locking state", "ConditionalCheckFailedException", "PreconditionFailed",
+    "runner has received a shutdown signal", "lost communication with the server",
+    "The hosted runner encountered an error",
+    "plan_mismatch", "differs from the approved plan", "plan hash mismatch", "Invalid value for variable",
+    "Invalid value for input", "Unsupported argument", "Missing required argument", "Reference to undeclared",
+    "Unsupported attribute", "Invalid reference", "InvalidParameterCombination", "InvalidParameterValue",
+    "ValidationException", "ValidationError", "MalformedPolicyDocument", "InvalidRequest", "AlreadyExists",
+    "already exists", "ResourceInUseException", "DuplicateRecord", "ResourceConflictException",
+    "LimitExceeded", "InsufficientInstanceCapacity", "QuotaExceeded", "TooManyBuckets", "ServiceQuota",
+    "AccessDenied", "UnauthorizedOperation", "is not authorized to perform", "explicit deny", "AuthorizationError",
+    "InvalidClientTokenId",
 )
-MAX_SIGNALS = 8
 
 
 def redact(line: str) -> str:
@@ -54,7 +67,8 @@ def redact(line: str) -> str:
 
 
 def cut_after_identifier(line: str) -> str:
-    """``Error: putting SSM Parameter (/app/db): ...`` becomes ``Error: putting SSM Parameter (/app/db)``."""
+    """``Error: putting SSM Parameter (/app/db): ...`` becomes ``Error: putting SSM Parameter (/app/db)``.
+    Idempotent."""
     if not line.startswith("Error:"):
         return line
     cut = line.find(": ", len("Error:"))
@@ -82,38 +96,37 @@ def cap(text: str, limit: int) -> str:
 
 
 def summary(text: str, max_lines: int, limit: int, fallback: str) -> str:
-    """The ``Error:`` lines joined with `` | ``, capped; ``fallback`` when there is none."""
+    """The ``Error:`` lines, one per line, capped; ``fallback`` when there is none.
+    A summary of a summary is the same summary."""
     lines = error_lines(text, max_lines)
-    return cap(" | ".join(lines), limit) if lines else fallback
+    return cap("\n".join(lines), limit) if lines else fallback
 
 
 def signals(text: str) -> list[str]:
-    """Classification tokens from the ``Error:`` lines: ``api error <Code>``,
-    ``StatusCode: <nnn>``, AWS-style code names and the fixed ``PHRASES``. No input values."""
+    """``VOCABULARY`` entries found (case-insensitively) in the ``Error:`` lines, in vocabulary
+    order, then ``StatusCode: <nnn>``; no duplicates, at most ``MAX_SIGNALS``."""
     text = "\n".join(_full_error_lines(text, 16))
+    lower = text.lower()
     out: list[str] = []
 
     def add(token: str) -> None:
         if len(out) < MAX_SIGNALS and token not in out:
             out.append(token)
 
-    for m in _API_ERROR_RE.finditer(text):
-        add("api error " + m.group(1))
+    for v in VOCABULARY:
+        if v.lower() in lower:
+            add(v)
     for m in _STATUS_RE.finditer(text):
         add("StatusCode: " + m.group(1))
-    for m in _CODE_RE.finditer(text):
-        add(m.group(1))
-    lower = text.lower()
-    for p in PHRASES:
-        if p.lower() in lower:
-            add(p)
     return out
 
 
-def excerpt(text: str, max_lines: int, limit: int, fallback: str) -> str:
-    """``summary`` plus the ``signals`` in brackets, capped at ``limit``. Mirrors tferror.Excerpt."""
-    s = summary(text, max_lines, limit, fallback)
-    sig = signals(text)
-    if sig:
-        s += " [" + "; ".join(sig) + "]"
-    return cap(s, limit)
+def filter_signals(reported: list[str]) -> list[str]:
+    """The reported signals that are vocabulary entries or HTTP statuses (mirrors FilterSignals)."""
+    out: list[str] = []
+    for s in reported:
+        if len(out) >= MAX_SIGNALS:
+            break
+        if (s in VOCABULARY or _STATUS_SIGNAL_RE.fullmatch(s)) and s not in out:
+            out.append(s)
+    return out
