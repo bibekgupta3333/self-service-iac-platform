@@ -7,6 +7,7 @@ Infrastructure modules are versioned separately with tags `modules/<name>/vX.Y.Z
 ## [Unreleased]
 
 ### Changed
+- Terratest module dependencies: `golang.org/x/crypto` 0.52.0, `github.com/klauspost/compress` 1.18.7 and `github.com/ulikunitz/xz` 0.5.14 (replaces the Dependabot PRs #5, #6 and #7).
 - Drift follow-ups: the kept `Error:` line of a failed check is cut after the resource identifier, so provider text that echoes a value cannot survive (the scan's own fixed messages are an explicit allow-list and pass unchanged); suppression of an ignored finding compares against the newest report that is not a failed check; suppressed copies are audited with `suppressed: true`; `drift scan --error-file` reads at most 1 MB of bytes. S3 refresh noise: `lifecycle { ignore_changes }` on `aws_s3_bucket` was tried against LocalStack and does not change a refresh-only plan, so `modules/s3` is unchanged and docs/06 lists the options.
 - Review follow-ups: the route policy middleware is mounted unconditionally and the API refuses to start without a policy table (`Deps.Validate`); event streams end when the session user's platform admin flag changes (`StreamSession.Alive` now also returns it); update, destroy and create role checks use the principal's platform admin flag through `identity.Principal.EffectiveRole`, so the dev-mode user can update and destroy the stacks it sees without being a database admin.
 
