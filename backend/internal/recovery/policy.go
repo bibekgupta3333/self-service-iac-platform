@@ -7,6 +7,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/requests"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/tferror"
 )
 
 // TxStores binds a RetryStore to an existing transaction (PostgresRepository).
@@ -63,24 +64,23 @@ func FailedApplyFromProgress(req *requests.Request, p requests.ApplyProgress, co
 }
 
 // ErrorMessage is the message of a report's error block ({"class": ..., "message": ...}),
-// or the raw value when it is a plain JSON string. Pure.
+// or the raw value when it is a plain JSON string, reduced to its redacted Terraform
+// "Error:" lines (tferror.Clean) before it is classified. Other fields are ignored. Pure.
 func ErrorMessage(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
 	}
 	var block struct {
-		Message    string `json:"message"`
-		LogExcerpt string `json:"log_excerpt"`
+		Message string `json:"message"`
 	}
+	msg := ""
 	if err := json.Unmarshal(raw, &block); err == nil {
-		if block.LogExcerpt != "" {
-			return block.Message + "\n" + block.LogExcerpt
-		}
-		return block.Message
+		msg = block.Message
+	} else if err := json.Unmarshal(raw, &msg); err != nil {
+		return ""
 	}
-	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
-		return s
+	if msg == "" {
+		return ""
 	}
-	return ""
+	return tferror.Clean(msg, 3, 500)
 }

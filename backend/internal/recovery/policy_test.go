@@ -3,6 +3,7 @@ package recovery
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
@@ -20,7 +21,7 @@ const throttledDetail = `{"run_status":"failed","stage":"apply","stage_status":"
 func TestFailedApplyFromProgress(t *testing.T) {
 	req := &requests.Request{ShortID: "req-7k3p9x", Stack: requests.StackRef{Path: "environments/development/payments/orders"}}
 	f := FailedApplyFromProgress(req, failedProgress(throttledDetail, 41), "c1")
-	if f.Stage != "apply" || *f.ExitCode != 1 || f.Message != "│ Error: api error ThrottlingException: Rate exceeded" ||
+	if f.Stage != "apply" || *f.ExitCode != 1 || !strings.Contains(f.Message, "api error ThrottlingException") || strings.Contains(f.Message, "\u2502") ||
 		f.Run.RunID != 41 || f.StackPath != req.Stack.Path || f.RequestShortID != "req-7k3p9x" || f.FencingToken != nil {
 		t.Fatalf("%+v", f)
 	}
@@ -38,7 +39,8 @@ func TestErrorMessage(t *testing.T) {
 	cases := map[string]string{
 		``:                                       "",
 		`{"class":"transient","message":"boom"}`: "boom",
-		`{"message":"Error: x","log_excerpt":"line"}`: "Error: x\nline",
+		`{"message":"Error: x","log_excerpt":"line"}`:                                                    "Error: x",
+		`{"message":"\u2502 Error: api error ThrottlingException: token=abc\n\u2502  password = \"p\""}`: "Error: api error ThrottlingException [api error ThrottlingException; ThrottlingException; Throttling]",
 		`"plain"`: "plain",
 		`42`:      "",
 	}
