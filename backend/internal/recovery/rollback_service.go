@@ -117,8 +117,32 @@ func (s *RollbackService) Rollback(ctx context.Context, by identity.Principal, c
 	if err != nil {
 		return requests.CreateResult{}, err
 	}
-	return s.creator.Create(ctx, by, requests.CreateCommand{Input: in, IdempotencyKey: cmd.IdempotencyKey,
+	res, err := s.creator.Create(ctx, by, requests.CreateCommand{Input: in, IdempotencyKey: cmd.IdempotencyKey,
 		RequestHash: cmd.RequestHash, CorrelationID: cmd.CorrelationID})
+	if err != nil {
+		return requests.CreateResult{}, YankedTargetError(err, target)
+	}
+	return res, nil
+}
+
+// YankedTargetError explains a create refused because the restored configuration pins a
+// module version the catalog no longer offers (yanked, or gone): rollback_target_yanked,
+// pointing at a roll-forward. Any other error is returned unchanged. Pure.
+func YankedTargetError(err error, target AppliedSpec) error {
+	e, ok := apperr.As(err)
+	if !ok || e.Kind != apperr.KindInvalid {
+		return err
+	}
+	yanked := e.Code == "module_version_unavailable"
+	for _, f := range e.Fields {
+		yanked = yanked || f.Code == "module_version_unavailable"
+	}
+	if !yanked {
+		return err
+	}
+	return apperr.Invalid("rollback_target_yanked",
+		fmt.Sprintf("the configuration applied by %s pins a module version that is no longer usable (yanked); "+
+			"roll forward with an update to a published version instead", target.ShortID), e.Fields...)
 }
 
 func stackNotFound(id uuid.UUID) error {

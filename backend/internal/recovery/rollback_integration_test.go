@@ -125,10 +125,33 @@ func TestRollbackThroughTheRequestPath(t *testing.T) {
 		t.Fatalf("second rollback: %v", err)
 	}
 
-	// Destroyed stacks cannot be rolled back.
+	// The open rollback ends; then the target's module version is yanked: the rollback is
+	// refused with an explanation that points at a roll-forward, and nothing is created.
 	if _, err := pool.Exec(ctx, `UPDATE requests SET status = 'cancelled', completed_at = now() WHERE id = $1`, r.ID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := pool.Exec(ctx, `DELETE FROM locks WHERE stack_id = $1`, stackID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE module_versions SET status = 'yanked'
+		WHERE module_id = (SELECT id FROM modules WHERE name = 'sqs') AND version = '1.3.0'`); err != nil {
+		t.Fatal(err)
+	}
+	var before int
+	mustScan(t, pool.QueryRow(ctx, `SELECT count(*) FROM requests WHERE stack_id = $1`, stackID).Scan(&before))
+	cmd.IdempotencyKey, cmd.RequestHash = "rb-rollback-yank", requests.RequestHash("POST", "/v1/stacks/x/rollback", []byte("y"))
+	_, err = svc.Rollback(ctx, user, cmd)
+	if !apperr.IsKind(err, apperr.KindInvalid) || code(err) != "rollback_target_yanked" ||
+		!strings.Contains(err.Error(), created.Request.ShortID) {
+		t.Fatalf("yanked target: %v", err)
+	}
+	var after int
+	mustScan(t, pool.QueryRow(ctx, `SELECT count(*) FROM requests WHERE stack_id = $1`, stackID).Scan(&after))
+	if after != before {
+		t.Fatal("a refused rollback must create no request")
+	}
+
+	// Destroyed stacks cannot be rolled back.
 	if _, err := pool.Exec(ctx, `UPDATE stacks SET status = 'destroyed', destroyed_at = now() WHERE id = $1`, stackID); err != nil {
 		t.Fatal(err)
 	}
