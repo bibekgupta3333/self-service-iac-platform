@@ -39,14 +39,16 @@ Every lifecycle action is a **request** (`requests.kind` ∈ `create`, `update`,
 | Stack status | Meaning |
 |---|---|
 | `provisioning` | First `create` request in flight |
-| `active` | Last apply succeeded, no known drift |
-| `drifted` | Nightly check found differences |
+| `active` | Last apply succeeded |
+| `drifted` | Legacy: no code sets it any more; drift is `stacks.health` (below) and never changes the lifecycle |
 | `updating` | An `update`/`upgrade`/`rollback` request is `applying` |
 | `destroying` | A `destroy` request is `approved` or `applying` |
 | `destroyed` | Destroy applied; directory removed; row retained for audit |
 | `failed` | Last apply failed; stack is locked to remediation requests only |
 
 The `apply.yml` run reports drive these statuses (docs/03 §4.1, WBS 5.3): the first accepted report of an approved request moves the stack to `provisioning`, `updating` or `destroying`; a succeeded run sets `active` (or `destroyed` after a destroy) and records outputs and the applied commit; a failed or cancelled run sets `failed`. Each move is audited as `stack.status_changed`. A failed post-apply smoke test does not fail the apply: the stack is `active` with `health = degraded` (shown by `GET /v1/stacks/{id}`), the team is told, and nothing is destroyed automatically. The platform lock stays visible on the stack (`lock`): the API releases it when the request ends, and if `apply.yml` reports that its own release failed, that is audited with the lock's current state and never changes the request, so an operator sees whether the stack is still held and until when.
+
+`stacks.health` is separate from the lifecycle status, and a drift check moves health only: an `active` stack stays `active` and takes update and destroy requests while its health is `drifted`. Health has one column and two writers, with explicit rules in the pure `drift.NextHealth` ([ADR-0013](adr/0013-drift-in-stack-health.md)): a drift finding sets `drifted`; a clean scan only clears `drifted` to `healthy` and never touches `unknown` or `degraded` (a refresh-only scan runs no smoke test); a scan error changes nothing; an apply sets health from its smoke result (`healthy`, `degraded`, or `unknown` when none ran), which also clears `drifted` because an apply re-asserts configuration. The one lossy path is `degraded` → drift finding → `drifted` → clean scan → `healthy`: the smoke failure is forgotten until the next apply's smoke test.
 
 Transitions are implemented in `backend/internal/request/fsm.go` as a table-driven state machine; every transition is a single Postgres transaction that updates the row, writes `audit_events`, and enqueues follow-up work (outbox pattern → SQS).
 
@@ -236,31 +238,33 @@ PR plans run with `-lock=false` (read-only) and drift checks too; only `apply.ym
 
 **Design.**
 
-1. EventBridge Scheduler triggers the worker nightly; the worker shards active stacks (≤ 256 per dispatch) and calls `workflow_dispatch` on `drift.yml` via the GitHub App. A cron in `drift.yml` is the fallback.
-2. Nightly at 02:00 UTC, per stack, `terraform plan -refresh-only -lock=false -detailed-exitcode` with `iacp-plan`:
-   - exit `0` → no drift; `stacks.last_drift_check_at` updated.
-   - exit `2` → drift; `resource_drift` summarised into `drift.json`.
-   - exit `1` → error; recorded as `drift_check_failed` (not drift).
-3. `drift.yml` reports via `POST /v1/runs`; the API writes a `drift_reports` row (`stack_id`, `run_id`, `drifted_resources` JSONB, `severity`), moves the stack `active → drifted`, and notifies the owning team (Slack/email) with a link to the drift view (`GET /v1/drift`).
-4. Severity: `high` if drift touches security attributes (policies, encryption, public access, security group rules) per a list in `policies/opa/drift_severity.rego`; otherwise `medium`.
+1. `drift.yml` runs nightly at 02:00 UTC (`schedule`) or by `workflow_dispatch`. The worker-driven dispatch with sharding (EventBridge Scheduler, at most 256 stacks per dispatch) is not built; the workflow's own schedule is the trigger today, and `GET /v1/internal/drift/stacks` already answers with at most 256 stacks, least recently checked first.
+2. Per stack, `terraform plan -refresh-only -lock=false -detailed-exitcode` (LocalStack today, `iacp-plan` later):
+   - exit `0` → clean; `stacks.last_drift_check_at` updated. A clean scan only clears `drifted` to `healthy`: it leaves `unknown` and `degraded` as they are, because a refresh-only scan runs no smoke test.
+   - exit `2` → drift; the drifted resources (address, type, actions, changed attribute names) are summarised. An exit `2` with no drifted resource, where only output values changed, is clean.
+   - exit `1` → error; recorded as `result = error` (a failed check, not drift). Health and `last_drift_check_at` stay as they were.
+3. `drift.yml` reports through `POST /v1/internal/drift` (`drift` route class). The API stores a `drift_reports` row (`stack_id`, `pipeline_run_id`, `result`, resource counts, `changed`, `plan_hash`, `status = open` for drift), sets `stacks.health = drifted` through the pure table `drift.NextHealth` (never `stacks.status`), and audits `drift.detected`, `drift.check_failed` or, when a clean scan closes open reports, `drift.cleared`. A stack that is not settled (`provisioning`, `updating`, `destroying`, `failed`, `destroyed`) takes no report (`409 stack_not_checkable`), nor does a stack a request holds the lock of; `GET /v1/internal/drift/stacks` leaves both out. Terraform's failure text never enters the audit log: an error report stores one line, the first `Error:` line of terraform's log (box characters stripped), credential-redacted and capped at 200 characters, or a fixed message when the log has none; source snippets and provider detail are dropped. The audit event carries only the report id.
+4. Report states (`drift.Allowed`, pure): `open` → `reconciled` | `ignored` | `codified`, then final. A clean scan closes every open report of the stack as `reconciled` with no resolver. Resolving a report closes the stack's other open reports with the same status. The target report and the stack's open reports are locked together in id order before a reconcile request is opened, and exactly those reports are updated, so two concurrent resolutions of one stack's reports serialize (one wins, none deadlocks) and a report recorded meanwhile stays open for its own decision. A reconcile that fails after a concurrent clean scan skipped its row leaves that report open until the next clean scan closes it. The open-request refusal (`stack_busy`) runs inside the request's own transaction under the stack lock. A report from a run older than the newest recorded one is stored but moves no health and closes nothing.
+5. Not built yet: severity (`high` if drift touches security attributes, `policies/opa/drift_severity.rego`), notification of the owning team, the cross-team list `GET /v1/drift`, the on-demand check, the `pending_changes` second plan and the production auto-reconcile.
 
-**Resolution options (portal):**
+**Resolution options** (`POST /v1/drift/{id}/resolve`, [03 §6.6](03-data-model-and-api.md#66-drift); matrix rows in [07 §7](07-security-and-policy.md)):
 
 | Option | What happens | Who |
 |---|---|---|
-| **Reconcile** (default) | `reconcile` request: normal plan/apply re-asserts Git config | developer (dev/staging), maintainer (prod) |
-| **Codify** | `update` request that changes module inputs to match reality (generated from drift diff when the drifted attribute maps to an input); otherwise not offered | maintainer |
-| **Ignore** | Suppress notification for this report; stays `drifted` | maintainer, with reason |
+| **Reconcile** | Opens an `update` request for the same stack from the spec of the request that last applied (`stacks.last_applied_request_id`; never an unapplied draft or an update under review), through the ordinary request path: same RBAC, queued behind the stack lock, a PR, plan and review, then apply, which re-asserts the configuration in the repository. Idempotent per report (key `drift-reconcile-<report id>`). The report becomes `reconciled` as soon as the request exists; if the request fails, the next nightly scan opens a fresh report. A reconcile while any request is open for the stack is `409 stack_busy` (that request re-asserts the configuration when it applies); of a stack nothing has applied to, `409 no_recorded_spec`. | developer (any environment: it is an update request) |
+| **Codify** | Records that the live values are intended. **Manual follow-up:** the platform does not generate the update from the drift diff, so the operator submits an `update` request that sets the module inputs; the next scan that finds the configuration matching closes the finding, and one that still finds a difference opens a new report. | developer |
+| **Ignore** | Accepts the finding. Needs a justification of at least 8 characters, stored on the report and in the audit event. The stack stays `drifted` until a clean scan. A later scan with the same difference (same `plan_hash`) as the stack's newest report is stored as an ignored copy, not an open report, and the finding stays ignored; a different difference, or the same one coming back after a clean scan, opens a new report. | maintainer |
 
-High-severity drift in production pages the on-call and auto-opens a `reconcile` request that waits in `plan_ready` for approval.
+A platform admin counts as admin in every team. Every resolution is audited as `drift.resolved` with the action, the reason and the opened request.
 
-**Data touched.** `drift_reports`, `stacks.status`, `stacks.last_drift_check_at`, `pipeline_runs`, `audit_events` (`drift.detected`, `drift.resolved`).
+**Data touched.** `drift_reports`, `stacks.health`, `stacks.last_drift_check_at`, `pipeline_runs` (kind `drift`), `requests` (reconcile), `audit_events` (`drift.detected`, `drift.check_failed`, `drift.cleared`, `drift.resolved`). `iacp_app` can insert reports and update only their resolution columns; findings are immutable and reports are never deleted.
 
 **Edge cases.**
-- *Stack has unapplied changes on `main`* (e.g. after a failed apply): refresh-only isolates real-world drift from pending config changes; the worker additionally runs a full plan and labels the report `pending_changes`.
-- *Provider-side noise* (attributes that always diff): handled in the module with `lifecycle { ignore_changes }` and a module patch release, not by suppressing reports.
-- *Stack locked by an in-flight request*: drift check is skipped and rescheduled; plans are read-only but results would be misleading mid-change.
-- *Resource deleted out of band*: shown as drift with action `delete`; reconcile recreates it (data-bearing resources are flagged `high`).
+- *Stack has unapplied changes on `main`* (e.g. after a failed apply): refresh-only isolates real-world drift from pending config changes. The `pending_changes` label from a second, full plan is not built yet.
+- *Provider-side noise* (attributes that always diff): not handled by suppressing reports. Measured: right after a clean apply, the `s3` module's `aws_s3_bucket` refreshes `policy`, `versioning`, `lifecycle_rule` and `server_side_encryption_configuration` (the resource's deprecated inline attributes, filled in by the separate sub-resources), so a refresh-only plan exits 2 and lists the bucket, while a normal plan is clean. `lifecycle { ignore_changes = [policy, versioning, lifecycle_rule, server_side_encryption_configuration] }` on `aws_s3_bucket` was tried against LocalStack and does **not** help: `ignore_changes` filters planned changes, not the `resource_drift` that a refresh-only plan reports, which compares the refreshed object with the prior state. The module is therefore unchanged. The remaining options are to filter known attribute noise per resource type in the drift scan (the result file already carries the changed attribute names, so a bucket whose only changed attributes are those four can be reported as clean), or to run one normal apply right after creation and compare against that state. Neither is built; until one is, a persisted-state scan reports every S3 stack as drifted.
+- *Stack locked by an in-flight request*: the stack is not listed for a scan, and a report for a stack that became busy meanwhile is refused with `stack_not_checkable` and skipped by the workflow with a notice.
+- *Resource deleted out of band*: shown as drift with action `delete`; reconcile recreates it.
+- *Hermetic state (ADR-0009)*: every scheduled scan is clean today; see [05 §4.4](05-automation-pipeline.md#44-driftyml).
 
 **Runbook — mass drift alert (> 10 stacks in one night).**
 1. Check CloudTrail for a common principal or a provider upgrade in the pipeline image.
@@ -496,35 +500,17 @@ Enforcement points: API middleware (`authz.Require(team, env, action)`), CODEOWN
 
 **Design.**
 
-- `budgets (team_id, environment_id, month, limit_amount, alert_thresholds={50,80,100}, hard_block=true, override_by)` — see [03-data-model-and-api.md](03-data-model-and-api.md).
-- In `pr-validate.yml`, Infracost produces the monthly delta for the plan; the API supplies `current_committed_usd` (sum of `cost_estimates` for the team's active stacks) via `GET /v1/internal/budget-context`. OPA `budget.rego`:
+- `budgets (team_id, environment_id, month, limit_usd, spent_usd, actual_usd, alert_thresholds={50,80,100}, hard_block=true, single_change_cap_usd (NULL = none), override_by, override_reason, override_expires_at, override_max_delta_usd)` and `stacks.committed_monthly_usd` — see [03-data-model-and-api.md](03-data-model-and-api.md). A team admin sets a budget with `PUT /v1/teams/{slug}/budgets/{month}` (admin only, validated, audited); an environment row wins over a team-wide row.
+- In `pr-validate.yml` the `cost` job prices each stack's plan with Infracost (the only job with the key). The separate `budget` job turns that output into one number in the conftest context (`estimated_monthly_cost_usd`), fetches the team's budget from `GET /v1/internal/budget-context`, and evaluates `policies/opa/budget.rego`, running the target branch's policy and tools after a static check that no PR program can run at plan time (trust boundary in [07 §6.7](07-security-and-policy.md#67-budget-limit), decisions in [ADR-0014](adr/0014-budget-gate-inputs-and-deferrals.md)). Used is the largest of `spent_usd`, `actual_usd` and `current_committed_usd` (the committed cost of the team's other active stacks), projected is used plus the stack's estimate:
+  - **deny** (`iacp.budget.exceeded`) when projected is over the limit, the budget is a hard block and no override is in effect;
+  - **deny** (`iacp.budget.single_change_cap`) when one stack's estimate is above the budget's single-change cap, whatever the headroom (opt-in per budget: there is no default, because the estimate is the whole stack, not the change, and a default would block every update of an existing stack above it);
+  - **warn** (`iacp.budget.near_limit`) from 80 percent of the limit;
+  - **no estimate** (Infracost disabled, failed, no total, non-USD): a warning in development, a denial (`iacp.budget.no_estimate`) in staging and production while the budget is a hard block; an override cannot waive it. A budget that cannot be checked is never treated as free. With Infracost disabled, every staging and production change of a team with a hard budget is denied, so enable Infracost first. In development a missing estimate only warns, so a development budget holds only while Infracost succeeds. With no budget set nothing is enforced and the cost stays informational.
+- **Override**: an admin includes `override` (reason, `max_delta_usd`, expiry of at most 31 days) in the budget's `PUT`; the API records the admin (`override_by`) and refuses an override on a production-scoped budget. It waives the hard limit or the cap in **development and staging only**, and only while the overrun it allows (`projected - limit`, or `estimate - cap`) is at most `max_delta_usd`, so several stacks under one override cannot overrun by more than that each; in production nothing waives them (raise the limit instead, which is audited). Re-sending the same override keeps its grantor and audits nothing new. Removing it is another `PUT` without `override`. Audit: `budget.set`, `budget.override.granted`, `budget.override.revoked`. The per-request override (`POST /requests/{id}/budget-override`, `budget_overrides`) is not built.
+- **Committed cost and actuals**: `POST /v1/internal/budget-committed` records a stack's committed monthly cost and `POST /v1/internal/budget-actuals` records `actual_usd` (both shared internal token only, audited). **Nothing calls them yet**: `apply.yml` does not price a plan, and the worker that pulls AWS Cost Explorer daily grouped by `iacp:team`, alerts at `alert_thresholds` and flags a mismatch above 25% between estimate and actual needs a real AWS account (ADR-0009). Until a recorder exists, `current_committed_usd` and `spent_usd` are 0 and **the limit is effectively per stack**: spend split over several stacks, each under the limit, is not caught. This gap is tracked in WBS 8.5.
 
-```rego
-package iacp.budget
+**Data touched.** `budgets` (incl. `override_by`, `actual_usd`), `stacks.committed_monthly_usd`, `cost_estimates` (planned), `audit_events (budget.set, budget.override.granted, budget.override.revoked, budget.actual.recorded, stack.cost.committed)`.
 
-import rego.v1
-
-projected := data.team.current_committed_usd + input.diffTotalMonthlyCost
-
-deny contains msg if {
-  data.budget.hard_block
-  projected > data.budget.monthly_limit_usd
-  not data.request.budget_override_approved
-  msg := sprintf("Projected monthly cost $%.2f exceeds %s budget $%.2f (delta +$%.2f). Request an admin override.",
-    [projected, data.team.slug, data.budget.monthly_limit_usd, to_number(input.diffTotalMonthlyCost)])
-}
-
-warn contains msg if {
-  projected > data.budget.monthly_limit_usd * data.budget.warn_pct / 100
-  msg := sprintf("Projected cost is %.0f%% of budget.", [100 * projected / data.budget.monthly_limit_usd])
-}
-```
-
-- **Override**: an admin approves in the portal (`POST /v1/requests/{id}/budget-override` with reason, max delta and expiry); the API records the approver (`override_by`) and the override details, sets `budget_override_approved` in the OPA context and re-runs checks (re-run of the `pr-validate` workflow via the App).
-- **Actuals**: the worker pulls AWS Cost Explorer daily grouped by `iacp:team` tag, stores actuals per stack, and alerts at the budget's `alert_thresholds`; a mismatch > 25% between Infracost estimate and actuals for a stack is surfaced on the dashboard (usage-based costs).
-
-**Data touched.** `budgets` (incl. `override_by`), `budget_overrides`, `cost_estimates`, CUR/Cost Explorer actuals, `audit_events (budget.override.granted)`.
-
-**Edge cases.** Destroy requests always pass (negative delta). Usage-based services (Lambda, SQS) estimate from `cost.drivers` defaults in `module.yaml` or from an Infracost usage file the team can supply. If Infracost is unavailable, the check fails closed in production and warns in development.
+**Edge cases.** Destroy requests (a plan that creates or updates nothing) always pass, so a team over budget can free budget. Usage-based services (Lambda, SQS) are priced at zero usage unless the module's `cost.drivers` or an Infracost usage file says otherwise, so the estimate is a floor. The estimate is the stack's whole monthly cost, not a delta, so the single-change cap is a per-stack ceiling and an existing stack above it needs the cap raised. An unconfigured API (local-first) means no budget is enforced.
 
 **Runbook — team blocked by budget.** Confirm the estimate in the PR comment; check for orphaned ephemeral stacks (§6) consuming budget; either destroy unused stacks or have the team lead request a budget change (admin edits `budgets`, audited) or a one-off override.

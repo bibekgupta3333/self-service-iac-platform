@@ -62,6 +62,17 @@ class StackRef:
             return None
         return cls(env, team, stack)
 
+    @classmethod
+    def from_root(cls, path: str) -> StackRef | None:
+        """The stack for a stack *root* path (``environments/<env>/<team>/<stack>``), else None.
+
+        Unlike ``from_path`` it accepts nothing deeper, so a path that names a file or
+        another directory inside a stack is not mistaken for the root.
+        """
+        root = _normalize(path)
+        ref = cls.from_path(root + "/_")
+        return ref if ref is not None and ref.path == root else None
+
     @property
     def path(self) -> str:
         return f"{ENVIRONMENTS_DIR}/{self.environment}/{self.team}/{self.stack}"

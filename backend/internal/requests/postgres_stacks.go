@@ -76,6 +76,20 @@ func latestSpec(ctx context.Context, q db.DBTX, stackID uuid.UUID) (json.RawMess
 	return spec, true, nil
 }
 
+// LastAppliedSpec implements Store.
+func (s *pgStore) LastAppliedSpec(ctx context.Context, stackID uuid.UUID) (json.RawMessage, bool, error) {
+	var spec []byte
+	err := s.tx.QueryRow(ctx, `SELECT r.spec FROM stacks s JOIN requests r ON r.id = s.last_applied_request_id
+		WHERE s.id = $1`, stackID).Scan(&spec)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("query last applied spec: %w", err)
+	}
+	return spec, true, nil
+}
+
 // OpenRequestKinds implements Store.
 func (s *pgStore) OpenRequestKinds(ctx context.Context, stackID uuid.UUID) ([]Kind, error) {
 	return openRequestKinds(ctx, s.tx, stackID)

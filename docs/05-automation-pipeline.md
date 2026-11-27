@@ -45,7 +45,7 @@ Principles:
 | 5 | Static security scan | Checkov (+ custom checks in `policies/checkov/`) | `pull_request` | none | Check fails on any `HIGH`/`CRITICAL` or custom `IACP_*` failure | `checkov.sarif`, summary in PR comment |
 | 6 | Plan | `terraform plan -lock=false -out=tfplan` | `pull_request` | `iacp-plan` | Check fails; error surfaced in PR comment and portal | `tfplan`, `plan.json`, normalized `plan.sha256` |
 | 7 | Policy | OPA via `conftest test plan.json -p policies/opa` | after plan | none | `deny` → check fails; `warn` → shown in comment | `conftest.json` |
-| 8 | Cost | Infracost `breakdown` + `diff`; budget evaluated by OPA `budget.rego` | after plan | Infracost API key (secret) | Over-budget → fails unless `budget-override` approved by team admin | `infracost.json`; `cost_estimates` row |
+| 8 | Cost and budget | Infracost `breakdown` (cost job, informational); budget evaluated by OPA `budget.rego` in the separate `budget` job | after plan | Infracost API key (secret, cost job only); OIDC (budget job) | Over a hard budget → the `budget` job fails (`pr-validate-result` requires it); an admin override waives it outside production only | `infracost.json`; `cost_estimates` row (planned) |
 | 9 | Report | PR comment (sticky) + `POST /v1/runs` (OIDC JWT) | end of PR job | OIDC → Platform API | Report failure does not fail check; reconciler fetches run later | `plan_summaries` row; request → `plan_ready` |
 | 10 | Approve + merge | CODEOWNERS review; GitHub Environment reviewer for production | human | — | Merge blocked until all required checks + reviews | request → `approved` |
 | 11 | Apply | `terraform plan` → hash check → `terraform apply tfplan` | `push` to `main` | `iacp-apply` in GitHub Environment `<env>` | Plan-hash mismatch → abort, request `failed` (`plan_mismatch`); apply error → stack `failed`, transient errors auto-retried by backend (max 2 retries with backoff) | `apply.log`, `outputs.json`; stack → `active` |
@@ -291,10 +291,10 @@ jobs:
         env:
           INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
         run: |
+          # Illustrative. The implemented gate (pr-validate.yml) splits this: the cost job holds the
+          # key and uploads infracost.json; the budget job (no key, base-commit tools and policies)
+          # runs `context --budget-gate --cost infracost.json` and `conftest test --namespace iacp.budget`.
           infracost breakdown --path tfplan --format json --out-file infracost.json
-          conftest test infracost.json \
-            --policy "$GITHUB_WORKSPACE/policies/opa/budget" \
-            --data "$RUNNER_TEMP/policy-data.json" --namespace iacp.budget
 
       - name: Upload plan artifact
         if: always()
@@ -370,7 +370,8 @@ Notes:
 | PR comment | `marocchino/sticky-pull-request-comment` in the matrix job | The matrix job uploads `comment.md` / `summary.json`. A separate `comment` job, the only job with `pull-requests: write`, upserts one comment per stack. It writes the hidden `<!-- iacp-plan:<id> -->` marker itself from the validated artifact name, and drops any marker-looking line from the artifact body. Fork PRs are skipped (read-only token); their summary stays in the job summary |
 | Artifacts | `tfplan`, `plan.json`, SARIF, Infracost | The rendered summary (`pr-validate-<id>`), the stack's SARIF (`sarif-<id>`, same-repo PRs only) and, only while Infracost is configured, a redacted plan for the cost job (`cost-input-<id>`, kept one day: `tools.stack_pipeline cost-input` builds it from an allow-list of the fields Infracost reads from a plan JSON, so `prior_state`, `resource_drift`, `output_changes`, variable values and configuration defaults, literal expressions and any key it does not know are dropped, and every value Terraform marks sensitive is nulled). `tfplan` and the full `plan.json` never leave the job. The SARIF upload is non-gating (`continue-on-error`); the summary upload stays fatal because the comment and report jobs read it. All uploads use `overwrite`, so re-running a leg replaces its artifacts instead of failing with 409. `overwrite` is delete-then-upload, so the folded summary is never uploaded over `pr-validate-<id>`: `cost-summary` uploads it as `summary-cost-<id>-<run attempt>` (the attempt keeps a re-run from reusing an earlier attempt's file) and the `comment` and `report` jobs prefer the current attempt's artifact, falling back to `pr-validate-<id>` when it is missing |
 | Code scanning (WBS 6.1) | `upload-sarif` in the matrix job, `security-events: write` there | TFLint and Checkov keep their gating runs unchanged. TFLint runs a second, non-gating time with `--format sarif`; Checkov adds `--output sarif` to its gating run. `python -m tools.stack_pipeline sarif` rewrites the paths to repository paths: stack-relative files are joined to the stack root, and Checkov's downloaded-module files (`<download dir>/…/modules/<name>/vX.Y.Z/<path>`) become `<path>`, the module file in this repository (findings point at the default-branch file, so line numbers can drift from the pinned tag). Every rewrite passes one containment check: an absolute path, `.`/`..`, a path that leaves the repository, a module path outside `modules/` or a stack path outside the stack root becomes the stack's `main.tf`. It also drops each run's `automationDetails` and `versionControlProvenance`, which the PR's job could set, so only the upload's `category` applies. Invalid SARIF is never uploaded. A separate `code-scanning` matrix job, the only job with `security-events: write`, runs only checkout and the pinned `github/codeql-action/upload-sarif`, one category per tool and stack (`pr-validate/tflint/<id>`, `pr-validate/checkov/<id>`). Fork and Dependabot PRs are skipped (read-only token). The job is not part of `pr-validate-result`. These categories exist only on PRs, so code scanning shows every finding as new rather than diffing against `main`. `ci.yml` uploads the module scans the same way under `ci/tflint` and `ci/checkov`, on PRs and on `main`; its `terraform` job strips `automationDetails` and `versionControlProvenance` from both files first, with the runner's own `jq` (no PR code, no `pip install`) into a separate directory, and uploads only that directory, so a file that cannot be stripped is never uploaded raw and a same-repository PR cannot forge another category either. A path with `%` (escapes such as `%2e%2e`), a backslash or a drive letter (`C:`) is not kept as text, whatever branch it would take (stack-relative, repository-root or downloaded module): it also becomes the stack's `main.tf` |
-| Cost (WBS 5.5) | Infracost `breakdown` + `diff`; budget gate in OPA `budget.rego` | Informational only, in two jobs after `validate`. `detect` reads only the repository variable `INFRACOST_ENABLED` (`cost_enabled`; it must be `true`) and never the secret, because `detect` runs PR-checkout Python; without the variable (today, and always on fork and Dependabot PRs) it logs a `::notice::`, both jobs are skipped and the comment has no cost line. Otherwise validate uploads the redacted plan (above). The `cost` job is the only job that receives the key: it checks out nothing and runs only Infracost `INFRACOST_VERSION` (sha256-verified like conftest) as `infracost breakdown --path plan.json --format json`, so no PR-controlled code runs next to the key. The `cost-summary` job has no secret; it runs `tools.stack_pipeline fold-cost`, which adds the monthly total and the priced and usage-based resource counts (and the diff, when Infracost reports one) to `summary.json` (`cost`) and one line of `comment.md`, and uploads them as `summary-cost-<id>-<run attempt>` for the `comment` and `report` jobs (the original summary artifact stays as the fallback). Both jobs have job-level `continue-on-error` and are not part of `pr-validate-result`; the cost never changes `ok`. No `diff` against `main` and no budget gate until WBS 8.5. Infracost Cloud upload is off (`INFRACOST_ENABLE_CLOUD=false`); its pricing API receives resource attributes, not the plan file |
+| Cost (WBS 5.5) | Infracost `breakdown` + `diff`; budget gate in OPA `budget.rego` | Informational only, in two jobs after `validate`. `detect` reads only the repository variable `INFRACOST_ENABLED` (`cost_enabled`; it must be `true`) and never the secret, because `detect` runs PR-checkout Python; without the variable (today, and always on fork and Dependabot PRs) it logs a `::notice::`, both jobs are skipped and the comment has no cost line. Otherwise validate uploads the redacted plan (above). The `cost` job is the only job that receives the key: it checks out nothing and runs only Infracost `INFRACOST_VERSION` (sha256-verified like conftest) as `infracost breakdown --path plan.json --format json`, so no PR-controlled code runs next to the key. The `cost-summary` job has no secret; it runs `tools.stack_pipeline fold-cost`, which adds the monthly total and the priced and usage-based resource counts (and the diff, when Infracost reports one) to `summary.json` (`cost`) and one line of `comment.md`, and uploads them as `summary-cost-<id>-<run attempt>` for the `comment` and `report` jobs (the original summary artifact stays as the fallback). Both jobs have job-level `continue-on-error` and are not part of `pr-validate-result`; the cost never changes `ok`. No `diff` against `main`. The budget gate is the separate `budget` job below. Infracost Cloud upload is off (`INFRACOST_ENABLE_CLOUD=false`); its pricing API receives resource attributes, not the plan file |
+| Budget gate (WBS 8.5) | Infracost output + `budget.rego` | Two pieces. **Before init**, the `validate` job runs `tools.stack_pipeline check-stack` from the **base commit** (a worktree of `base.sha`, run under `python -I` so nothing in the PR can shadow it, and a failure fails the step: no fallback, except for the one change that introduces the guard); the Terraform plugin cache lives under `$RUNNER_TEMP` and `.terraform` is removed before init: the stack root may hold only the files the generator writes (no directory such as `.terraform`, so no committed provider binary) with only `terraform`, `provider`, `module`, `variable`, `output`, `locals` and `moved` blocks and a lock file whose provider versions and hashes the base commit already holds, providers from `hashicorp/aws` and `hashicorp/random` (code and lock file), the `local` or `s3` backend, platform modules at an exact release tag, no JSON configuration and no symlinks, so no PR-authored program (`data "external"`, `data "http"`, a provisioner, another provider) runs during `terraform plan`. **After the cost job**, a `budget` matrix job, in `pr-validate-result`, checks out the **base commit**, so `policies/opa/budget.rego`, `tools/stack_pipeline` and the context builder are the target branch's whatever the PR changes; it has no Infracost key and reads nothing from the PR's stack tree. It downloads `cost-<id>` and `cost-input-<id>` only when `needs.cost.result == 'success'` (otherwise there is no estimate), runs `fetch-budget-context` (OIDC, `id-token: write` is safe because only base code runs; skipped with a notice while `vars.IACP_API_URL` is empty, a failure when it is set) and `context --budget-gate --stack-path <detected path> --cost --api-context`, which writes the Infracost monthly total into the conftest context as one number, then `conftest test --namespace iacp.budget`. No budget configured: only a notice, the cost stays informational. A missing estimate with a budget set (including every run while `vars.INFRACOST_ENABLED` is not `true`): warning in development, denied in staging and production; an override cannot waive it. A target branch without the gate yet gets a notice and no enforcement (only the change that introduces the gate). Trust boundary and the residual risk (WBS 8.8 is the backstop): [07 §6.7](07-security-and-policy.md#67-budget-limit) |
 | API report | `iacp-report` action (`plan_ready` / `plan_failed`) | A separate `report` matrix job, the only job with `id-token: write`, so the OIDC permission is never present while PR-controlled Terraform and providers run. It is OIDC only and never receives `IACP_INTERNAL_TOKEN`, because it runs the PR's own `tools/` and action code; without `vars.IACP_OIDC_AUDIENCE` the report fails as a warning. It downloads the stack's `summary.json` and reports stage `summary` for pipeline `validate`; the status comes from the summary, and a missing summary is reported as `failed`. `head_sha` is `github.sha` (the merge commit). Fork PRs are skipped. A report failure is a warning and never affects `pr-validate-result`. Skipped with a notice while `vars.IACP_API_URL` is empty. The validate report carries the `request_id` and `fencing_token` from `iacp.stack.json`, so it is accepted only while that token is current |
 
 **Module pins.** A local relative source would be denied by `iacp.forbidden.module_source`, which cannot be waived, so stacks always keep the generator's exact pinned git source. Two steps tie that source to the commit recorded in `iacp.stack.json`.
@@ -588,58 +589,19 @@ Nothing in the workflow depends on that. When the generator switches to the S3 b
 
 ### 4.4 `drift.yml`
 
-```yaml
-name: drift
-on:
-  schedule: [{ cron: "0 2 * * *" }]            # nightly 02:00 UTC (fallback; primary trigger is EventBridge Scheduler)
-  workflow_dispatch:
-    inputs:
-      stacks: { description: "JSON array of stack paths (default: all)", required: false }
-permissions: { contents: read }
-jobs:
-  list:
-    runs-on: ubuntu-24.04
-    outputs: { matrix: "${{ steps.list.outputs.matrix }}" }
-    steps:
-      - uses: actions/checkout@<sha> # v4.2.2
-      - id: list
-        run: .github/scripts/list-stacks.sh --state present --paths '${{ inputs.stacks }}'   # max 256 per run; worker shards larger fleets
-  plan:
-    needs: list
-    runs-on: ubuntu-24.04
-    permissions: { contents: read, id-token: write }
-    strategy:
-      fail-fast: false
-      max-parallel: 20
-      matrix: { stack: "${{ fromJSON(needs.list.outputs.matrix) }}" }
-    concurrency: { group: "stack-${{ matrix.stack.stack_id }}-drift", cancel-in-progress: true }
-    defaults: { run: { working-directory: "${{ matrix.stack.path }}" } }
-    steps:
-      - uses: actions/checkout@<sha> # v4.2.2
-      - uses: hashicorp/setup-terraform@<sha> # v3.1.2
-        with: { terraform_version: "1.10.5", terraform_wrapper: false }
-      - uses: aws-actions/configure-aws-credentials@<sha> # v4.0.2
-        with:
-          role-to-assume: arn:aws:iam::${{ matrix.stack.account_id }}:role/iacp-plan
-          aws-region: us-east-1
-      - run: terraform init -lockfile=readonly
-      - id: plan
-        run: |
-          set +e
-          terraform plan -refresh-only -lock=false -detailed-exitcode -out=drift.tfplan -no-color > drift.txt; RC=$?
-          set -e
-          echo "rc=$RC" >> "$GITHUB_OUTPUT"
-          [ $RC -eq 1 ] && exit 1
-          terraform show -json drift.tfplan | jq '{drifted: [.resource_drift[]? | {address, actions: .change.actions}]}' > drift.json
-      - if: steps.plan.outputs.rc == '2'
-        uses: ./.github/actions/iacp-report
-        with: { event: drift_detected, stack-id: "${{ matrix.stack.stack_id }}", payload: "${{ matrix.stack.path }}/drift.json" }
-      - if: steps.plan.outputs.rc == '0'
-        uses: ./.github/actions/iacp-report
-        with: { event: drift_clean, stack-id: "${{ matrix.stack.stack_id }}" }
-```
+Triggers: `schedule` (`0 2 * * *`, 02:00 UTC) and `workflow_dispatch` (optional `stacks` input: a JSON array of stack paths). There is no `pull_request` trigger, so a fork cannot run it with a token; every job also skips a fork (`github.event.repository.fork`), scan and report run only on `refs/heads/main`, and the list job fails loudly on any other ref. Default token `contents: read`; `id-token: write` exists only on the `report` job.
 
-A second, non-refresh plan (`terraform plan -detailed-exitcode`) is run by the worker-dispatched variant when the stack has unapplied config changes on `main` (e.g. a failed apply); see [06-lifecycle-management.md](06-lifecycle-management.md#4-drift-detection).
+| Job | Permissions | What it does |
+|---|---|---|
+| `list` | `contents: read` | `python -m tools.stack_pipeline drift list`: the active stack roots under `environments/` (`lifecycle: active` in `iacp.stack.json`; a destroyed stack's marked root is skipped) as a matrix, at most 256 (warning when cut). The dispatch input is validated (existing, active stack paths) and never echoed. |
+| `scan` (matrix) | `contents: read` | Per stack, `concurrency: iacp-stack-<id>-drift` (a newer run replaces an older scan). A LocalStack service container with the dummy credentials and the Terraform local backend, as in `apply.yml`. Pins, `init -lockfile=readonly` and installed-module verification run with `continue-on-error`, then `terraform plan -refresh-only -lock=false -detailed-exitcode`; `terraform show -json` of the plan feeds `drift scan`, which classifies the exit code (0 clean, 2 drift, 1 error) and writes the result file. A step that stopped the plan becomes an `error` result: a failed check is never drift. For a failed plan the whole log is handed to `drift scan --error-file`, which keeps only the first `Error:` line (redacted, 200 characters) and drops the rest. The result file (addresses, resource types, actions, the **names** of the changed attributes, a fingerprint of those) is the only artifact (`drift-<id>`, one day); the plan file and every attribute value stay in the job. |
+| `report` | `contents: read`, `id-token: write` | One job, no Terraform and no module code, `concurrency: iacp-drift-report`. Downloads the result files as untrusted data, then `drift report`: `GET /v1/internal/drift/stacks` to learn which stacks the API wants checked now (settled, not locked by a request), then `POST /v1/internal/drift` for every scanned stack on that list, **each request with its own OIDC token** (the API refuses a reused `jti`). A scanned stack the API does not list (it became busy since) is skipped with a notice; a due stack with no result is a warning; a rejected report fails the job after the others were sent. With `vars.IACP_API_URL` empty the step prints a notice and sends nothing. |
+
+The result file is validated strictly on both sides: `tools.stack_pipeline.drift.outcome_from_dict` refuses unknown fields, wrong types and an inconsistent outcome before anything is sent, and the API validates the report again (`drift.Validate`). The route class (`drift`, [03 §6.9](03-data-model-and-api.md#69-pipeline-runs-actions-callbacks)) accepts only `drift.yml` on main via `schedule` or `workflow_dispatch`, and the report must carry the calling run's own id, attempt and commit.
+
+**What is and is not meaningful today (ADR-0009).** State is hermetic: no state file is committed, the local backend starts empty in every job and the LocalStack container is discarded. A refresh-only plan over an empty state has nothing to refresh, so every scan exits 0 and every report says `clean`. A scheduled run therefore proves the pipeline, not the infrastructure: listing, pins, init, the plan, classification, the result artifact, the API list, one OIDC token per report, the report and the stack-health transition. A `drifted` result needs state that survives between runs (the S3 backend once ADR-0009 ends, or a long-lived LocalStack with its state restored); until then the drifted path is covered by the backend and tools tests, which feed recorded refresh-only plans through the same code, and was run by hand against LocalStack (apply, change a bucket out of band, `plan -refresh-only` exits 2). Provider noise is real: right after a clean `apply`, `aws_s3_bucket` of the `s3` module already refreshes `policy`, `versioning`, `lifecycle_rule` and `server_side_encryption_configuration` (the resource's deprecated inline attributes, filled in by the separate sub-resources), so a persisted-state scan reports that bucket as drifted until the module hides those attributes (docs/06 §4, provider-side noise).
+
+A second, non-refresh plan (`terraform plan -detailed-exitcode`) for stacks with unapplied config changes on `main` (the `pending_changes` label) is not built yet; see [06-lifecycle-management.md](06-lifecycle-management.md#4-drift-detection).
 
 ### 4.5 `ttl-reaper.yml`
 
@@ -823,8 +785,8 @@ For **development** stacks, the API auto-approves on behalf of the request when 
 
 | What | Mechanism | Key | Notes |
 |---|---|---|---|
-| Terraform providers | `TF_PLUGIN_CACHE_DIR` + `actions/cache` | OS + hash of stack `.terraform.lock.hcl` | Generator writes lock files with `terraform providers lock -platform=linux_amd64 -platform=darwin_arm64`, so `-lockfile=readonly` verifies checksums even from cache. `pr-validate.yml` and `apply.yml` use the same path and key; a cache saved by `apply.yml` on `main` is restorable by every PR. `apply.yml` runs no TFLint, so it has no plugin cache |
-| TFLint plugins | `TFLINT_PLUGIN_DIR` + `actions/cache` | OS + TFLint version + hash of `.tflint.hcl` | |
+| Terraform providers | `TF_PLUGIN_CACHE_DIR` + `actions/cache` | OS + hash of stack `.terraform.lock.hcl` | Generator writes lock files with `terraform providers lock -platform=linux_amd64 -platform=darwin_arm64`, so `-lockfile=readonly` verifies checksums even from cache. The cache directory is always under `$RUNNER_TEMP`, never in the checkout. `pr-validate.yml` has **no provider cache**: a PR's runs can restore caches saved on the PR's own ref, so an earlier run with a changed workflow could leave a provider package that a later, clean-looking run restores and `init` accepts when the lock lists its hash; providers are downloaded and verified on every run. `apply.yml` and `drift.yml` run on `main`, restore only with the exact key (no `restore-keys`) and clear `.terraform` before init, so only `main` itself can have saved what they restore. `apply.yml` runs no TFLint, so it has no plugin cache |
+| TFLint plugins | none in `pr-validate.yml` | n/a | Not cached there, for the same reason as the providers: TFLint runs a cached plugin binary without checking it again, and a PR's later runs can restore what an earlier run of the same PR saved. `tflint --init` downloads and verifies the plugin on every run, with `GITHUB_TOKEN`, into `$RUNNER_TEMP/tflint-plugins` (not the checkout) |
 | Python tools (Checkov, `tools/stack_pipeline`) | `actions/setup-python` pip cache | `policies/checkov/requirements.txt` | |
 | Go modules (Terratest) | `actions/setup-go` built-in cache | `tests/go.sum` | |
 | Checkov / conftest / Infracost binaries | Pre-built runner image `ghcr.io/acme/self-service-iac-platform-ci@sha256:...` (optional) | image digest | Cuts ~40s per job |

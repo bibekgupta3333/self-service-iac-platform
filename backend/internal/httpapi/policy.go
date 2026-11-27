@@ -57,6 +57,11 @@ func DefaultPolicies() PolicyTable {
 		// Stacks of the caller's teams; the queries are scoped by identity.Visibility.
 		"GET /v1/stacks":      {Action: rbac.ActionRead, Scope: ScopeAnyTeam},
 		"GET /v1/stacks/{id}": {Action: rbac.ActionRead, Scope: ScopeAnyTeam},
+		// Drift history of one visible stack. Resolving needs the developer role at least
+		// (reconcile, codify); the service raises it to maintainer for ignore and checks the
+		// caller's role in the report's team (docs/07 matrix).
+		"GET /v1/stacks/{id}/drift":   {Action: rbac.ActionRead, Scope: ScopeAnyTeam},
+		"POST /v1/drift/{id}/resolve": {Action: rbac.ActionDriftReconcile, Scope: ScopeAnyTeam},
 		// Extending an ephemeral stack's TTL needs the stack.extend_ttl role (developer) in the
 		// stack's team; the service checks it against the stack's team and environment and
 		// answers 404 for a stack of another team.
@@ -72,6 +77,11 @@ func DefaultPolicies() PolicyTable {
 		"POST /v1/requests": {Action: rbac.ActionRequestCreate, Scope: ScopeAuthenticated},
 		// The caller's own profile and session.
 		"GET /v1/me": {Action: rbac.ActionRead, Scope: ScopeAuthenticated},
+		// Team budgets are admin-only (docs/07 matrix). The route policy requires the admin role
+		// in some team; BudgetAdminService then requires it in the team named in the path.
+		"GET /v1/teams/{slug}/budgets":         {Action: rbac.ActionBudgetSet, Scope: ScopeAnyTeam},
+		"GET /v1/teams/{slug}/budgets/{month}": {Action: rbac.ActionBudgetSet, Scope: ScopeAnyTeam},
+		"PUT /v1/teams/{slug}/budgets/{month}": {Action: rbac.ActionBudgetSet, Scope: ScopeAnyTeam},
 	}
 }
 

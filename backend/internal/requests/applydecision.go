@@ -16,6 +16,9 @@ const (
 	HealthUnknown  StackHealth = "unknown"
 	HealthHealthy  StackHealth = "healthy"
 	HealthDegraded StackHealth = "degraded"
+	// HealthDrifted: a drift scan found the live stack differs from its configuration. An apply
+	// re-asserts the configuration and so replaces it (docs/06 §4, ADR-0013).
+	HealthDrifted StackHealth = "drifted"
 )
 
 // ApplyPhase is what the apply pipeline has told the platform about one request so far.

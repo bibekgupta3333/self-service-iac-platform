@@ -1,0 +1,516 @@
+package drift
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/audit"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/identity"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/platform"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/rbac"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/requests"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/runs"
+)
+
+// Entry is a stored drift report with the stack it belongs to.
+type Entry struct {
+	ID              uuid.UUID
+	StackID         uuid.UUID
+	StackPath       string
+	TeamID          uuid.UUID
+	Team            string
+	Environment     string
+	PipelineRunID   uuid.UUID
+	Result          Result
+	TerraformExit   int
+	Summary         Summary
+	Changed         json.RawMessage
+	PlanHash        string
+	LogURL          string
+	Error           string
+	Status          *Status // nil unless Result is drifted
+	DetectedAt      time.Time
+	ResolvedBy      *uuid.UUID
+	ResolvedAt      *time.Time
+	ResolutionNote  string
+	ResolutionReqID *uuid.UUID
+}
+
+// StackRow is the stack row a report locks.
+type StackRow struct {
+	ID     uuid.UUID
+	TeamID uuid.UUID
+	Status string // lifecycle status
+	Health requests.StackHealth
+	// Locked is true while a request holds the stack's lock (draft through applying).
+	Locked bool
+}
+
+// DueStack is a stack drift.yml should check.
+type DueStack struct {
+	ID          uuid.UUID
+	Path        string
+	Team        string
+	Environment string
+	Region      string
+}
+
+// RunRow is the pipeline_runs row of a drift run.
+type RunRow struct {
+	StackID     uuid.UUID
+	Failed      bool
+	GitHub      GitHubRun
+	WorkflowRef string
+	LogURL      string
+	At          time.Time
+}
+
+// NewReport is a drift_reports row to insert.
+type NewReport struct {
+	ID            uuid.UUID
+	StackID       uuid.UUID
+	PipelineRunID uuid.UUID
+	Report        Report
+	Changed       json.RawMessage
+	At            time.Time
+	// Ignored, when set, stores the report as ignored with the earlier resolution copied:
+	// the same difference as an ignored finding stays accepted (and visible in the history).
+	Ignored *Resolved2
+}
+
+// Resolved2 is the resolution copied onto a suppressed report.
+type Resolved2 struct {
+	By     *uuid.UUID
+	Reason string
+	At     time.Time
+}
+
+// Resolution is the new state of an open report and the open siblings that were locked with
+// it. IDs are exactly the rows to update: a report recorded after the lock stays open for
+// its own decision.
+type Resolution struct {
+	ReportID  uuid.UUID
+	IDs       []uuid.UUID
+	StackID   uuid.UUID
+	Status    Status
+	By        *uuid.UUID // nil when a clean scan closes the reports
+	Reason    string
+	RequestID *uuid.UUID
+	At        time.Time
+}
+
+// Store is the transactional persistence port. Every method runs in one transaction.
+type Store interface {
+	// LockStack loads the stack row FOR NO KEY UPDATE (stacks first, the order every lock
+	// operation uses). apperr NotFound when no stack has the path.
+	LockStack(ctx context.Context, path string) (StackRow, error)
+	// UpsertRun inserts the drift run, or updates its status when the same run was reported
+	// before (ON CONFLICT on run id, attempt and stack).
+	UpsertRun(ctx context.Context, r RunRow) (uuid.UUID, error)
+	// InsertReport inserts the report; inserted is false when the run already has one.
+	InsertReport(ctx context.Context, r NewReport) (inserted bool, err error)
+	ReportByRun(ctx context.Context, runID uuid.UUID) (Entry, error)
+	// LockReports locks the target report and the stack's currently open reports FOR UPDATE
+	// in id order, and returns the target and the ids it locked. It never locks the stack
+	// row: opening a reconcile request needs it, and a scan holds it while it waits for
+	// report rows (CloseOpen skips locked ones, so the two cannot wait on each other). The
+	// fixed order makes two resolutions of one stack's reports serialize instead of
+	// deadlocking.
+	LockReports(ctx context.Context, id uuid.UUID) (target Entry, locked []uuid.UUID, err error)
+	// NewerRunExists reports whether the stack already has a drift report from a workflow run
+	// with a higher run id than runID, so a report arriving now is stale.
+	NewerRunExists(ctx context.Context, stackID uuid.UUID, runID int64) (bool, error)
+	// NewestReport returns the stack's newest report that is not a failed check (an error
+	// says nothing about drift); ok is false when it has none.
+	NewestReport(ctx context.Context, stackID uuid.UUID) (e Entry, ok bool, err error)
+	// SetStackCheck records a finished check: health, and last_drift_check_at unless the
+	// check failed (checkedAt is nil then).
+	SetStackCheck(ctx context.Context, stackID uuid.UUID, health requests.StackHealth, checkedAt *time.Time) error
+	// CloseOpen resolves every open report of the stack as reconciled (a clean scan), except
+	// reports another transaction is resolving right now, and returns how many it closed.
+	CloseOpen(ctx context.Context, stackID uuid.UUID, at time.Time) (int, error)
+	// Resolve moves the report, and the stack's other open reports, to r.Status; it returns
+	// how many reports it changed.
+	Resolve(ctx context.Context, r Resolution) (int, error)
+	AppendAudit(ctx context.Context, e audit.Event) error
+}
+
+// Repository is the persistence port of the drift service.
+type Repository interface {
+	InTx(ctx context.Context, fn func(Store) error) error
+	// DueStacks lists up to limit stacks to check: settled, with no request holding their
+	// lock, least recently checked first.
+	DueStacks(ctx context.Context, limit int) ([]DueStack, error)
+	// ListByStack returns a visible stack's reports, newest first; apperr NotFound
+	// (stack_not_found) when the stack does not exist or is hidden.
+	ListByStack(ctx context.Context, v identity.Visibility, stackID uuid.UUID, limit int) ([]Entry, error)
+	// Get returns a report of a visible stack; apperr NotFound otherwise.
+	Get(ctx context.Context, v identity.Visibility, id uuid.UUID) (Entry, error)
+}
+
+// TeamVisibility resolves the teams a caller may read (identity.UserStore).
+type TeamVisibility interface {
+	VisibleTeams(ctx context.Context, p identity.Principal) (identity.Visibility, error)
+}
+
+// Reconciled is the update request a reconcile opened.
+type Reconciled struct {
+	RequestID uuid.UUID
+	ShortID   string
+	Status    string
+}
+
+// Reconciler opens the update request that re-asserts a stack's recorded configuration
+// (requests.Service.ReconcileStack). The key makes a retried resolve open one request.
+type Reconciler interface {
+	ReconcileStack(ctx context.Context, by identity.Principal, stackID uuid.UUID, justification, key string) (Reconciled, error)
+}
+
+// Service records drift reports and resolves them.
+type Service struct {
+	repo       Repository
+	teams      TeamVisibility
+	members    requests.Memberships
+	reconciler Reconciler
+	clock      platform.Clock
+	ids        platform.IDGenerator
+}
+
+// NewService returns a Service.
+func NewService(repo Repository, teams TeamVisibility, members requests.Memberships, reconciler Reconciler,
+	clock platform.Clock, ids platform.IDGenerator) *Service {
+	return &Service{repo: repo, teams: teams, members: members, reconciler: reconciler, clock: clock, ids: ids}
+}
+
+// Recorded is the outcome of Record.
+type Recorded struct {
+	Entry    Entry
+	Replayed bool // the run had already reported this stack
+	// Suppressed is true when the finding equals the stack's ignored report: no new report
+	// is opened and Entry is the ignored one.
+	Suppressed bool
+}
+
+// MaxDueStacks bounds one drift.yml dispatch (docs/06 §4: at most 256 stacks).
+const MaxDueStacks = 256
+
+// DueStacks lists the stacks the next drift run should check.
+func (s *Service) DueStacks(ctx context.Context, limit int) ([]DueStack, error) {
+	if limit <= 0 || limit > MaxDueStacks {
+		limit = MaxDueStacks
+	}
+	out, err := s.repo.DueStacks(ctx, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list stacks to check: %w", err)
+	}
+	return out, nil
+}
+
+// Record validates a drift check reported by drift.yml, stores it and moves the stack's
+// health. The caller's OIDC identity must be the reporting run itself. A replay of the same
+// run and stack returns the stored report and changes nothing.
+func (s *Service) Record(ctx context.Context, by identity.Principal, r Report) (Recorded, error) {
+	if errs := Validate(r); len(errs) > 0 {
+		return Recorded{}, apperr.Invalid("validation_failed", "drift report is invalid", errs...)
+	}
+	// Reuse the run provenance rules: the run and commit are the caller's own, the workflow
+	// is drift.yml, on main, via schedule or workflow_dispatch.
+	if err := runs.CheckProvenance(runs.Report{Pipeline: runs.KindDrift, GitHub: runs.GitHubRun{
+		RunID: r.GitHub.RunID, RunAttempt: r.GitHub.RunAttempt, HeadSHA: r.GitHub.HeadSHA}}, by.Workflow); err != nil {
+		return Recorded{}, err
+	}
+	// terraform's own text can echo values; keep one redacted summary line (never in the audit log).
+	if r.Result == ResultError {
+		r.Error = SummarizeError(r.Error)
+	}
+	changed, err := json.Marshal(nonNil(r.Changed))
+	if err != nil {
+		return Recorded{}, fmt.Errorf("encode changed resources: %w", err)
+	}
+	var out Recorded
+	err = s.repo.InTx(ctx, func(st Store) error {
+		stack, err := st.LockStack(ctx, r.StackPath)
+		if err != nil {
+			return err
+		}
+		if !Checkable(stack.Status) {
+			return apperr.Conflict("stack_not_checkable",
+				fmt.Sprintf("the stack is %s; drift is only checked for settled stacks", stack.Status))
+		}
+		if stack.Locked {
+			return apperr.Conflict("stack_not_checkable",
+				"a request holds the stack's lock; its apply will re-assert the configuration, so the scan would be misleading")
+		}
+		now := s.clock.Now()
+		stale, err := st.NewerRunExists(ctx, stack.ID, r.GitHub.RunID)
+		if err != nil {
+			return fmt.Errorf("check for newer reports: %w", err)
+		}
+		var ignored *Resolved2
+		if r.Result == ResultDrifted && !stale {
+			// Against the newest report that is not a failed check: ignore X, a clean night,
+			// then X again is a new finding, because the clean report is the newest; a failed
+			// check in between says nothing, so it does not break the suppression.
+			newest, ok, err := st.NewestReport(ctx, stack.ID)
+			if err != nil {
+				return fmt.Errorf("load the newest report: %w", err)
+			}
+			if ok && Suppresses(newest, r.PlanHash) {
+				ignored = &Resolved2{By: newest.ResolvedBy, Reason: newest.ResolutionNote, At: now}
+			}
+		}
+		runID, err := st.UpsertRun(ctx, RunRow{StackID: stack.ID, Failed: r.Result == ResultError, GitHub: r.GitHub,
+			WorkflowRef: by.Login, LogURL: r.LogURL, At: now})
+		if err != nil {
+			return fmt.Errorf("record drift run: %w", err)
+		}
+		inserted, err := st.InsertReport(ctx, NewReport{ID: s.ids.NewID(), StackID: stack.ID, PipelineRunID: runID,
+			Report: r, Changed: changed, At: now, Ignored: ignored})
+		if err != nil {
+			return fmt.Errorf("insert drift report: %w", err)
+		}
+		entry, err := st.ReportByRun(ctx, runID)
+		if err != nil {
+			return fmt.Errorf("load drift report: %w", err)
+		}
+		out = Recorded{Entry: entry, Replayed: !inserted, Suppressed: ignored != nil}
+		if !inserted {
+			return nil
+		}
+		return s.apply(ctx, st, by, stack, entry, stale, ignored != nil, now)
+	})
+	if err != nil {
+		return Recorded{}, err
+	}
+	return out, nil
+}
+
+// apply moves the stack's health for a freshly stored report and audits it. A stale report
+// (a newer run already reported) is kept for the history but moves nothing: a delayed job
+// must not undo a newer finding or close newer reports.
+func (s *Service) apply(ctx context.Context, st Store, by identity.Principal, stack StackRow, e Entry, stale, suppressed bool, now time.Time) error {
+	if !stale {
+		var checked *time.Time
+		if e.Result != ResultError {
+			checked = &now
+		}
+		if err := st.SetStackCheck(ctx, stack.ID, NextHealth(stack.Health, e.Result), checked); err != nil {
+			return fmt.Errorf("update stack health: %w", err)
+		}
+	}
+	record := func(action string, payload map[string]any) error {
+		payload["report_id"], payload["stack_path"], payload["run_id"] = e.ID, e.StackPath, e.PipelineRunID
+		if stale {
+			payload["stale"] = true
+		}
+		if suppressed {
+			payload["suppressed"] = true // auto-accepted: it matched an ignored finding
+		}
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("encode audit payload: %w", err)
+		}
+		return st.AppendAudit(ctx, audit.Event{OccurredAt: now, ActorType: string(by.Type), ActorID: by.AuditActorID(),
+			Action: action, SubjectType: "stack", SubjectID: stack.ID.String(), TeamID: &stack.TeamID, Payload: b})
+	}
+	switch e.Result {
+	case ResultDrifted:
+		return record("drift.detected", map[string]any{"resources_drifted": e.Summary.Drifted, "plan_hash": e.PlanHash})
+	case ResultError:
+		// The report id is enough: terraform's text never enters the append-only audit log.
+		return record("drift.check_failed", map[string]any{})
+	}
+	if stale {
+		return nil
+	}
+	n, err := st.CloseOpen(ctx, stack.ID, now)
+	if err != nil {
+		return fmt.Errorf("close open drift reports: %w", err)
+	}
+	if n > 0 {
+		return record("drift.cleared", map[string]any{"closed_reports": n})
+	}
+	return nil
+}
+
+func nonNil(c []ChangedResource) []ChangedResource {
+	if c == nil {
+		return []ChangedResource{}
+	}
+	return c
+}
+
+// MaxHistory bounds ListByStack.
+const (
+	DefaultHistory = 30
+	MaxHistory     = 200
+)
+
+// List returns the drift history of a stack the caller may see, newest first.
+func (s *Service) List(ctx context.Context, by identity.Principal, stackID uuid.UUID, limit int) ([]Entry, error) {
+	v, err := s.visibility(ctx, by)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case limit <= 0:
+		limit = DefaultHistory
+	case limit > MaxHistory:
+		limit = MaxHistory
+	}
+	out, err := s.repo.ListByStack(ctx, v, stackID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list drift reports: %w", err)
+	}
+	return out, nil
+}
+
+func (s *Service) visibility(ctx context.Context, by identity.Principal) (identity.Visibility, error) {
+	if by.UserID == uuid.Nil {
+		return identity.Visibility{}, &apperr.Error{Kind: apperr.KindUnauthenticated, Code: "unauthenticated",
+			Message: "drift reports are shown to users"}
+	}
+	v, err := s.teams.VisibleTeams(ctx, by)
+	if err != nil {
+		return identity.Visibility{}, fmt.Errorf("resolve visible teams: %w", err)
+	}
+	return v, nil
+}
+
+// Resolved is the outcome of Resolve.
+type Resolved struct {
+	Entry   Entry
+	Request *Reconciled // the update request a reconcile opened
+	// Replayed is true when the report was already resolved with the same action.
+	Replayed bool
+}
+
+// Resolve applies a user's decision to an open report. The caller needs the role the
+// action's matrix row asks for in the stack's team (a viewer or outsider sees nothing: a
+// stack the caller may not see is not found). A reconcile opens an update request that
+// re-asserts the stack's recorded configuration, through the ordinary request path, so it
+// is planned, reviewed and applied like any other change. A codify records that the
+// operator will bring the configuration in line by hand: no request is opened (docs/06 §4).
+func (s *Service) Resolve(ctx context.Context, by identity.Principal, id uuid.UUID, in ResolveInput) (Resolved, error) {
+	if errs := ValidateResolve(in); len(errs) > 0 {
+		return Resolved{}, apperr.Invalid("validation_failed", "resolve request is invalid", errs...)
+	}
+	v, err := s.visibility(ctx, by)
+	if err != nil {
+		return Resolved{}, err
+	}
+	cur, err := s.repo.Get(ctx, v, id)
+	if err != nil {
+		return Resolved{}, fmt.Errorf("get drift report: %w", err)
+	}
+	role, err := s.members.RoleInTeam(ctx, cur.Team, by.UserID)
+	if err != nil {
+		return Resolved{}, fmt.Errorf("lookup membership of team %s: %w", cur.Team, err)
+	}
+	if by.PlatformAdmin {
+		// The flag on the principal is what route policies use too (the dev-mode user has it
+		// without a users row that says so); a platform admin is admin in every team.
+		role = rbac.RoleAdmin
+	}
+	if d := rbac.Decide(role, RBACAction(in.Action), rbac.Resource{Environment: cur.Environment}); !d.Allowed {
+		return Resolved{}, apperr.Forbidden(fmt.Sprintf("%s drift for team %s needs the %s role or higher", in.Action, cur.Team, d.Need))
+	}
+
+	var out Resolved
+	err = s.repo.InTx(ctx, func(st Store) error {
+		// The report row is locked before anything is opened, so of two concurrent
+		// resolutions (two users, or reconcile against ignore) one wins and the other sees
+		// the result; the loser never opens a request.
+		locked, lockedIDs, err := st.LockReports(ctx, id)
+		if err != nil {
+			return err
+		}
+		if replay, ok := replayOf(locked, in.Action); ok {
+			out = replay
+			return nil
+		}
+		next, ok := Allowed(statusOf(locked), in.Action)
+		if !ok {
+			return resolvedConflict(locked)
+		}
+		var req *Reconciled
+		if in.Action == ActionReconcile {
+			// The request uses its own transaction and connection. A key derived from the
+			// report makes a retry after a later failure return the same request.
+			r, err := s.reconciler.ReconcileStack(ctx, by, locked.StackID, ReconcileJustification(in.Reason, locked.StackPath),
+				"drift-reconcile-"+locked.ID.String())
+			if err != nil {
+				return fmt.Errorf("open the reconcile request: %w", err)
+			}
+			req = &r
+		}
+		now := s.clock.Now()
+		res := Resolution{ReportID: id, IDs: lockedIDs, StackID: locked.StackID, Status: next, By: &by.UserID, Reason: in.Reason, At: now}
+		if req != nil {
+			res.RequestID = &req.RequestID
+		}
+		closed, err := st.Resolve(ctx, res)
+		if err != nil {
+			return fmt.Errorf("resolve drift report: %w", err)
+		}
+		payload := map[string]any{"report_id": id, "stack_path": locked.StackPath, "action": in.Action, "status": next,
+			"reason": in.Reason, "closed_reports": closed}
+		if req != nil {
+			payload["request_id"], payload["request_short_id"] = req.RequestID, req.ShortID
+		}
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("encode audit payload: %w", err)
+		}
+		if err := st.AppendAudit(ctx, audit.Event{OccurredAt: now, ActorType: string(by.Type), ActorID: by.AuditActorID(),
+			Action: "drift.resolved", SubjectType: "stack", SubjectID: locked.StackID.String(), TeamID: &locked.TeamID, Payload: b}); err != nil {
+			return fmt.Errorf("audit: %w", err)
+		}
+		locked.Status, locked.ResolvedBy, locked.ResolvedAt = &next, &by.UserID, &now
+		locked.ResolutionNote, locked.ResolutionReqID = in.Reason, res.RequestID
+		out = Resolved{Entry: locked, Request: req}
+		return nil
+	})
+	if err != nil {
+		return Resolved{}, err
+	}
+	return out, nil
+}
+
+// Suppresses reports whether e, a stack's newest drifted report, is an ignored finding with
+// the same plan hash as a new scan: the difference is unchanged, so it stays accepted and
+// no new report is opened. A different hash is a different difference. Pure.
+func Suppresses(e Entry, planHash string) bool {
+	return e.Result == ResultDrifted && e.Status != nil && *e.Status == StatusIgnored && planHash != "" && e.PlanHash == planHash
+}
+
+// statusOf is the resolution status of an entry; a report that is not drifted has none to
+// move, which Allowed treats as not open.
+func statusOf(e Entry) Status {
+	if e.Status == nil {
+		return ""
+	}
+	return *e.Status
+}
+
+// replayOf recognises a retry: the report is already resolved with the action's status.
+// Pure.
+func replayOf(e Entry, a Action) (Resolved, bool) {
+	want, ok := StatusFor(a)
+	if !ok || e.Status == nil || *e.Status != want {
+		return Resolved{}, false
+	}
+	return Resolved{Entry: e, Replayed: true}, true
+}
+
+func resolvedConflict(e Entry) error {
+	if e.Status == nil {
+		return apperr.Conflict("drift_not_resolvable", fmt.Sprintf("a %s report has no drift to resolve", e.Result))
+	}
+	return apperr.Conflict("drift_already_resolved", fmt.Sprintf("the drift report is already %s", *e.Status))
+}

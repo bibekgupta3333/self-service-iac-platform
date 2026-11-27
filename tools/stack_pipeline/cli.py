@@ -12,15 +12,17 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .adapters import AwsCliTagReader, FileSystemStackRepository, GitCli, GitDiff
-from .api_client import ApiError, FreshCredentials, IacpApiClient, TokenSource
+from .api_client import STACK_PATH_RE, ApiError, FreshCredentials, IacpApiClient, TokenSource
 from .convergence import plan_problem, residual_changes
 from .cost import fold_cost, parse_infracost, redact_plan
+from .drift import MAX_CHANGED, DriftOutcome, build_outcome, outcome_from_dict
 from .detection import DEFAULT_MAX_STACKS, DetectionError, DetectionPolicy, DetectionResult, StackDetector
-from .models import StackMetadataError
+from .models import StackMetadataError, StackRef
 from .module_install import MANIFEST, ModuleInstallVerifier, parse_manifest
 from .module_pins import DEFAULT_REPO_URL, DEFAULT_TRUSTED_REF, ModulePinVerifier, PinError, Resolution, insteadof_config
 from .plan_summary import render_markdown, summarize
-from .policy_context import build_context
+from .stack_guard import LOCK_FILE, Violation, check_entries, check_stack, lock_allowlist
+from .policy_context import ContextError, build_budget_context, build_context
 from .sarif import SarifError, rebase_sarif, result_count
 from .smoke import SmokeTester
 from .report import (
@@ -35,6 +37,8 @@ from .report import (
     summary_status,
 )
 
+DRIFT_MAX_STACKS = 256  # one drift.yml dispatch (docs/06 section 4)
+MAX_LOG_BYTES = 1_000_000  # how much of terraform's log `drift scan --error-file` reads
 API_URL_ENV = "IACP_API_URL"
 AUDIENCE_ENV = "IACP_OIDC_AUDIENCE"
 
@@ -64,8 +68,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     context = sub.add_parser("context", help="write the conftest --data context for a stack")
-    context.add_argument("stack_dir", type=Path)
+    context.add_argument("stack_dir", type=Path, nargs="?",
+                         help="stack root with iacp.stack.json (not used with --budget-gate)")
     context.add_argument("--allowed-region", action="append", default=[], help="override the policy default (repeatable)")
+    context.add_argument("--budget-gate", action="store_true",
+                         help="the budget gate's context (policies/opa/budget.rego): identity from --stack-path, "
+                              "budget from --api-context, the monthly cost from --cost; a missing estimate counts")
+    context.add_argument("--stack-path", help="environments/<env>/<team>/<stack>, from the detect job (--budget-gate)")
+    context.add_argument("--cost", type=Path,
+                         help="infracost breakdown --format json output of the isolated cost job (--budget-gate); "
+                              "absent or unusable means no estimate")
+    context.add_argument("--api-context", type=Path,
+                         help="`fetch-budget-context` output (--budget-gate); absent means no budget is configured")
+
+    guard = sub.add_parser("check-stack",
+                           help="static check of a stack root's HCL before init and plan (no plan-time code)")
+    guard.add_argument("stack_dir", type=Path)
+    guard.add_argument("--lock-from", type=Path, metavar="DIR",
+                       help="a checkout of the base commit: every .terraform.lock.hcl under DIR/environments is the "
+                            "allow-list of provider versions and hashes the stack's lock may carry")
+
+    fetch = sub.add_parser("fetch-budget-context",
+                           help="GET /v1/internal/budget-context for a stack root and write it to a file")
+    fetch.add_argument("--stack-path", required=True, help="environments/<env>/<team>/<stack>")
+    fetch.add_argument("--out", type=Path, required=True)
+    _api_arguments(fetch)
 
     summary = sub.add_parser("summary", help="summarise a plan and policy result as Markdown and JSON")
     summary.add_argument("stack_dir", type=Path)
@@ -152,6 +179,27 @@ def build_parser() -> argparse.ArgumentParser:
                         help="report failures are ::warning:: annotations and exit 0 (the report never fails the job)")
     report.add_argument("--dry-run", action="store_true", help="print the payload instead of sending it")
 
+    drift = sub.add_parser("drift", help="nightly drift check: list stacks, summarise a refresh-only plan, report it")
+    drift_sub = drift.add_subparsers(dest="drift_action", required=True)
+    d_list = drift_sub.add_parser("list", help="matrix of the active stack roots under environments/ (JSON)")
+    d_list.add_argument("--paths", default="", help="JSON array of stack paths to check instead of all (workflow_dispatch input)")
+    d_list.add_argument("--max-stacks", type=int, default=DRIFT_MAX_STACKS,
+                        help="matrix limit; the least recently listed beyond it wait for the next run")
+    d_list.add_argument("--github-output", type=str, default=os.environ.get("GITHUB_OUTPUT"),
+                        help="append matrix= and count= here (default: $GITHUB_OUTPUT)")
+    d_scan = drift_sub.add_parser("scan", help="classify one stack's `plan -refresh-only -detailed-exitcode` and write the result file")
+    d_scan.add_argument("stack_dir", type=Path)
+    d_scan.add_argument("--exit-code", type=int, required=True, help="terraform's exit code (0, 1 or 2)")
+    d_scan.add_argument("--plan", type=Path, help="terraform show -json of the refresh-only plan (needed for exit 0 and 2)")
+    d_scan.add_argument("--error-message", default="", help="what failed, for exit 1 (only its `Error:` line is kept)")
+    d_scan.add_argument("--error-file", type=Path,
+                        help="terraform's whole log for exit 1; only its first `Error:` line is kept, redacted and capped")
+    d_scan.add_argument("--out", type=Path, required=True, help="result file (plan values never reach it)")
+    d_report = drift_sub.add_parser("report", help="POST every scan result under --results-dir to $IACP_API_URL/v1/internal/drift")
+    d_report.add_argument("--results-dir", type=Path, required=True, help="directory of result files written by `drift scan`")
+    _api_arguments(d_report)
+    d_report.add_argument("--dry-run", action="store_true", help="print the payloads instead of sending them")
+
     lock = sub.add_parser("lock", help="claim or release the platform stack lock (/v1/internal/stacks/{id}/lock)")
     lock.add_argument("action", choices=("acquire", "release"))
     lock.add_argument("--stack-id", help="stack UUID (acquire: resolved through --stack-path when omitted)")
@@ -203,6 +251,14 @@ def _read_json(path: Path | None) -> Any | None:
         return None
 
 
+def _read_bounded(path: Path, limit: int) -> str | None:
+    """At most ``limit`` bytes of a text file (never the whole file), or None when it is absent."""
+    if not path.is_file():
+        return None
+    with path.open("rb") as fh:
+        return fh.read(limit).decode("utf-8", errors="replace")
+
+
 def _read_text(path: Path | None) -> str | None:
     return path.read_text(encoding="utf-8", errors="replace") if path is not None and path.is_file() else None
 
@@ -238,8 +294,101 @@ def run_detect(args: argparse.Namespace) -> int:
 
 
 def run_context(args: argparse.Namespace) -> int:
+    if args.budget_gate:
+        return _run_budget_context(args)
+    if args.stack_dir is None or args.stack_path or args.cost or args.api_context:
+        raise ValueError("context needs a stack directory; --stack-path, --cost and --api-context go with --budget-gate")
     meta = FileSystemStackRepository(args.repo_root).load_dir(args.stack_dir)
     print(json.dumps(build_context(meta, args.allowed_region), indent=2))
+    return 0
+
+
+def _run_budget_context(args: argparse.Namespace) -> int:
+    """The budget gate's context. It reads no file from the stack's tree: identity is the path,
+    the budget is the API's, and the estimate is the cost job's (see policy_context)."""
+    ref = StackRef.from_root(args.stack_path or "")
+    if ref is None or args.stack_dir is not None:
+        raise ValueError("--budget-gate needs --stack-path environments/<env>/<team>/<stack> and no stack directory")
+    api_document = None
+    if args.api_context is not None and args.api_context.is_file():
+        api_document = _read_json(args.api_context)
+        if not isinstance(api_document, dict):
+            raise ContextError(f"{args.api_context} is not a JSON object")
+    estimate = parse_infracost(_read_json(args.cost))
+    document = build_budget_context(ref, estimate, api_document, args.allowed_region)
+    context = document["iacp"]["context"]
+    print(json.dumps(document, indent=2))
+    sys.stderr.write(
+        f"budget gate for {ref.path}: budget {'set' if context.get('budget') else 'not set'}, "
+        f"estimate {context.get('estimated_monthly_cost_usd', 'missing')}\n"
+    )
+    return 0
+
+
+MAX_GUARDED_FILE_BYTES = 1 << 20
+
+
+def _read_stack_files(root: Path) -> tuple[dict[str, str], list[Violation]]:
+    """The scannable top-level files of a stack root, and a violation for every entry that is not
+    a plain allow-listed file (a directory, a symlink, an oversized or non-UTF-8 file). I/O adapter."""
+    files: dict[str, str] = {}
+    refused: list[Violation] = []
+    if not root.is_dir():
+        raise ValueError(f"{root} is not a directory")
+    kinds: dict[str, str] = {}
+    for entry in sorted(root.iterdir()):
+        name = entry.name
+        kinds[name] = ("symlink" if entry.is_symlink() else "dir" if entry.is_dir() else
+                       "file" if entry.is_file() else "other")
+    refused += check_entries(kinds)
+    for entry in sorted(root.iterdir()):
+        name = entry.name
+        if kinds[name] == "file" and (name.endswith((".tf", ".tf.json")) or name == LOCK_FILE):
+            if entry.stat().st_size > MAX_GUARDED_FILE_BYTES:
+                refused.append(Violation(name, 1, "size", f"the file is larger than {MAX_GUARDED_FILE_BYTES} bytes"))
+                continue
+            try:
+                files[name] = entry.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                refused.append(Violation(name, 1, "unreadable", "the file is not UTF-8"))
+    return files, refused
+
+
+def _read_lock_pins(base: Path) -> dict:
+    """The lock allow-list from every stack lock file of the base checkout. I/O adapter."""
+    locks = sorted((base / "environments").glob(f"*/*/*/{LOCK_FILE}"))
+    texts = []
+    for p in locks:
+        if p.is_file() and not p.is_symlink() and p.stat().st_size <= MAX_GUARDED_FILE_BYTES:
+            texts.append(p.read_text(encoding="utf-8", errors="replace"))
+    return lock_allowlist(texts)
+
+
+def run_check_stack(args: argparse.Namespace) -> int:
+    files, refused = _read_stack_files(args.stack_dir)
+    pins = None
+    if args.lock_from is not None:
+        pins = _read_lock_pins(args.lock_from)
+        if not pins:
+            raise ValueError(f"no provider pins found under {args.lock_from}/environments: the lock cannot be checked")
+    violations = refused + check_stack(files, pins=pins)
+    for v in violations:
+        print(f"::error file={args.stack_dir / v.path},line={v.line}::{annotation(v.render())}")
+    if violations:
+        print(f"error: {len(violations)} problem(s) in {args.stack_dir}: the stack root may only call pinned "
+              "platform modules (no resources, data sources, provisioners, other providers or backends)",
+              file=sys.stderr)
+        return 1
+    print(f"{args.stack_dir}: {len(files)} file(s) checked, no plan-time code")
+    return 0
+
+
+def run_fetch_budget_context(args: argparse.Namespace) -> int:
+    if _unconfigured(args, "budget context"):
+        return 0
+    document = _client(args, os.environ).get_budget_context(args.stack_path)
+    args.out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    print(f"wrote the budget context of {args.stack_path} to {args.out}")
     return 0
 
 
@@ -372,6 +521,129 @@ def run_smoke(args: argparse.Namespace) -> int:
     if not result.ok:
         print(f"::error title=Smoke test failed::{annotation(f'{meta.ref.path}: {len(result.failures)} failed check(s)')}")
     return 0 if result.ok else 1
+
+
+def run_drift(args: argparse.Namespace) -> int:
+    return {"list": _drift_list, "scan": _drift_scan, "report": _drift_report}[args.drift_action](args)
+
+
+def _drift_list(args: argparse.Namespace) -> int:
+    """Every active stack root under environments/ (or the dispatched subset), as a matrix.
+
+    A stack file that says it is not active (a destroyed stack keeps an empty marked root)
+    is left out. With more than --max-stacks stacks the matrix is cut (alphabetical) and a
+    warning says so.
+    """
+    repo = FileSystemStackRepository(args.repo_root)
+    active = {m.ref.path: m for ref in repo.all_refs() if (m := repo.load(ref)) is not None and m.lifecycle == "active"}
+    wanted = _drift_paths(args.paths)
+    if wanted is not None:
+        unknown = sorted(set(wanted) - set(active))
+        if unknown:
+            raise ValueError(f"not an active stack root: {', '.join(unknown)}")
+        active = {p: active[p] for p in wanted}
+    stacks = [active[p] for p in sorted(active)]
+    if len(stacks) > args.max_stacks:
+        print(f"::warning title=Drift matrix cut::{len(stacks)} active stacks, checking the first {args.max_stacks}")
+        stacks = stacks[: args.max_stacks]
+    matrix = [m.matrix_entry() for m in stacks]
+    print(json.dumps({"count": len(matrix), "stacks": [m["path"] for m in matrix]}))
+    _write_outputs(Path(args.github_output) if args.github_output else None,
+                   {"matrix": json.dumps(matrix, separators=(",", ":")), "count": str(len(matrix))})
+    return 0
+
+
+def _drift_paths(raw: str) -> list[str] | None:
+    """The dispatch input: a JSON array of stack paths, or None when empty. Checked before use,
+    and never echoed (a dispatcher could put a workflow command in it)."""
+    if not raw.strip():
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        raise ValueError("stacks must be a JSON array of stack paths") from None
+    if not isinstance(value, list) or not value or not all(isinstance(p, str) and STACK_PATH_RE.match(p) for p in value):
+        raise ValueError("stacks must be a non-empty JSON array of environments/<env>/<team>/<stack> paths")
+    return list(dict.fromkeys(value))
+
+
+def _drift_scan(args: argparse.Namespace) -> int:
+    meta = FileSystemStackRepository(args.repo_root).load_dir(args.stack_dir)
+    plan = _read_json(args.plan)
+    # The whole log is read (bounded) rather than a pre-cut window: the summary is the first
+    # `Error:` line wherever it is, and nothing else of the log is kept.
+    log = _read_bounded(args.error_file, MAX_LOG_BYTES) if args.error_file is not None else None
+    message = log if log is not None else args.error_message
+    outcome = build_outcome(meta.ref.path, args.exit_code, plan if isinstance(plan, dict) else None, message)
+    errs = outcome.problems()
+    if errs:
+        raise ValueError("drift result is invalid: " + "; ".join(errs))
+    args.out.write_text(json.dumps(outcome.to_dict(), indent=2) + "\n", encoding="utf-8")
+    print(f"{meta.ref.path}: {_describe(outcome)}")
+    if outcome.result == "error":
+        print(f"::warning title=Drift check failed::{annotation(f'{meta.ref.path}: {outcome.error}')}")
+    return 0
+
+
+def _describe(o: DriftOutcome) -> str:
+    if o.result == "drifted":
+        s = o.summary
+        shown = f", first {MAX_CHANGED} listed" if s["drifted"] > MAX_CHANGED else ""
+        return f"drifted ({s['drifted']} resources: {s['updated']} updated, {s['deleted']} deleted{shown})"
+    return o.result if o.result == "clean" else f"error ({o.error})"
+
+
+def _drift_report(args: argparse.Namespace) -> int:
+    """Report each scan result for a stack the API lists as due. The API is asked once, then
+    each report is sent with its own OIDC token. A stack the API does not list (it became
+    busy, locked or inactive since the scan) is skipped: its result describes a state that
+    is mid-change. A rejected report fails the job after every other one was sent."""
+    outcomes = _load_outcomes(args.results_dir)
+    if args.dry_run:
+        gh = GitHubRun.from_env(os.environ)
+        print(json.dumps([o.to_payload(gh) for o in outcomes], indent=2))
+        return 0
+    if _unconfigured(args, "drift reports"):
+        return 0
+    gh = GitHubRun.from_env(os.environ)
+    payloads = {o.stack_path: o.to_payload(gh) for o in outcomes}  # everything is valid before anything is sent
+    client = _client(args, os.environ)
+    due = {s.path for s in client.drift_stacks(DRIFT_MAX_STACKS)}
+    failed = 0
+    for path in sorted(payloads):
+        if path not in due:
+            print(f"::notice title=Drift result skipped::{path} is not due according to the API (busy, locked or inactive)")
+            continue
+        try:
+            body = client.post_drift(payloads[path]).body
+        except ApiError as exc:
+            if exc.code == "stack_not_checkable":  # became busy between the list and the report
+                print(f"::notice title=Drift result skipped::{path}: {annotation(str(exc))}")
+                continue
+            failed += 1
+            print(f"::error title=Drift report rejected::{annotation(f'{path}: {exc}')}")
+            continue
+        print(f"reported {path}: {body.get('result')} -> report {body.get('report_id')}"
+              f"{' (replay)' if body.get('replayed') else ''}, resolution status {body.get('status')}")
+    for path in sorted(due - set(payloads)):
+        print(f"::warning title=No drift result::{path} is due but produced no scan result")
+    return 1 if failed else 0
+
+
+def _load_outcomes(directory: Path) -> list[DriftOutcome]:
+    """Every ``*.json`` result under directory (not recursive), validated strictly. A file that
+    is not a valid result fails the command: it crossed a job boundary and is never trusted.
+    Two files for one stack are refused."""
+    outcomes: dict[str, DriftOutcome] = {}
+    for file in sorted(Path(directory).glob("*.json")):
+        raw = _read_json(file)
+        if raw is None:
+            raise ReportError(f"{file.name} is not valid JSON")
+        outcome = outcome_from_dict(raw)
+        if outcome.stack_path in outcomes:
+            raise ReportError(f"two drift results for {outcome.stack_path}")
+        outcomes[outcome.stack_path] = outcome
+    return list(outcomes.values())
 
 
 def _build_report(args: argparse.Namespace, env: Mapping[str, str]) -> RunReport:
@@ -535,6 +807,8 @@ def _write_outputs(path: Path | None, values: Mapping[str, str]) -> None:
 COMMANDS = {
     "detect": run_detect,
     "context": run_context,
+    "fetch-budget-context": run_fetch_budget_context,
+    "check-stack": run_check_stack,
     "summary": run_summary,
     "verify-pins": run_verify_pins,
     "verify-modules": run_verify_modules,
@@ -545,6 +819,7 @@ COMMANDS = {
     "converged": run_converged,
     "report": run_report,
     "lock": run_lock,
+    "drift": run_drift,
 }
 
 
@@ -556,7 +831,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # These can quote server responses; keep them on one line.
         print(f"error: {annotation(str(exc))}", file=sys.stderr)
         return 1
-    except (DetectionError, StackMetadataError, PinError) as exc:
+    except (DetectionError, StackMetadataError, PinError, ContextError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:

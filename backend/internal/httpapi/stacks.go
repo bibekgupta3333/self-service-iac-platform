@@ -55,6 +55,7 @@ type stackLockDTO struct {
 
 type stackLinks struct {
 	Self          string  `json:"self"`
+	Drift         string  `json:"drift"`
 	LatestRequest *string `json:"latest_request"`
 }
 
@@ -85,7 +86,7 @@ func toStackDTO(s stacks.Stack) stackDTO {
 		ID: s.ID, Team: s.Team, Environment: s.Environment, Name: s.Name, Path: s.Path, Region: s.Region, Status: s.Status,
 		Health: s.Health, IsEphemeral: s.IsEphemeral, TTLHours: s.TTLHours, TTLExtended: s.TTLExtended, ExpiresAt: s.ExpiresAt, Outputs: s.Outputs, LastAppliedSHA: s.LastAppliedSHA,
 		CreatedAt: s.CreatedAt.UTC(), UpdatedAt: s.UpdatedAt.UTC(),
-		Links: stackLinks{Self: "/v1/stacks/" + s.ID.String()},
+		Links: stackLinks{Self: "/v1/stacks/" + s.ID.String(), Drift: "/v1/stacks/" + s.ID.String() + "/drift"},
 	}
 	if d.Health == "" {
 		d.Health = requests.HealthUnknown

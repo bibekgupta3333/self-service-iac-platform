@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,7 +43,9 @@ func TestMonthOf(t *testing.T) {
 
 func TestBuildContextShape(t *testing.T) {
 	ref := StackRef{Environment: "production", Team: "payments", Stack: "order-events"}
-	budget := &Budget{Month: MonthOf(now), LimitUSD: 2000, SpentUSD: 0, HardBlock: true, Scope: ScopeEnvironment}
+	capUSD := 5000.0
+	budget := &Budget{Month: MonthOf(now), LimitUSD: 2000, SpentUSD: 0, HardBlock: true, Scope: ScopeEnvironment,
+		SingleChangeCapUSD: &capUSD, CommittedUSD: 1200.5}
 	yanked := []YankedVersion{{Module: "sqs", Version: "1.1.0"}, {Module: "s3", Version: "1.2.0"}, {Module: "s3", Version: "1.2.0"}}
 	doc := BuildContext(ref, Environment{Name: "production", AllowedRegions: []string{"us-east-1"}}, budget, yanked, now)
 	raw, err := json.Marshal(doc)
@@ -51,12 +54,27 @@ func TestBuildContextShape(t *testing.T) {
 	}
 	want := `{"iacp":{"context":{"environment":"production","team":"payments","stack":"order-events",` +
 		`"stack_path":"environments/production/payments/order-events","allowed_regions":["us-east-1"],` +
-		`"budget":{"month":"2026-11","limit_usd":2000,"spent_usd":0,"hard_block":true,"scope":"environment"},` +
-		`"budget_override":null,"exceptions":[],` +
+		`"budget":{"month":"2026-11","limit_usd":2000,"spent_usd":0,"actual_usd":null,"hard_block":true,"scope":"environment","single_change_cap_usd":5000},` +
+		`"budget_override":null,"current_committed_usd":1200.5,"exceptions":[],` +
 		`"yanked_module_versions":[{"module":"s3","version":"1.2.0","tag":"modules/s3/v1.2.0"},` +
 		`{"module":"sqs","version":"1.1.0","tag":"modules/sqs/v1.1.0"}],"now":"2026-11-24T10:05:00Z"}}}`
 	if string(raw) != want {
 		t.Fatalf("got  %s\nwant %s", raw, want)
+	}
+}
+
+func TestBuildContextActualAndOverride(t *testing.T) {
+	actual := 1450.1
+	budget := &Budget{Month: MonthOf(now), LimitUSD: 2000, SpentUSD: 900, ActualUSD: &actual, HardBlock: true, Scope: ScopeTeam,
+		Override: &Override{GrantedBy: "ada", Reason: "launch week capacity", MaxDeltaUSD: 750,
+			ExpiresAt: time.Date(2026, 12, 1, 3, 0, 0, 0, time.FixedZone("x", 3600))}}
+	doc := BuildContext(StackRef{Environment: "staging", Team: "payments", Stack: "orders"}, Environment{Name: "staging"}, budget, nil, now)
+	raw, _ := json.Marshal(doc)
+	for _, want := range []string{`"actual_usd":1450.1`, `"single_change_cap_usd":null`,
+		`"budget_override":{"granted_by":"ada","reason":"launch week capacity","expires_at":"2026-12-01T02:00:00Z","max_delta_usd":750}`} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("context lacks %s: %s", want, raw)
+		}
 	}
 }
 
@@ -89,6 +107,8 @@ type fakeRepo struct {
 	budgetErr error
 	yanked    []YankedVersion
 	gotMonth  time.Time
+	committed float64
+	asked     []string // team|env|excludePath of each CommittedUSD call
 }
 
 func (f *fakeRepo) Environment(_ context.Context, name string) (Environment, error) {
@@ -98,6 +118,11 @@ func (f *fakeRepo) Environment(_ context.Context, name string) (Environment, err
 func (f *fakeRepo) MonthlyBudget(_ context.Context, _, _ string, month time.Time) (*Budget, error) {
 	f.gotMonth = month
 	return f.budget, f.budgetErr
+}
+
+func (f *fakeRepo) CommittedUSD(_ context.Context, team, env, exclude string) (float64, error) {
+	f.asked = append(f.asked, team+"|"+env+"|"+exclude)
+	return f.committed, nil
 }
 
 func (f *fakeRepo) YankedVersions(context.Context) ([]YankedVersion, error) { return f.yanked, nil }
@@ -115,6 +140,23 @@ func TestServiceContext(t *testing.T) {
 	}
 	if !repo.gotMonth.Equal(time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)) {
 		t.Fatalf("budget month = %v", repo.gotMonth)
+	}
+	// A team-wide budget sums every environment and leaves out the stack being changed.
+	if len(repo.asked) != 1 || repo.asked[0] != "platform||environments/development/platform/smoke" {
+		t.Fatalf("committed query = %v", repo.asked)
+	}
+	// An environment budget sums only that environment; the total is served as current_committed_usd.
+	envRepo := &fakeRepo{budget: &Budget{LimitUSD: 50, Scope: ScopeEnvironment}, committed: 321.25}
+	doc, err = NewService(envRepo, platform.FixedClock{T: now}).Context(context.Background(), "environments/staging/payments/orders")
+	if err != nil || envRepo.asked[0] != "payments|staging|environments/staging/payments/orders" ||
+		doc.IACP.Context.CurrentCommittedUSD == nil || *doc.IACP.Context.CurrentCommittedUSD != 321.25 {
+		t.Fatalf("environment budget: %+v, %v, %v", doc.IACP.Context.CurrentCommittedUSD, envRepo.asked, err)
+	}
+	// Without a budget there is nothing to sum.
+	none := &fakeRepo{}
+	doc, _ = NewService(none, platform.FixedClock{T: now}).Context(context.Background(), "environments/staging/payments/orders")
+	if len(none.asked) != 0 || doc.IACP.Context.CurrentCommittedUSD != nil {
+		t.Fatalf("no budget: asked %v, committed %v", none.asked, doc.IACP.Context.CurrentCommittedUSD)
 	}
 
 	if _, err := svc.Context(context.Background(), "nope"); !apperr.IsKind(err, apperr.KindInvalid) {

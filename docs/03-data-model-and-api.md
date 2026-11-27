@@ -36,8 +36,8 @@ Related: [01-system-architecture.md](01-system-architecture.md) · [04-module-re
 | `pipeline_runs` | One GitHub Actions workflow run (validate/apply/drift/ttl). | request (nullable for drift), stack |
 | `plan_summaries` | Parsed plan: add/change/destroy counts, resource changes, plan hash, policy results. | pipeline_run |
 | `cost_estimates` | Infracost result: monthly before/after/delta. | pipeline_run |
-| `drift_reports` | Nightly drift detection result per stack. | stack, pipeline_run |
-| `budgets` | Team monthly budget (`limit_usd`, `spent_usd`, `override_by`). | team, users (override_by) |
+| `drift_reports` | One drift check of one stack (result, resource counts, plan hash) and, for drift, its resolution. | stack, pipeline_run, user (resolver), request (reconcile) |
+| `budgets` | Team monthly budget (`limit_usd`, `spent_usd`, `actual_usd`, hard block, single-change cap, admin override with reason, expiry and bound). | team, environment, users (override_by, updated_by) |
 | `budget_overrides` | Admin override for a specific request (max delta, reason, expiry). | budget, request |
 | `policy_exceptions` | Time-boxed waiver of a policy rule for a stack/team. | team, stack |
 | `locks` | Platform-level per-stack mutation lock with fencing token. | stack, request |
@@ -66,7 +66,8 @@ CREATE TYPE request_status    AS ENUM ('draft', 'pr_open', 'validating', 'plan_r
                                        'applied', 'failed', 'rejected', 'cancelled');
 CREATE TYPE pipeline_kind     AS ENUM ('validate', 'apply', 'drift', 'ttl_destroy', 'module_release');
 CREATE TYPE pipeline_status   AS ENUM ('queued', 'in_progress', 'succeeded', 'failed', 'cancelled', 'timed_out');
-CREATE TYPE drift_status      AS ENUM ('clean', 'drifted', 'error');
+CREATE TYPE drift_result      AS ENUM ('clean', 'drifted', 'error');
+CREATE TYPE drift_status      AS ENUM ('open', 'reconciled', 'ignored', 'codified');   -- resolution of a drifted report
 
 -- ---------- identity ----------
 CREATE TABLE teams (
@@ -175,6 +176,8 @@ CREATE TABLE stacks (
     last_applied_sha char(40),
     last_applied_request_id uuid,
     last_drift_check_at timestamptz,
+    committed_monthly_usd numeric(12,2) CHECK (committed_monthly_usd IS NULL OR committed_monthly_usd >= 0),  -- migration 0014; summed into the budget context
+    committed_at        timestamptz,
     tags             jsonb       NOT NULL DEFAULT '{}'::jsonb,
     created_by       uuid        NOT NULL REFERENCES users(id),
     created_at       timestamptz NOT NULL DEFAULT now(),
@@ -296,18 +299,33 @@ CREATE TABLE cost_estimates (
 );
 
 CREATE TABLE drift_reports (
-    id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    stack_id         uuid        NOT NULL REFERENCES stacks(id) ON DELETE CASCADE,
-    pipeline_run_id  uuid        NOT NULL REFERENCES pipeline_runs(id) ON DELETE RESTRICT,  -- the drift.yml run
-    status           drift_status NOT NULL,
-    changed          jsonb       NOT NULL DEFAULT '[]'::jsonb,   -- [{address, actions, attributes}]
-    resolved_by_request_id uuid  REFERENCES requests(id),
-    resolution       text        CHECK (resolution IN ('reconciled', 'codified', 'ignored')),
-    detected_at      timestamptz NOT NULL DEFAULT now(),
-    resolved_at      timestamptz
+    id                    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    stack_id              uuid         NOT NULL REFERENCES stacks(id) ON DELETE CASCADE,
+    pipeline_run_id       uuid         NOT NULL UNIQUE REFERENCES pipeline_runs(id) ON DELETE RESTRICT,  -- the drift.yml run: one report per run and stack
+    result                drift_result NOT NULL,
+    terraform_exit_code   smallint     NOT NULL CHECK (terraform_exit_code IN (0, 1, 2)),
+    resources_drifted     int          NOT NULL DEFAULT 0,
+    resources_updated     int          NOT NULL DEFAULT 0,
+    resources_deleted     int          NOT NULL DEFAULT 0,
+    changed               jsonb        NOT NULL DEFAULT '[]'::jsonb,   -- [{address, type, actions}], at most 200; never attribute values
+    plan_hash             char(64),                                    -- fingerprint of addresses, actions and changed attribute names
+    log_url               text,
+    error_message         text,                                        -- result = 'error'
+    status                drift_status,                                -- NULL unless result = 'drifted'
+    detected_at           timestamptz  NOT NULL DEFAULT now(),
+    resolved_by           uuid         REFERENCES users(id),           -- NULL when a clean scan closed the report
+    resolved_at           timestamptz,
+    resolution_reason     text,                                        -- required for ignore (CHECK)
+    resolution_request_id uuid         REFERENCES requests(id),        -- the update request a reconcile opened
+    CHECK ((result = 'drifted') = (status IS NOT NULL)),
+    CHECK ((status IS NULL OR status = 'open') = (resolved_at IS NULL)),
+    CHECK (result <> 'drifted' OR resources_drifted > 0),
+    CHECK (result = 'drifted' OR resources_drifted = 0)
 );
-CREATE INDEX drift_reports_stack_idx ON drift_reports (stack_id, detected_at DESC);
-CREATE INDEX drift_reports_open_idx  ON drift_reports (status) WHERE status = 'drifted' AND resolved_at IS NULL;
+CREATE INDEX drift_reports_stack_idx ON drift_reports (stack_id, detected_at DESC, id DESC);
+CREATE INDEX drift_reports_open_idx  ON drift_reports (stack_id) WHERE status = 'open';
+-- iacp_app: SELECT, INSERT, and UPDATE only on (status, resolved_by, resolved_at, resolution_reason,
+-- resolution_request_id). Findings are immutable and reports are never deleted.
 
 -- ---------- budgets & exceptions ----------
 CREATE TABLE budgets (
@@ -319,10 +337,20 @@ CREATE TABLE budgets (
     spent_usd       numeric(12,2) NOT NULL DEFAULT 0,                -- committed estimates + CUR actuals, refreshed daily
     alert_thresholds int[]        NOT NULL DEFAULT '{50,80,100}',
     hard_block      boolean       NOT NULL DEFAULT true,
-    override_by     uuid          REFERENCES users(id),             -- admin who granted the most recent override (detail in budget_overrides)
+    override_by     uuid          REFERENCES users(id),             -- admin who granted the budget's override (migration 0014 adds the three columns below)
     created_by      uuid          NOT NULL REFERENCES users(id),
     created_at      timestamptz   NOT NULL DEFAULT now(),
-    UNIQUE NULLS NOT DISTINCT (team_id, environment_id, month)
+    updated_by      uuid          REFERENCES users(id),             -- last PUT /teams/{slug}/budgets/{month}
+    updated_at      timestamptz   NOT NULL DEFAULT now(),
+    override_reason text,                                           -- >= 20 chars; override_by, reason and expiry are set or null together
+    override_expires_at timestamptz,
+    override_max_delta_usd numeric(12,2),                           -- the override covers an overrun (projected - limit, or estimate - cap) of at most this
+    single_change_cap_usd  numeric(12,2),                           -- NULL = no cap; a stack above it is denied whatever the headroom
+    actual_usd      numeric(12,2) CHECK (actual_usd IS NULL OR actual_usd >= 0),  -- recorded by POST /internal/budget-actuals
+    actual_recorded_at timestamptz,
+    UNIQUE NULLS NOT DISTINCT (team_id, environment_id, month),
+    CHECK (limit_usd <= 1000000),
+    CHECK (1 <= ALL (alert_thresholds) AND 200 >= ALL (alert_thresholds))
 );
 
 CREATE TABLE budget_overrides (
@@ -577,6 +605,8 @@ Transitions are enforced in `internal/requests/statemachine.go` by a pure transi
 
 ### 4.2 Stack
 
+Drift is **not** a lifecycle state. A drift check moves `stacks.health` (migration 0013 adds `drifted` to #25's `unknown`, `healthy`, `degraded`) and never `stacks.status`, so it cannot disturb a request in flight: an `active` stack stays `active` and takes update and destroy requests while it is `drifted`. `stack_status` still lists `drifted` (editable like `active` in `requests.CheckStackAllowsKind`); no code path sets it any more. Health has two writers and moves through the pure table `drift.NextHealth` ([ADR-0013](adr/0013-drift-in-stack-health.md)): a drifted report sets `drifted`, a clean report only clears `drifted` to `healthy` (never `unknown` or `degraded`), a failed check (`error`) changes nothing, and an apply sets health from its smoke result.
+
 ```mermaid
 stateDiagram-v2
     [*] --> provisioning: create request applying
@@ -585,11 +615,7 @@ stateDiagram-v2
     active --> updating: update/upgrade request applying
     updating --> active: apply ok
     updating --> failed: apply failed
-    active --> drifted: drift detected
-    drifted --> updating: reconcile / codify request applying
-    drifted --> active: drift resolved (next scan clean)
     active --> destroying: destroy request applying (incl. TTL)
-    drifted --> destroying
     failed --> updating: fix-forward / rollback request applying
     failed --> destroying
     destroying --> destroyed: destroy ok
@@ -597,7 +623,7 @@ stateDiagram-v2
     destroyed --> [*]
 ```
 
-`stacks.health` (migration `0011_stack_health.sql`: `unknown`, `healthy`, `degraded`) is separate from this status. A successful apply sets it from the smoke stage (`healthy`, `degraded`, or `unknown` when none ran); a failed apply leaves it alone and a destroy resets it to `unknown`. The stack row also keeps `outputs`, `last_applied_sha` and `last_applied_request_id` of the last successful apply (a destroy clears the outputs and stamps `destroyed_at`).
+`stacks.health` (migration `0011_stack_health.sql`: `unknown`, `healthy`, `degraded`; `drifted` from `0013_drift_reports.sql`) is separate from this status. A successful apply sets it from the smoke stage (`healthy`, `degraded`, or `unknown` when none ran); a failed apply leaves it alone and a destroy resets it to `unknown`. The stack row also keeps `outputs`, `last_applied_sha` and `last_applied_request_id` of the last successful apply (a destroy clears the outputs and stamps `destroyed_at`).
 
 ## 5. API conventions
 
@@ -721,7 +747,7 @@ The logic is pure (`catalog.BuildUpgradePath`): steps are the usable (not yanked
 | Method | Path | Description | RBAC |
 |---|---|---|---|
 | GET | `/stacks?team=&env=&status=&limit=&cursor=` | List stacks, newest first, keyset-paginated (`next_cursor`). A user sees only the stacks of teams they belong to (any role); platform admins see all. Visibility is `identity.Visibility`, the helper the request routes use, so one caller sees the same teams on `/requests`, `/stacks` and `/requests/{id}/events`. `module=` is not implemented yet. | viewer |
-| GET | `/stacks/{id}` | Stack detail: `status`, `health` (`unknown`, `healthy` or `degraded`, from the post-apply smoke test), `lock` (`null`, or `{request_id, request_short_id, holder, acquired_at, expires_at}`; the fencing token is never shown), `outputs` (non-sensitive, as reported by the last apply), `last_applied_sha`, `latest_request {id, short_id, kind, status}` and `links` to it. A stack the caller may not see is `404`. `is_ephemeral`, `ttl_hours`, `ttl_extended_hours` and `expires_at` carry the TTL ([06 section 6](06-lifecycle-management.md#6-ttl-and-ephemeral-environments)). Resources, versions and drift arrive with their features. | viewer |
+| GET | `/stacks/{id}` | Stack detail: `status`, `health` (`unknown`, `healthy`, `degraded` or `drifted`: the post-apply smoke test and the drift check both write it, see 4.2), `lock` (`null`, or `{request_id, request_short_id, holder, acquired_at, expires_at}`; the fencing token is never shown), `outputs` (non-sensitive, as reported by the last apply), `last_applied_sha`, `latest_request {id, short_id, kind, status}` and `links` to it. A stack the caller may not see is `404`. `is_ephemeral`, `ttl_hours`, `ttl_extended_hours` and `expires_at` carry the TTL ([06 section 6](06-lifecycle-management.md#6-ttl-and-ephemeral-environments)). Resources, versions and drift arrive with their features. | viewer |
 | GET | `/stacks/{id}/requests` | Request history. | viewer |
 | GET | `/stacks/{id}/outputs` | Non-sensitive outputs. | viewer |
 | GET | `/stacks/{id}/files` | Current generated files (from `main`). | viewer |
@@ -922,22 +948,42 @@ data: {"request_id":"…","status":"applied"}
 
 | Method | Path | Description | RBAC |
 |---|---|---|---|
-| GET | `/drift?team=&env=&status=drifted` | Open drift reports. | viewer |
-| GET | `/stacks/{id}/drift` | Drift history for stack. | viewer |
-| POST | `/stacks/{id}/drift/check` | Trigger on-demand drift check (`workflow_dispatch` drift.yml for one stack). | developer |
-| POST | `/drift` | Drift result from `drift.yml` (one call per stack): `{stack_path, run_id, status: clean\|drifted\|error, changed[], plan_artifact_uri, logs_url}`. | OIDC JWT: `drift.yml@refs/heads/main` |
-| POST | `/drift/{report_id}/resolve` | `{"resolution":"reconcile"}` → creates a reconcile request; `"codify"` → opens update request from detected values (where module inputs map); `"ignore"` (maintainer, with reason). | developer / maintainer |
+| GET | `/stacks/{id}/drift?limit=` | Drift history of one stack, newest first (default 30, at most 200): `{data: [report]}`. A report is `{id, stack_id, stack_path, result: clean\|drifted\|error, status: open\|reconciled\|ignored\|codified\|null, terraform_exit_code, summary {drifted, updated, deleted}, changed [{address, type, actions}], plan_hash, log_url, error, detected_at, resolved_by, resolved_at, reason, request_id}`. A stack the caller may not see is `404`. | viewer |
+| POST | `/drift/{id}/resolve` | `{"action": "reconcile"\|"codify"\|"ignore", "reason": "…"}` on an `open` drifted report. **reconcile** opens an `update` request for the same stack from the stack's newest recorded spec (the same `POST /requests` path: same RBAC, queueing behind the stack lock, PR, review and apply; idempotent per report) and answers `request {id, short_id, status, link}`. **codify** records the decision only and answers a `note`: the platform does not turn the drift diff into module inputs, so the operator submits an update request that sets them. **ignore** needs a `reason` of at least 8 characters (`422` otherwise) and keeps the stack `drifted` until a clean scan. Resolving also closes the stack's other open reports with the same status. Replaying the same action returns the stored resolution (`replayed: true`); another action on a resolved report is `409 drift_already_resolved`, on a clean or failed check `409 drift_not_resolvable`. Audited as `drift.resolved`. | reconcile, codify: developer; ignore: maintainer |
+| GET | `/drift?team=&env=&status=open` | Open drift reports across teams. **Not implemented yet.** | viewer |
+| POST | `/stacks/{id}/drift/check` | Trigger an on-demand drift check (`workflow_dispatch` of drift.yml for one stack). **Not implemented yet.** | developer |
+
+Machine routes (`drift` route class, [6.9](#69-pipeline-runs-actions-callbacks)):
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/internal/drift/stacks?limit=` | The stacks to check: lifecycle `active` (or the legacy `drifted`), no request holding their lock, least recently checked first, at most 256: `{stacks: [{stack_id, path, team, environment, region}]}`. |
+| POST | `/internal/drift` | One check of one stack: `{stack_path, github {run_id, run_attempt, head_sha}, result, terraform_exit_code, summary {drifted, updated, deleted}, changed [{address, type, actions}], plan_hash, log_url, error}`. Strict decoding. `result` must be what the exit code means (`0` clean, `2` drifted, `1` error; an exit `2` with no drifted resource, i.e. only output values changed, is `clean`), the counts must agree with the result, a drifted report needs `plan_hash`, an error report an `error`. The report must come from the calling run (`run_mismatch`), drift.yml on main via `schedule` or `workflow_dispatch` (`workflow_not_allowed`). A stack that is not settled (`provisioning`, `updating`, `destroying`, `failed`, `destroyed`) is `409 stack_not_checkable`. In one transaction: the drift `pipeline_runs` row is upserted, the report is stored (a replay of the same run returns it with `replayed: true` and changes nothing), `stacks.health` and `last_drift_check_at` move, and `drift.detected`, `drift.check_failed` or `drift.cleared` is audited. A clean report closes the stack's open reports as `reconciled` with no resolver. Answer: `{accepted, report_id, result, status, replayed}`. |
+
+Severity (`high`/`medium`), team notifications, the cross-team list and the on-demand check are part of the rest of WBS 8.3 and not built yet.
 
 ### 6.7 Budgets and exceptions
 
 | Method | Path | Description | RBAC |
 |---|---|---|---|
-| GET | `/teams/{slug}/budgets` | Budgets and utilisation. | viewer |
-| PUT | `/teams/{slug}/budgets/{month}` | Set/replace monthly budget. | admin |
+| GET | `/teams/{slug}/budgets` (`/{month}` for one month) | The team's budgets, newest month first, with `used_usd` and `utilisation_pct`. | admin |
+| PUT | `/teams/{slug}/budgets/{month}` | Set or replace one monthly budget (below). | admin |
 | POST | `/requests/{id}/budget-override` | `{"max_delta_usd": 900, "reason": "...", "expires_in_hours": 72}` → inserts `budget_overrides`, sets `budgets.override_by`; triggers re-plan. | admin |
 | POST | `/policy-exceptions` | Request exception `{rule_id, stack_id, reason, ticket_url, expires_at}`. | maintainer |
 | POST | `/policy-exceptions/{id}/approve` / `/reject` | Decision. | security approver (`security` GitHub team) |
 | GET | `/policy-exceptions?status=approved&team=` | List. | viewer |
+
+**Budget administration (WBS 8.5).** Both budget routes are admin-only: `DefaultPolicies` requires the admin role in some team, and `budgets.AdminService` then requires `budget.set` (admin) in the team named in the path (a platform admin counts everywhere); a route without a policy entry is refused with `403`, and a denial is audited as `rbac.denied`. `month` is `YYYY-MM`, from a year back to two years ahead. The body of `PUT` is strict (unknown fields are `400`):
+
+```json
+{ "environment": "staging", "limit_usd": 2500.50, "currency": "USD", "hard_block": true,
+  "alert_thresholds": [50, 80, 100], "single_change_cap_usd": null,
+  "override": { "reason": "launch week capacity, approved in CAB-123", "max_delta_usd": 750, "expires_at": "2026-12-01T00:00:00Z" } }
+```
+
+`limit_usd` is required, from 0 to 1,000,000 with at most two decimals; `currency` is empty or `USD`; `environment` is `development`, `staging`, `production`, or omitted for a team-wide budget (an environment row wins over a team-wide row for that environment); `hard_block` defaults to true; `alert_thresholds` defaults to `[50,80,100]` (1 to 200 percent, at most ten, sorted and de-duplicated). `single_change_cap_usd` (0 to 1,000,000) is optional; omitted or null means no cap, because the policy compares it with the stack's whole estimated cost, not the change. `override` waives the hard limit or the cap until `expires_at` (at most 31 days away, reason 20 to 500 characters) while the overrun it allows (`projected - limit`, or `estimate - cap`) is at most `max_delta_usd` (required, above 0, at most 1,000,000), outside production only ([07 §6.7](07-security-and-policy.md#67-budget-limit)): an override on a production-scoped budget is a `422` (`/override`). Omitting it clears an override; re-sending an identical one keeps its grantor and is not audited as a new grant. A `PUT` replaces the row's settings, never `spent_usd` or `actual_usd`. All problems are returned together as `422 validation_failed` field errors (`/limit_usd`, `/currency`, `/environment`, `/alert_thresholds`, `/single_change_cap_usd`, `/override`, `/override/reason`, `/override/expires_at`, `/override/max_delta_usd`); `404` for an unknown team, `422 invalid_month` for a bad month. The response (`200`) is the stored budget: `id`, `team`, `environment` (null = every environment), `month`, `currency`, `limit_usd`, `spent_usd`, `actual_usd`, `used_usd` (the larger of `spent_usd` and `actual_usd`), `utilisation_pct`, `hard_block`, `alert_thresholds`, `single_change_cap_usd`, `override` (`granted_by`, `reason`, `expires_at`, `max_delta_usd`, or null), `updated_by`, `updated_at`. Each write appends to the audit chain in the same transaction: `budget.set` (amounts as decimal strings, with the previous limit), plus `budget.override.granted` or `budget.override.revoked`.
+
+The per-request override (`POST /requests/{id}/budget-override`) and the `budget_overrides` table remain planned; the budget-level override above is what `budget.rego` reads today.
 
 ### 6.8 Audit
 
@@ -976,7 +1022,10 @@ Called only by GitHub Actions jobs with `Authorization: Bearer <GitHub OIDC JWT>
 | POST | `/runs` | `pr-validate.yml`, `apply.yml`, `ttl-reaper.yml` | Report run status and stage results (validating, plan summary, policy, cost, apply outcome, outputs). Creates/updates `pipeline_runs`, `plan_summaries`, `cost_estimates`. |
 | GET | `/internal/requests/by-path?stack_path=&head_sha=` | `apply.yml` (before the lock claim) | Resolves the request that holds the stack's lock: stack and request ids, `fencing_token`, `approved_plan_hash` (below). Fails closed. |
 | GET | `/internal/budget-context?stack_path=` | `pr-validate.yml`, `apply.yml` | OPA input (`conftest --data`): environment, team, allowed regions, budget (`limit_usd`, `spent_usd`, active override), approved policy exceptions, yanked module versions. |
-| POST | `/drift` | `drift.yml` | Drift result per stack (see [6.6](#66-drift)). |
+| POST | `/internal/budget-actuals` | shared internal token only | Record a team's actual spend: `{"team", "environment"?, "month": "YYYY-MM", "actual_usd"}` → `200` with the budget (as in [6.7](#67-budgets-and-exceptions)); `404` when the team has no such budget, `422` for a bad amount. Audited as `budget.actual.recorded`. The future Cost Explorer worker calls it; nothing does yet (Cost Explorer is not reachable under LocalStack, ADR-0009). |
+| POST | `/internal/budget-committed` | shared internal token only | Record one stack's committed monthly cost: `{"stack_path", "monthly_usd"}` → `200 {"stack_path", "monthly_usd"}`; `404` for an unknown or destroyed stack, `422` for a bad amount. Audited as `stack.cost.committed`. The budget context sums it over the team's other active stacks (`current_committed_usd`). Nothing calls it yet (`apply.yml` does not price a plan; ADR-0014). |
+| GET | `/internal/drift/stacks` | `drift.yml` | Stacks to check (see [6.6](#66-drift)). |
+| POST | `/internal/drift` | `drift.yml` | Drift result per stack (see [6.6](#66-drift)). |
 | POST | `/internal/catalog/index` | `module-release.yml` | Index a released module version (see [6.2](#62-catalog-modules-and-versions)). |
 | GET | `/internal/stacks/{id}/lock` | worker, `apply.yml` | Current platform lock: `stack_id`, `request_id`, `holder`, `fencing_token`, `acquired_at`, `expires_at`; `404` when unlocked. |
 | GET | `/internal/ttl/due` | `ttl-reaper.yml` | The stacks due now: `200 {"warnings": [...], "teardowns": [...], "blocked": [...]}`, each entry `{stack_id, path, team, environment, expires_at}`. A warning is a live ephemeral stack within 24 h of `expires_at` whose `ttl_warned_at` is unset; a teardown is a live ephemeral stack past `expires_at` with no open destroy request. `blocked` lists expired stacks that used up their TTL destroy attempts: they are reported only, never retried, and kept out of `teardowns` so they cannot crowd out stacks that can be torn down; `ttl.blocked` is recorded (once per expiry) when one is listed. A stack in backoff after a failed TTL destroy is left out. Production never appears. Candidates are read in pages and classified page by page, so stacks in backoff or blocked never use up the limit: at most 500 actionable and 500 blocked entries, soonest expiry first, from at most 5000 rows scanned. |
@@ -998,10 +1047,12 @@ Route classes (`backend/internal/auth/routes.go`, pure table enforced by middlew
 | catalog_index | `/internal/catalog/index` | `module-release.yml` | `refs/heads/main` | `push`, `workflow_dispatch` |
 | runs | `/runs` | `pr-validate.yml`, `apply.yml`, `drift.yml`, `ttl-reaper.yml` | per pipeline | `pull_request`, `push`, `workflow_dispatch`, `schedule` |
 | request_lookup | `/internal/requests/by-path` (read-only) | `apply.yml` only | `refs/heads/main` (ref and workflow definition) | `push`, `workflow_dispatch` |
+| drift | `/internal/drift`, `/internal/drift/stacks` | `drift.yml` only | `refs/heads/main` (ref and workflow definition) | `schedule`, `workflow_dispatch` |
 | ttl | `/internal/ttl/*` | `ttl-reaper.yml` only | `refs/heads/main` (ref and workflow definition) | `schedule`, `workflow_dispatch` |
 | budget_context | `/internal/budget-context` (read-only) | `pr-validate.yml`, `apply.yml` | global allow-list (PR merge ref for `pr-validate.yml`, main otherwise) | `pull_request`, `push`, `workflow_dispatch` |
+| budget_actuals | `/internal/budget-actuals`, `/internal/budget-committed` (write) | none: shared internal token only | n/a | n/a |
 
-Per pipeline on `/runs`: `validate` ← `pr-validate.yml` on `pull_request`; `apply` ← `apply.yml` on main via `push`/`workflow_dispatch`; `drift` ← `drift.yml` on main via `schedule`/`workflow_dispatch`; `ttl_destroy` ← `ttl-reaper.yml` on main via `schedule`/`workflow_dispatch`. `pull_request_target` and `workflow_run` never qualify.
+Per pipeline on `/runs`: `validate` ← `pr-validate.yml` on `pull_request`; `apply` ← `apply.yml` on main via `push`/`workflow_dispatch`; `drift` ← `drift.yml` on main via `schedule`/`workflow_dispatch` (drift.yml itself reports through `/internal/drift`, see [6.6](#66-drift); `/runs` still accepts the pipeline); `ttl_destroy` ← `ttl-reaper.yml` on main via `schedule`/`workflow_dispatch`. `pull_request_target` and `workflow_run` never qualify.
 
 `GET /v1/internal/requests/by-path?stack_path=environments/production/payments/order-events&head_sha=a1b2c3d4e5f60718293a4b5c6d7e8f9012345678` (apply) → `200`
 
@@ -1061,7 +1112,7 @@ Response `200 {"accepted": true, "run_id": "…", "run_status": "succeeded", "re
 
 Current implementation (WBS 4.10, 5.3): `pipeline` is one of `validate`, `apply`, `drift`, `ttl_destroy`; `status` is `in_progress`, `passed`, `failed` or `cancelled`. `fencing_token` and `request_short_id` are required except for `drift`; `github.head_sha` must be the job's `github.sha`. Each report is recorded in `pipeline_runs.stages` (one row per run id, attempt and stack): a report for a stage already recorded replaces that entry, so retried calls are idempotent, and a run records at most 32 distinct stages (`422 too_many_stages`). A `passed` `summary` stage finishes the run as `succeeded`, a `failed`/`cancelled` stage finishes it as such, and a finished run keeps its status. The report transaction locks the `stacks` row (`FOR UPDATE`, which also serialises the reports of one stack) before reading the lock and the request, the same order as the lock operations, so reports never deadlock with release or promotion. `request_status` is the request's status after the report: `apply` reports move the request and stack as described in §4.1 (outputs must be a JSON object of already redacted values, `422` otherwise), `validate` reports leave it alone. `plan_summaries` and `cost_estimates` arrive with WBS 5.2.
 
-`GET /v1/internal/budget-context?stack_path=environments/development/payments/order-events` (pr-validate) → `200`. The body is the conftest `--data` file, read by the policies as `data.iacp.context` ([07 §6.1](07-security-and-policy.md#61-layout-and-evaluation)). Everything is derived from the path, so it also works for a stack the PR is creating. `budget` is the team's row for the current UTC month, the environment-specific row winning over a team-wide one (`scope`), or `null` when none is set; `spent_usd` stays `0` until cost estimates are recorded (WBS 8.5). `budget_override` is `null` and `exceptions` is `[]` until those tables exist. `yanked_module_versions` lists every yanked version, including all versions of a yanked module. `stack=` is accepted as an alias. Errors: `422 invalid_stack_path`, `404 environment_not_found`.
+`GET /v1/internal/budget-context?stack_path=environments/development/payments/order-events` (pr-validate) → `200`. The body is the conftest `--data` file, read by the policies as `data.iacp.context` ([07 §6.1](07-security-and-policy.md#61-layout-and-evaluation)). Everything is derived from the path, so it also works for a stack the PR is creating. `budget` is the team's row for the current UTC month, the environment-specific row winning over a team-wide one (`scope`), or `null` when none is set; `spent_usd` stays `0` until cost estimates are recorded, `actual_usd` is `null` until an actual is recorded (`POST /internal/budget-actuals`), and the policy counts the larger of the two as used. `budget_override` is the budget's admin override (`granted_by`, `reason`, `expires_at`, `max_delta_usd`) or `null`; `current_committed_usd` (only with a budget) is the committed monthly cost of the team's other active stacks in the budget's scope; `exceptions` is `[]` until policy exceptions exist. `yanked_module_versions` lists every yanked version, including all versions of a yanked module. `stack=` is accepted as an alias. Errors: `422 invalid_stack_path`, `404 environment_not_found`.
 
 ```json
 {
@@ -1070,8 +1121,9 @@ Current implementation (WBS 4.10, 5.3): `pipeline` is one of `validate`, `apply`
       "environment": "development", "team": "payments", "stack": "order-events",
       "stack_path": "environments/development/payments/order-events",
       "allowed_regions": ["us-east-1"],
-      "budget": { "month": "2026-11", "limit_usd": 2000.0, "spent_usd": 0, "hard_block": true, "scope": "environment" },
+      "budget": { "month": "2026-11", "limit_usd": 2000.0, "spent_usd": 0, "actual_usd": null, "hard_block": true, "scope": "environment", "single_change_cap_usd": null },
       "budget_override": null,
+      "current_committed_usd": 0,
       "exceptions": [],
       "yanked_module_versions": [ { "module": "s3", "version": "1.1.0", "tag": "modules/s3/v1.1.0" } ],
       "now": "2026-11-24T10:05:00Z"
@@ -1079,6 +1131,8 @@ Current implementation (WBS 4.10, 5.3): `pipeline` is one of `validate`, `apply`
   }
 }
 ```
+
+The API never sets `estimated_monthly_cost_usd` or `budget_gate`: those two keys are added by `pr-validate.yml`'s budget job from the isolated Infracost output ([07 §6.7](07-security-and-policy.md#67-budget-limit)).
 
 ### 6.10 GitHub webhooks
 
