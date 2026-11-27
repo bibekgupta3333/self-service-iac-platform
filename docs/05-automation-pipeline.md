@@ -16,6 +16,7 @@ Related: [01-system-architecture.md](01-system-architecture.md) · [04-module-re
    - [4.4 drift.yml](#44-driftyml)
    - [4.5 ttl-reaper.yml](#45-ttl-reaperyml)
    - [4.6 module-release.yml](#46-module-releaseyml)
+   - [4.7 state-surgery.yml (break-glass)](#47-state-surgeryyml-break-glass)
 5. [Repository protection](#5-repository-protection)
 6. [Caching and performance](#6-caching-and-performance)
 7. [Terratest: `modules/s3` against LocalStack](#7-terratest-moduless3-against-localstack)
@@ -48,7 +49,7 @@ Principles:
 | 8 | Cost and budget | Infracost `breakdown` (cost job, informational); budget evaluated by OPA `budget.rego` in the separate `budget` job | after plan | Infracost API key (secret, cost job only); OIDC (budget job) | Over a hard budget → the `budget` job fails (`pr-validate-result` requires it); an admin override waives it outside production only | `infracost.json`; `cost_estimates` row (planned) |
 | 9 | Report | PR comment (sticky) + `POST /v1/runs` (OIDC JWT) | end of PR job | OIDC → Platform API | Report failure does not fail check; reconciler fetches run later | `plan_summaries` row; request → `plan_ready` |
 | 10 | Approve + merge | CODEOWNERS review; GitHub Environment reviewer for production | human | — | Merge blocked until all required checks + reviews | request → `approved` |
-| 11 | Apply | `terraform plan` → hash check → `terraform apply tfplan` | `push` to `main` | `iacp-apply` in GitHub Environment `<env>` | Plan-hash mismatch → abort, request `failed` (`plan_mismatch`); apply error → stack `failed`, transient errors auto-retried by backend (max 2 retries with backoff) | `apply.log`, `outputs.json`; stack → `active` |
+| 11 | Apply | `terraform plan` → hash check → `terraform apply tfplan` | `push` to `main` | `iacp-apply` in GitHub Environment `<env>` | Plan-hash mismatch → abort, request `failed` (`plan_mismatch`); apply error → stack `failed`; the failed stage's error excerpt is classified by the backend (transient, config, infra) and transient errors are retried by dispatching `apply.yml` again (max 2 retries, 2 min then 10 min; docs/06 §5) | `apply.log`, `outputs.json`; stack → `active` |
 | 12 | Post-apply tests | Smoke tests; Terratest for ephemeral stacks | after apply | `iacp-plan` | Stack marked `active` with `health=degraded`, team notified; no auto-destroy | `go test` JSON report |
 
 Statuses follow the request lifecycle `draft → pr_open → validating → plan_ready → approved → applying → applied | failed | rejected | cancelled` (see [06-lifecycle-management.md](06-lifecycle-management.md)).
@@ -587,6 +588,8 @@ Notes:
 
 Nothing in the workflow depends on that. When the generator switches to the S3 backend on a long-lived LocalStack (ADR-0009 decision 4), and later to real accounts, only `backend.tf`, the endpoint and the credentials step change. The lock, reports, plan-hash check and destroy path stay as they are.
 
+**Failure classification and retries (WBS 8.7).** The "Report apply" step passes `error-log: ${{ runner.temp }}/apply.log`; for a failed stage the reporting tool sends a redacted summary as `error.message` (Terraform's `Error:` lines only, at most three, each cut after the resource identifier, at most 500 characters, and a fixed message when there is no `Error:` line) and, as `error.signals`, the fixed-vocabulary classification signals found in those lines (AWS error codes, Terraform phrases, `StatusCode: <nnn>`) (`tools/stack_pipeline/tf_error.py`, shared with the drift summary; the API redacts again before storing). In the report's transaction the API classifies it (`internal/recovery`) and, for a transient failure with retry budget left, keeps the request `applying` and enqueues a retry that dispatches this workflow again after the backoff with `stack_path`, `stack_id`, `request_id`, `approved_plan_hash` (and `destroy`). Before dispatching, the backend takes the stack lock back for the request when this workflow's release step freed it, so the retried run's lock step resolves the same request through `by-path`. The dispatch itself is never retried.
+
 ### 4.4 `drift.yml`
 
 Triggers: `schedule` (`0 2 * * *`, 02:00 UTC) and `workflow_dispatch` (optional `stacks` input: a JSON array of stack paths). There is no `pull_request` trigger, so a fork cannot run it with a token; every job also skips a fork (`github.event.repository.fork`), scan and report run only on `refs/heads/main`, and the list job fails loudly on any other ref. Default token `contents: read`; `id-token: write` exists only on the `report` job.
@@ -724,6 +727,20 @@ jobs:
 
 The tag push fails if the tag already exists, so re-running the job cannot move a released version. See [04-module-registry.md](04-module-registry.md#9-release-flow-and-catalog-indexing).
 
+### 4.7 `state-surgery.yml` (break-glass)
+
+The only sanctioned way to edit state by hand (docs/06 §2.3). `workflow_dispatch` only, from `main` only (a `Require main` step plus a job guard), `permissions: contents: read` at the top, `id-token: write` only on its two jobs, actions pinned by SHA, one run at a time (`concurrency: iacp-state-surgery`, never cancelled).
+
+| Input | Type | Rule (checked by `python -m tools.stack_pipeline state-surgery validate`) |
+|---|---|---|
+| `stack_path` | string | `environments/<env>/<team>/<stack>`, an existing stack root |
+| `operation` | choice | `state rm`, `state mv`, `import`, `force-unlock` |
+| `args` | string | space-separated: `state rm ADDRESS...` (1-10), `state mv SOURCE DESTINATION`, `import ADDRESS ID`, `force-unlock LOCK_ID`. Addresses, ids and lock ids have strict patterns; nothing may start with `-` or contain shell or quote characters |
+| `ticket` | string | `ABC-1234` |
+| `dry_run` | boolean | default `true`: `-dry-run` for `state rm`/`state mv`; `import` and `force-unlock` run nothing |
+
+Jobs: **validate** (no Environment) validates the inputs and writes the validated request to the job summary for the approver; a refused run is reported to the API as `refused`, without the rejected values (with OIDC: the audit route refuses the shared token). **surgery** runs only after an approval in the GitHub Environment `break-glass` (5.3), validates again, runs `terraform init` (local backend), lists the state, then `state-surgery run` records the state digest, runs the one command as an argv list inside `::stop-commands::`, digests again and runs `terraform plan -lock=false -detailed-exitcode`; `state-surgery report` always sends the audit report to `POST /v1/internal/state-surgery`. Inputs reach scripts only through environment variables; no `run:` block contains a `${{ }}` expression. Under ADR-0009 the job runs against its own LocalStack container with the stack's local backend.
+
 ## 5. Repository protection
 
 ### 5.1 Branch ruleset for `main`
@@ -780,6 +797,7 @@ For **development** stacks, the API auto-approves on behalf of the request when 
 | `staging` | none (PR review is the gate) | 0 | `main` only | `vars.AWS_ACCOUNT_ID` |
 | `production` | 1 of `@acme/sre`, prevent self-review | 5 min | `main` only | `vars.AWS_ACCOUNT_ID` |
 | `module-release` | none | 0 | `main` only | `IACP_APP_PRIVATE_KEY` |
+| `break-glass` | 1 of the platform/SRE break-glass group, **prevent self-review** on | 0 | `main` only | none (local-first); `iacp-breakglass-<env>` role ARN with the S3 backend |
 
 ## 6. Caching and performance
 

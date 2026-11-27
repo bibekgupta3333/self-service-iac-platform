@@ -459,6 +459,9 @@ jobs:
           stage: ${{ env.DESTROY == 'true' && 'destroy' || 'apply' }}
           status: ${{ steps.apply.outcome }}
           terraform-exit-code: ${{ steps.apply.outputs.exit_code }}
+          # The error excerpt lets the API classify the failure and retry a transient one
+          # (WBS 8.7): the retry dispatches this workflow again with the request's ids.
+          error-log: ${{ runner.temp }}/apply.log
           fencing-token: ${{ steps.lock.outputs.fencing_token }}
 
       - name: Report smoke

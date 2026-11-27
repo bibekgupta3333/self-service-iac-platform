@@ -39,6 +39,9 @@ internal/
     localgit/            local-first adapter (ADR-0009): git plumbing on a scratch clone, fake PRs in the git dir
   outbox/                Postgres job queue (outbox table): Enqueue in the producer's tx, Worker with lease/backoff
   prflow/                request.publish handler: render → commit on iacp/<short id> → PR → record pr_opened
+  recovery/              docs/06 §5: pure Classify / PlanRetry / Backoff / SelectRollbackTarget / ValidateSurgeryReport;
+                         Retrier (requests.RetryPolicy in the apply-report tx → apply_retry + outbox job), Dispatcher (re-dispatch apply.yml once, else fail),
+                         RollbackService (POST /v1/stacks/{id}/rollback), SurgeryRecorder (state.surgery audit), Postgres repo
   webhooks/              pure VerifySignature and Map (event → command), Ingester (dedupe + enqueue), Applier
   audit/                 pure hash chain (CanonicalJSON, ChainHash, VerifyChain), Writer, Verifier
   httpapi/               chi router, middleware, problem+json, Authenticator seam, handlers
@@ -81,6 +84,7 @@ together apply each migration once.
 | `0006_oidc_jti.sql` | `oidc_jti` (used GitHub OIDC token ids until `exp` + leeway, shared by replicas); `iacp_app` gets SELECT/INSERT/DELETE only, no UPDATE |
 | `0007_budgets.sql` | `budgets` (team monthly budget, optionally per environment; `spent_usd` 0 until cost data lands in WBS 8.5) |
 | `0008_webhooks_outbox.sql` | `webhook_deliveries` (delivery id primary key) and `outbox` (job queue: `available_at`, `locked_until`, `attempts`, `dedupe_key`); `iacp_app` gets SELECT/INSERT/DELETE and SELECT/INSERT/UPDATE respectively |
+| `0016_apply_failures.sql` | `failure_class` enum and `apply_failures` (one classified failure per failed run of a request, the recovery decision, the retry number and its dispatch state `scheduled → dispatching → dispatched / dispatch_failed / skipped`); `iacp_app` gets SELECT/INSERT/UPDATE, never DELETE |
 | `0009_sessions.sql` | `sessions` (hashed opaque session ids, absolute and idle expiry, revocation) |
 | `0010_outbox_purge.sql` | `purge_processed_outbox(cutoff, max_rows)`, a `SECURITY DEFINER` function that deletes only processed outbox rows; `iacp_app` gets `EXECUTE` on it and still no `DELETE` on `outbox` |
 | `0011_stack_health.sql` | `stacks.health` (`unknown`, `healthy`, `degraded`), set from the post-apply smoke test |

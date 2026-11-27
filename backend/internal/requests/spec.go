@@ -41,6 +41,9 @@ type CreateInput struct {
 	Justification string          `json:"justification,omitempty"`
 	Resources     []ResourceInput `json:"resources"`
 	DependsOn     []string        `json:"depends_on,omitempty"`
+	// RollbackOf is the short id of the applied request an update restores. Only the
+	// platform sets it (POST /v1/stacks/{id}/rollback); it is never read from a request body.
+	RollbackOf string `json:"-"`
 	// Upgrades lists the resources an upgrade moves to another version of their module.
 	Upgrades []UpgradeInput `json:"upgrades,omitempty"`
 	// AcknowledgeBreaking confirms that the caller read the migration notes of an upgrade
@@ -326,6 +329,8 @@ type NormalizedSpec struct {
 	Ephemeral   *Ephemeral      `json:"ephemeral,omitempty"`
 	Resources   []ResourceInput `json:"resources"`
 	DependsOn   []string        `json:"depends_on"`
+	// RollbackOf names the applied request whose configuration this update restores.
+	RollbackOf string `json:"rollback_of,omitempty"`
 	// Upgrades records what an upgrade request moved (absent for other kinds).
 	Upgrades []UpgradeChange `json:"upgrades,omitempty"`
 }
@@ -344,7 +349,7 @@ func Normalize(in CreateInput, region string) NormalizedSpec {
 		deps = []string{}
 	}
 	return NormalizedSpec{Team: in.Team, Environment: in.Environment, Stack: in.Stack, Region: region,
-		Ephemeral: in.Ephemeral, Resources: res, DependsOn: deps}
+		Ephemeral: in.Ephemeral, Resources: res, DependsOn: deps, RollbackOf: in.RollbackOf}
 }
 
 // NormalizeForStack returns the spec to store for an update or destroy of an existing

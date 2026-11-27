@@ -8,6 +8,7 @@ import os
 import shlex
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -25,6 +26,19 @@ from .stack_guard import LOCK_FILE, Violation, check_entries, check_stack, lock_
 from .policy_context import ContextError, build_budget_context, build_context
 from .sarif import SarifError, rebase_sarif, result_count
 from .smoke import SmokeTester
+from .state_surgery import (
+    SurgeryInputError,
+    SurgeryRequest,
+    SurgeryResult,
+    SurgeryRunner,
+    TerraformRunner,
+    build_report,
+    error_excerpt,
+    error_signals,
+    parse_request,
+    refused_report,
+    with_triggering_actor,
+)
 from .report import (
     GitHubRun,
     ReportError,
@@ -170,6 +184,9 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--outputs", type=Path, help="`terraform output -json`; sensitive values are redacted")
     report.add_argument("--terraform-exit-code", type=int)
     report.add_argument("--error-message", default="", help="error.message for a failed stage")
+    report.add_argument("--error-log", type=Path,
+                        help="Terraform log of a failed stage; its error excerpt becomes error.message when "
+                             "--error-message is empty (the backend classifies it: transient, config or infra)")
     report.add_argument("--error-class", default="permanent", choices=("transient", "permanent"))
     report.add_argument("--request-short-id", default="", help="default: request_id in iacp.stack.json")
     report.add_argument("--fencing-token", type=int,
@@ -220,6 +237,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="append attempted=, claimed= and fencing_token= here, and stack_id=, request_id= and "
              "approved_plan_hash= when acquire resolved them (default: $GITHUB_OUTPUT)",
     )
+    surgery = sub.add_parser("state-surgery", help="break-glass state surgery: validate inputs, run, report the audit")
+    surgery.add_argument("action", choices=("validate", "run", "report"))
+    surgery.add_argument("--request", type=Path,
+                         help="validated request JSON (validate writes it; run and report read it)")
+    surgery.add_argument("--result", type=Path, help="result JSON (run writes it; report reads it)")
+    _api_arguments(surgery)
     return parser
 
 
@@ -658,6 +681,7 @@ def _build_report(args: argparse.Namespace, env: Mapping[str, str]) -> RunReport
     if token is None and args.pipeline == "validate":
         token = meta.fencing_token
     status = stage_status(args.status) if args.status else summary_status(summary)
+    message, signals = _error_message(args, status)
     return RunReport(
         pipeline=args.pipeline,
         stack_path=meta.ref.path,
@@ -670,8 +694,17 @@ def _build_report(args: argparse.Namespace, env: Mapping[str, str]) -> RunReport
         policy=policy_block(summary) if summary else None,
         outputs=redact_outputs(outputs) if isinstance(outputs, dict) else None,
         terraform_exit_code=args.terraform_exit_code,
-        error=error_block(args.error_message, args.error_class),
+        error=error_block(message, args.error_class, signals),
     )
+
+
+def _error_message(args: argparse.Namespace, status: str) -> tuple[str, list[str] | None]:
+    """--error-message, else the redacted excerpt of --error-log for a failed stage, with its
+    classification signals (sent as their own field)."""
+    if args.error_message or status != "failed" or args.error_log is None:
+        return args.error_message, None
+    text = _read_text(args.error_log)
+    return (error_excerpt(text), error_signals(text)) if text else ("", None)
 
 
 def _client(args: argparse.Namespace, env: Mapping[str, str]) -> IacpApiClient:
@@ -804,6 +837,80 @@ def _write_outputs(path: Path | None, values: Mapping[str, str]) -> None:
         fh.writelines(f"{k}={v}\n" for k, v in values.items())
 
 
+# Dispatch inputs reach the tool only through these variables (never through argv or a
+# ${{ }} expression inside a run: block).
+SURGERY_ENV = {"stack_path": "IN_STACK_PATH", "operation": "IN_OPERATION", "args": "IN_ARGS",
+               "ticket": "IN_TICKET", "dry_run": "IN_DRY_RUN", "requested_by": "GITHUB_ACTOR"}
+
+
+def surgery_inputs(env: Mapping[str, str]) -> dict[str, str]:
+    """The raw dispatch inputs from the environment. Pure over the mapping."""
+    return {k: env.get(v, "") for k, v in SURGERY_ENV.items()}
+
+
+def run_state_surgery(args: argparse.Namespace) -> int:
+    env = os.environ
+    if args.action == "validate":
+        return _surgery_validate(args, env)
+    if args.action == "run":
+        return _surgery_run(args)
+    return _surgery_report(args, env)
+
+
+def _surgery_validate(args: argparse.Namespace, env: Mapping[str, str]) -> int:
+    if args.request is None:
+        raise ValueError("state-surgery validate needs --request (where to write the validated request)")
+    try:
+        req = parse_request(surgery_inputs(env))
+    except SurgeryInputError as exc:
+        # The problems name inputs, never their values: nothing the dispatcher typed reaches the log.
+        for problem in exc.problems:
+            print(f"::error title=state-surgery input refused::{annotation(problem)}")
+        return 1
+    args.request.write_text(json.dumps(req.to_dict(), indent=2), encoding="utf-8")
+    print(f"validated: terraform {req.operation} on {req.stack_path} with {len(req.args)} argument(s), "
+          f"ticket {req.ticket}, requested by {req.requested_by}, dry run {str(req.dry_run).lower()}")
+    return 0
+
+
+def _surgery_run(args: argparse.Namespace) -> int:
+    if args.request is None or args.result is None:
+        raise ValueError("state-surgery run needs --request and --result")
+    req = SurgeryRequest.from_dict(_read_json(args.request) or {})
+    stack_dir = (args.repo_root / req.stack_path).resolve()
+    if not (stack_dir / "iacp.stack.json").is_file():
+        raise ValueError(f"{req.stack_path} is not a stack root")
+    # Terraform output is data, not workflow commands: pause command processing while it runs.
+    token = uuid.uuid4().hex
+    print(f"::stop-commands::{token}", flush=True)
+    try:
+        result = SurgeryRunner(TerraformRunner(stack_dir)).run(req)
+    finally:
+        print(f"::{token}::", flush=True)
+    args.result.write_text(json.dumps(result.to_dict(), indent=2), encoding="utf-8")
+    print(f"state surgery {result.outcome}: exit code {result.exit_code}, post-step plan exit code {result.plan_exit_code}")
+    return 0 if result.outcome == "succeeded" else 1
+
+
+def _surgery_report(args: argparse.Namespace, env: Mapping[str, str]) -> int:
+    run = GitHubRun.from_env(env).to_dict()
+    doc = _read_json(args.request) if args.request is not None else None
+    if isinstance(doc, dict):
+        req = SurgeryRequest.from_dict(doc)
+        result_doc = _read_json(args.result) if args.result is not None else None
+        result = SurgeryResult.from_dict(result_doc) if isinstance(result_doc, dict) else SurgeryResult(outcome="failed")
+        payload = build_report(req, result, run)
+    else:
+        payload = refused_report(surgery_inputs(env), run)
+    payload = with_triggering_actor(payload, env.get("GITHUB_TRIGGERING_ACTOR", ""))
+    if _unconfigured(args, "state surgery audit report"):
+        print(json.dumps(payload, indent=2))
+        return 0
+    body = _client(args, env).post_state_surgery(payload).body
+    print(f"state surgery recorded on stack {body.get('stack_id')} (duplicate: {body.get('duplicate')})")
+    return 0
+
+
 COMMANDS = {
     "detect": run_detect,
     "context": run_context,
@@ -819,6 +926,7 @@ COMMANDS = {
     "converged": run_converged,
     "report": run_report,
     "lock": run_lock,
+    "state-surgery": run_state_surgery,
     "drift": run_drift,
 }
 
@@ -831,7 +939,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # These can quote server responses; keep them on one line.
         print(f"error: {annotation(str(exc))}", file=sys.stderr)
         return 1
-    except (DetectionError, StackMetadataError, PinError, ContextError) as exc:
+    except (DetectionError, StackMetadataError, PinError, ContextError, SurgeryInputError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:

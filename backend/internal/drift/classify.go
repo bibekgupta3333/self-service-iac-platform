@@ -14,6 +14,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/apperr"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/rbac"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/requests"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/tferror"
 )
 
 // Result is what one drift check found (enum drift_result).
@@ -329,11 +330,6 @@ var platformMessages = regexp.MustCompile(`^(?:` +
 	`|plan resource_drift\[\d{1,6}\] (?:must be an object|has no address or actions)` +
 	`)$`)
 
-var (
-	secretRe = regexp.MustCompile(`(?i)((?:secret|token|password|passwd|authorization|api[_-]?key|access[_-]?key)[A-Za-z_-]*\s*[=:]\s*)\S+|AKIA[0-9A-Z]{16}|bearer\s+\S+`)
-	errorRe  = regexp.MustCompile(`^Error:\s+\S`)
-)
-
 // SummarizeError reduces a failure to one short, redacted line for
 // drift_reports.error_message. A message the scan itself wrote (platformMessages, an
 // explicit allow-list) passes unchanged. Otherwise the text is terraform's output: it prints
@@ -345,35 +341,11 @@ var (
 // message, which can echo input. With no such line the fixed GenericFailure is used: never
 // "the first non-empty line", which on a full log is a "Refreshing state" line and on a tail
 // is source text. Credential-shaped text is replaced as defence in depth, control
-// characters become spaces and the result is capped. Pure.
+// characters become spaces and the result is capped (tferror, shared with apply
+// failures). Pure.
 func SummarizeError(text string) string {
 	if t := strings.TrimSpace(text); platformMessages.MatchString(t) {
 		return t
 	}
-	for _, l := range strings.Split(text, "\n") {
-		line := strings.TrimSpace(strings.Trim(strings.TrimSpace(l), "\u2502\u2577\u2575 \t"))
-		if !errorRe.MatchString(line) {
-			continue
-		}
-		line = strings.Map(func(r rune) rune {
-			if r < 0x20 || r == 0x7f {
-				return ' '
-			}
-			return r
-		}, line)
-		line = secretRe.ReplaceAllStringFunc(line, func(m string) string {
-			if i := strings.IndexAny(m, "=:"); i >= 0 {
-				return m[:i+1] + " <redacted>"
-			}
-			return "<redacted>"
-		})
-		if i := strings.Index(line[len("Error:"):], ": "); i >= 0 {
-			line = strings.TrimSpace(line[:len("Error:")+i])
-		}
-		if r := []rune(line); len(r) > MaxSummaryLen {
-			line = string(r[:MaxSummaryLen-3]) + "..."
-		}
-		return line
-	}
-	return GenericFailure
+	return tferror.Summary(text, 1, MaxSummaryLen, GenericFailure)
 }

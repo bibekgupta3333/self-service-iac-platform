@@ -28,6 +28,8 @@ from .report import api_base_url, describe_problem
 RUNS_PATH = "/v1/runs"
 LOCK_PATH = "/v1/internal/stacks/{stack_id}/lock"
 REQUEST_BY_PATH = "/v1/internal/requests/by-path"
+STATE_SURGERY_PATH = "/v1/internal/state-surgery"
+
 BUDGET_CONTEXT_PATH = "/v1/internal/budget-context"
 DRIFT_PATH = "/v1/internal/drift"
 DRIFT_STACKS_PATH = "/v1/internal/drift/stacks"
@@ -241,6 +243,11 @@ class IacpApiClient:
     def post_run(self, payload: Mapping[str, Any]) -> ApiResponse:
         """POST /v1/runs. Retried on 429/5xx: a stage report replaces its earlier entry."""
         return self._call("POST", RUNS_PATH, payload, ok=(200,))
+
+    def post_state_surgery(self, payload: Mapping[str, Any]) -> ApiResponse:
+        """POST /v1/internal/state-surgery: the break-glass audit report. Retried on 429/5xx:
+        the API records one event per run attempt (a resend answers 200 duplicate)."""
+        return self._call("POST", STATE_SURGERY_PATH, payload, ok=(200, 201))
 
     def get_budget_context(self, stack_path: str) -> dict[str, Any]:
         """GET /v1/internal/budget-context: the conftest --data document of a stack root. Read-only

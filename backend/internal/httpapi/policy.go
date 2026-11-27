@@ -57,6 +57,9 @@ func DefaultPolicies() PolicyTable {
 		// Stacks of the caller's teams; the queries are scoped by identity.Visibility.
 		"GET /v1/stacks":      {Action: rbac.ActionRead, Scope: ScopeAnyTeam},
 		"GET /v1/stacks/{id}": {Action: rbac.ActionRead, Scope: ScopeAnyTeam},
+		// Rollback is the matrix's "retry failed apply / rollback" (maintainer+); the service
+		// checks it again against the caller's role in the stack's team.
+		"POST /v1/stacks/{id}/rollback": {Action: rbac.ActionRetry, Scope: ScopeAnyTeam},
 		// Drift history of one visible stack. Resolving needs the developer role at least
 		// (reconcile, codify); the service raises it to maintainer for ignore and checks the
 		// caller's role in the report's team (docs/07 matrix).

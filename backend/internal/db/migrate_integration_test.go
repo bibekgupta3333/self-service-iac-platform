@@ -33,7 +33,7 @@ func TestMigrationsApplyAndAreIdempotent(t *testing.T) {
 	for _, table := range []string{
 		"teams", "users", "memberships", "modules", "module_versions", "environments", "stacks",
 		"stack_resources", "requests", "locks", "idempotency_keys", "audit_events", "pipeline_runs",
-		"oidc_jti", "budgets", "webhook_deliveries", "outbox", "drift_reports",
+		"oidc_jti", "budgets", "webhook_deliveries", "outbox", "drift_reports", "apply_failures",
 	} {
 		var exists bool
 		if err := pool.QueryRow(ctx, "SELECT to_regclass('public.'||$1) IS NOT NULL", table).Scan(&exists); err != nil || !exists {
@@ -103,6 +103,7 @@ func TestRuntimeRoleIsLeastPrivileged(t *testing.T) {
 		"DELETE FROM drift_reports",                 // findings are immutable, never deleted (0013)
 		"UPDATE drift_reports SET plan_hash = NULL", // only the resolution columns are writable (0013)
 		"UPDATE webhook_deliveries SET event = 'x'", // deliveries are insert-only, purged by DELETE (0008)
+		"DELETE FROM apply_failures",                // classified failures are insert/update only (0016)
 		"TRUNCATE locks",
 	} {
 		if _, err := app.Exec(ctx, stmt); err == nil {

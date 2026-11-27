@@ -1,0 +1,85 @@
+{
+  "_comment": "Shared test vectors for backend/internal/tferror (Go) and tools/stack_pipeline/tf_error.py (Python). Both suites read this file; change both implementations together.",
+  "redact": [
+    {"in": "password=hunter2 x", "out": "password= <redacted> x"},
+    {"in": "Authorization: Bearer abc.def", "out": "Authorization: <redacted>"},
+    {"in": "key AKIAABCDEFGHIJKLMNOP", "out": "key <redacted>"},
+    {"in": "bearer xyz", "out": "<redacted>"},
+    {"in": "api_key = sk-123 and secret_access_key:abc", "out": "api_key = <redacted> and secret_access_key: <redacted>"},
+    {"in": "tab\there\u0007", "out": "tab here "}
+  ],
+  "summary": [
+    {
+      "name": "boxed diagnostics with secrets on the Error: line and on detail lines",
+      "in": "aws_db_instance.main: Creating...\n╷\n│ Error: creating RDS DB Instance (orders-db): operation error RDS: CreateDBInstance, https response error StatusCode: 400, api error InvalidParameterValue: The parameter MasterUserPassword hunter2-very-secret is not valid (AKIAABCDEFGHIJKLMNOP)\n│ \n│   with module.db.aws_db_instance.main,\n│   12:   master_password = \"s3cr3t-in-detail\" # ThrottlingException\n╵\n╷\n│ Error: creating SQS Queue (orders-dlq): operation error SQS: CreateQueue, https response error StatusCode: 503, api error ThrottlingException: Rate exceeded; Authorization: Bearer abc.def.ghi\n╵\n",
+      "max_lines": 3, "limit": 500, "fallback": "fallback",
+      "summary": "Error: creating RDS DB Instance (orders-db)\nError: creating SQS Queue (orders-dlq)",
+      "signals": ["ThrottlingException", "Throttling", "Rate exceeded", "InvalidParameterValue", "StatusCode: 400", "StatusCode: 503"],
+      "never": ["hunter2", "AKIAABCDEFGHIJKLMNOP", "s3cr3t-in-detail", "abc.def.ghi", "master_password", "MasterUserPassword", "│"]
+    },
+    {
+      "name": "the reviewer's probe: words from the provider message are not signals",
+      "in": "Error: putting SSM Parameter (/p): value HunterTwoPasswordError rejected, api error Xs3cr3tV4lu3",
+      "max_lines": 3, "limit": 500, "fallback": "fallback",
+      "summary": "Error: putting SSM Parameter (/p)",
+      "signals": [],
+      "never": ["HunterTwoPasswordError", "Xs3cr3tV4lu3"]
+    },
+    {
+      "name": "a signal only in a source line is ignored",
+      "in": "│ Error: creating X (a): boom\n│   12:   note = \"ThrottlingException\"\n",
+      "max_lines": 3, "limit": 500, "fallback": "fallback",
+      "summary": "Error: creating X (a)",
+      "signals": [],
+      "never": ["boom", "note"]
+    },
+    {
+      "name": "state lock",
+      "in": "│ Error: Error acquiring the state lock\n│\n│ Error message: operation error S3: PutObject, StatusCode: 412, api error PreconditionFailed\n",
+      "max_lines": 3, "limit": 500, "fallback": "fallback",
+      "summary": "Error: Error acquiring the state lock",
+      "signals": ["Error acquiring the state lock"],
+      "never": ["PutObject"]
+    },
+    {
+      "name": "no Error: line gives the fallback",
+      "in": "Refreshing state...\n  master_password = \"x\"\n",
+      "max_lines": 3, "limit": 500, "fallback": "terraform apply failed; see the workflow log",
+      "summary": "terraform apply failed; see the workflow log",
+      "signals": [],
+      "never": ["master_password"]
+    },
+    {
+      "name": "a summary of a summary is the same summary",
+      "in": "Error: creating RDS DB Instance (orders-db)\nError: creating SQS Queue (orders-dlq)",
+      "max_lines": 3, "limit": 500, "fallback": "fallback",
+      "summary": "Error: creating RDS DB Instance (orders-db)\nError: creating SQS Queue (orders-dlq)",
+      "signals": [],
+      "never": []
+    }
+  ],
+  "filter_signals": [
+    {"in": ["ThrottlingException", "StatusCode: 503", "HunterTwoPasswordError", "api error Xs3cr3t", "StatusCode: 999", "ThrottlingException"],
+     "out": ["ThrottlingException", "StatusCode: 503"]}
+  ],
+  "vocabulary": [
+    "role cannot be assumed", "role defined for the function cannot be assumed", "InvalidInstanceProfile",
+    "Invalid IAM Instance Profile", "ThrottlingException", "Throttling", "RequestLimitExceeded",
+    "TooManyRequestsException", "Rate exceeded", "SlowDown", "ProvisionedThroughputExceeded", "RequestThrottled",
+    "PriorRequestNotComplete", "InternalError", "InternalFailure", "InternalServerError", "ServiceUnavailable",
+    "ServiceFailure", "Bad Gateway", "Service Unavailable", "Gateway Timeout", "i/o timeout",
+    "context deadline exceeded", "TLS handshake timeout", "connection reset by peer", "connection refused",
+    "no such host", "RequestTimeout", "request canceled", "unexpected EOF", "use of closed network connection",
+    "Error acquiring the state lock", "Error locking state", "ConditionalCheckFailedException", "PreconditionFailed",
+    "runner has received a shutdown signal", "lost communication with the server",
+    "The hosted runner encountered an error",
+    "plan_mismatch", "differs from the approved plan", "plan hash mismatch", "Invalid value for variable",
+    "Invalid value for input", "Unsupported argument", "Missing required argument", "Reference to undeclared",
+    "Unsupported attribute", "Invalid reference", "InvalidParameterCombination", "InvalidParameterValue",
+    "ValidationException", "ValidationError", "MalformedPolicyDocument", "InvalidRequest", "AlreadyExists",
+    "already exists", "ResourceInUseException", "DuplicateRecord", "ResourceConflictException",
+    "LimitExceeded", "InsufficientInstanceCapacity", "QuotaExceeded", "TooManyBuckets", "ServiceQuota",
+    "AccessDenied", "UnauthorizedOperation", "is not authorized to perform", "explicit deny", "AuthorizationError",
+    "InvalidClientTokenId"
+  ]
+}

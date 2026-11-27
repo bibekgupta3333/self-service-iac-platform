@@ -189,6 +189,28 @@ func TestDestroyBodyWarns(t *testing.T) {
 	}
 }
 
+func TestRollbackPRSaysWhatItRestores(t *testing.T) {
+	c := prContext()
+	c.Kind, c.RollbackOf = "update", "req-4m2n8q"
+	if got := Title(c); got != "iacp: rollback development/payments/order-events to req-4m2n8q (req-7k3p9x)" {
+		t.Fatalf("title = %q", got)
+	}
+	body := Body(c)
+	if !strings.HasPrefix(body, "## iacp: rollback ") || !strings.Contains(body, "**Rollback.** This update restores the configuration applied by req-4m2n8q") {
+		t.Fatalf("a rollback PR must say what it restores:\n%s", body)
+	}
+	if !slices.Contains(Labels(c), "iacp:rollback") || !slices.Contains(Labels(c), "iacp:kind:update") {
+		t.Fatalf("labels = %v", Labels(c))
+	}
+	if got := CommitMessage(c); !strings.Contains(got, "roll back stack environments/development/payments/order-events to req-4m2n8q") ||
+		!strings.Contains(got, "Rollback-Of: req-4m2n8q\nFencing-Token: 48213") {
+		t.Fatalf("commit message = %q", got)
+	}
+	if strings.Contains(Body(prContext()), "**Rollback.**") || slices.Contains(Labels(prContext()), "iacp:rollback") {
+		t.Fatal("only rollbacks are marked")
+	}
+}
+
 func TestUpgradeBodyListsTheMoves(t *testing.T) {
 	c := prContext()
 	c.Kind = "upgrade"

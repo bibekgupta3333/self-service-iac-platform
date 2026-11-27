@@ -32,6 +32,7 @@ import (
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/publish"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/publish/githubapp"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/publish/localgit"
+	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/recovery"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/requests"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/retention"
 	"github.com/bibekgupta3333/self-service-iac-platform/backend/internal/runs"
@@ -102,6 +103,19 @@ func run() error {
 		heads = pub
 	}
 	handlers := map[string]outbox.Handler{outbox.TopicGitHubEvent: webhooks.NewApplier(requestSvc, heads)}
+	// Apply reports drive the request lifecycle; a failed apply first asks the recovery
+	// retrier (docs/06 §5), and recovery fails a request whose retry cannot run through the
+	// same lifecycle.
+	applyDriver := requests.NewApplyDriver(requestSvc, auditWriter)
+	recoveryRepo := recovery.NewPostgresRepository(pool, auditWriter).WithLifecycle(applyDriver.ForTx)
+	retrier := recovery.NewRetrier(recoveryRepo, clock, ids)
+	applyDriver.WithRetry(retrier.Policy(recoveryRepo))
+	if pub != nil {
+		// Transient apply failures are retried by dispatching apply.yml again (docs/06 §5).
+		handlers[recovery.TopicApplyRetry] = recovery.NewDispatcher(recoveryRepo, pub, lockSvc, clock, cfg.Publisher.BaseBranch)
+	} else {
+		retrier.DisableRetries() // nothing could dispatch a retry: classify and record only
+	}
 	if pub != nil {
 		requestSvc.EnablePublishing()
 		lockSvc.OnPromote(requests.PublishOnPromote(clock))
@@ -167,6 +181,7 @@ func run() error {
 			httpapi.NewRequestHandler(requestSvc, access),
 			httpapi.NewRequestEventsHandler(requestSvc, httpapi.StreamOptions{Stop: ctx.Done(), Session: ua.Streams}),
 			httpapi.NewStackHandler(stacks.NewService(stacks.NewPostgresRepository(pool), users)),
+			httpapi.NewRollbackHandler(recovery.NewRollbackService(requestRepo, requestRepo, recoveryRepo, requestSvc)),
 			httpapi.NewDriftHandler(driftSvc),
 			httpapi.NewTTLHandler(ttlSvc),
 			httpapi.NewAuditHandler(audit.NewVerifier(pool)),
@@ -183,11 +198,12 @@ func run() error {
 			httpapi.NewRequestLookupHandler(requestSvc),
 			httpapi.NewTTLReaperHandler(ttlSvc),
 			httpapi.NewBudgetContextHandler(budgets.NewService(budgets.NewPostgresRepository(pool), clock)),
+			httpapi.NewSurgeryHandler(recovery.NewSurgeryRecorder(recoveryRepo, clock)),
 			budgetAdmin.Internal(),
 			httpapi.NewDriftIngestHandler(driftSvc),
 		},
 		Webhooks:         []httpapi.RouteRegistrar{webhookHandler},
-		PipelineHandlers: []httpapi.RouteRegistrar{httpapi.NewRunHandler(runs.NewService(runs.NewPostgresRepository(pool, requests.NewApplyDriver(requestSvc, auditWriter)), clock))},
+		PipelineHandlers: []httpapi.RouteRegistrar{httpapi.NewRunHandler(runs.NewService(runs.NewPostgresRepository(pool, applyDriver), clock))},
 		Metrics:          newMetrics(pool),
 		MetricsAccess:    httpapi.NewMetricsAccess(cfg.MetricsToken),
 	}

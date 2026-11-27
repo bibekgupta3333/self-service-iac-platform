@@ -1,0 +1,216 @@
+# Break-glass state surgery (docs/06-lifecycle-management.md section 2.3, WBS 8.7).
+#
+# The only sanctioned way to edit Terraform state by hand. Dispatched by hand, from main
+# only, with four allow-listed operations: state rm, state mv, import, force-unlock.
+#
+#   validate -> checks every input strictly (stack path pattern, operation allow-list,
+#               each argument a resource address, a resource id or a lock id, ticket,
+#               dry_run) with tools/stack_pipeline state-surgery validate. A refused run is
+#               reported to the API as outcome "refused" without the rejected values.
+#   surgery  -> waits for approval in the GitHub Environment "break-glass" (required
+#               reviewers from the platform/SRE team; the dispatcher cannot approve their
+#               own run), validates again, records the state digest, runs the one
+#               Terraform command (never through a shell), runs a read-only
+#               plan -detailed-exitcode, and always sends the audit report
+#               (POST /v1/internal/state-surgery, audit action state.surgery).
+#
+# Inputs never appear inside a run: script and never reach a workflow command: they
+# travel in environment variables, the tool prints only validated values, and Terraform
+# output is wrapped in ::stop-commands:: so it cannot issue commands either.
+#
+# Local-first (ADR-0009): the job runs against a LocalStack service container with the
+# dummy test/test credentials and the stack's local backend, so the state it edits lives
+# only in the job, like apply.yml's. The gates, validation, command path and audit are the
+# production shape; the S3 backend and the iacp-breakglass-<env> role arrive with WBS 6.6.
+name: state-surgery
+
+on:
+  workflow_dispatch:
+    inputs:
+      stack_path:
+        description: Stack root (environments/<env>/<team>/<stack>)
+        required: true
+        type: string
+      operation:
+        description: Allow-listed operation
+        required: true
+        type: choice
+        options:
+          - state rm
+          - state mv
+          - import
+          - force-unlock
+      args:
+        description: "Space-separated arguments: state rm ADDRESS...; state mv SOURCE DESTINATION; import ADDRESS ID; force-unlock LOCK_ID"
+        required: true
+        type: string
+      ticket:
+        description: Incident or change ticket (e.g. INC-1234)
+        required: true
+        type: string
+      dry_run:
+        description: Dry run (state rm / state mv use -dry-run; import and force-unlock run nothing)
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# One surgery at a time across the repository; never cancelled mid-run.
+concurrency:
+  group: iacp-state-surgery
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.12"
+  TF_IN_AUTOMATION: "1"
+  TF_INPUT: "0"
+  # Dummy credentials for LocalStack only; never real keys.
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  AWS_DEFAULT_REGION: us-east-1
+  IN_STACK_PATH: ${{ inputs.stack_path }}
+  IN_OPERATION: ${{ inputs.operation }}
+  IN_ARGS: ${{ inputs.args }}
+  IN_TICKET: ${{ inputs.ticket }}
+  IN_DRY_RUN: ${{ inputs.dry_run }}
+  IACP_API_URL: ${{ vars.IACP_API_URL }}
+  IACP_OIDC_AUDIENCE: ${{ vars.IACP_OIDC_AUDIENCE }}
+
+jobs:
+  validate:
+    name: validate inputs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write # only to report a refused run
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+    steps:
+      - name: Require main
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "::error title=state-surgery runs only on main::dispatch it from main"
+            exit 1
+          fi
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install tool dependencies
+        run: python -m pip install --quiet "$(grep -E '^pyyaml==' tools/requirements.txt)"
+
+      - id: validate
+        name: Validate the inputs
+        run: |
+          python -m tools.stack_pipeline state-surgery validate --request "$RUNNER_TEMP/request.json"
+          {
+            echo "### State surgery request (validated)"
+            jq -r '"- stack: `\(.stack_path)`", "- operation: `terraform \(.operation)`",
+                   "- arguments: \(.args | map("`" + . + "`") | join(" "))", "- ticket: \(.ticket)",
+                   "- requested by: \(.requested_by)", "- dry run: \(.dry_run)"' "$RUNNER_TEMP/request.json"
+            echo
+            echo "Approve the \`break-glass\` deployment only if this matches the ticket."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report the refused run
+        if: failure() && steps.validate.outcome == 'failure'
+        run: python -m tools.stack_pipeline state-surgery report --skip-if-unconfigured
+
+  surgery:
+    name: surgery (break-glass)
+    needs: validate
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # Required reviewers are configured on this Environment (Settings > Environments >
+    # break-glass): platform/SRE approvers, "prevent self-review" on, deployment branch
+    # main only. The job does not start until one of them approves.
+    environment: break-glass
+    permissions:
+      contents: read
+      id-token: write
+    services:
+      localstack:
+        image: localstack/localstack:4.4@sha256:b52c16663c70b7234f217cb993a339b46686e30a1a5d9279cb5feeb2202f837c
+        ports:
+          - 4566:4566
+        env:
+          SERVICES: s3,sqs,sns,lambda,iam,sts,kms,logs,cloudwatch,secretsmanager,events,ec2,dynamodb,dynamodbstreams,kinesis
+          AWS_DEFAULT_REGION: us-east-1
+        options: >-
+          --health-cmd "curl -sf http://localhost:4566/_localstack/health"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      AWS_ENDPOINT_URL: http://localhost:4566
+      PYTHONPATH: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install tool dependencies
+        run: python -m pip install --quiet "$(grep -E '^pyyaml==' tools/requirements.txt)"
+
+      # Validated again in this job: nothing from the first job is trusted.
+      - id: validate
+        name: Validate the inputs
+        run: |
+          python -m tools.stack_pipeline state-surgery validate --request "$RUNNER_TEMP/request.json"
+          # Validated values only (the stack path matched its pattern).
+          echo "stack_path=$(jq -r .stack_path "$RUNNER_TEMP/request.json")" >> "$GITHUB_OUTPUT"
+          echo "terraform_version=$(cat .terraform-version)" >> "$GITHUB_OUTPUT"
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: ${{ steps.validate.outputs.terraform_version }}
+          terraform_wrapper: false
+
+      - id: init
+        name: terraform init (local backend)
+        working-directory: ${{ steps.validate.outputs.stack_path }}
+        run: terraform init -input=false -lockfile=readonly -no-color
+
+      - name: State before (addresses only)
+        working-directory: ${{ steps.validate.outputs.stack_path }}
+        run: |
+          {
+            echo "### State before"
+            echo '```'
+            terraform state list 2>/dev/null || echo "(no state)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - id: surgery
+        name: Run the surgery and the post-step plan
+        run: |
+          python -m tools.stack_pipeline --repo-root "$GITHUB_WORKSPACE" state-surgery run \
+            --request "$RUNNER_TEMP/request.json" --result "$RUNNER_TEMP/result.json"
+
+      - name: Report to the audit log
+        if: always() && steps.validate.outcome == 'success'
+        run: |
+          args=(--request "$RUNNER_TEMP/request.json" --skip-if-unconfigured)
+          if [ -f "$RUNNER_TEMP/result.json" ]; then args+=(--result "$RUNNER_TEMP/result.json"); fi
+          python -m tools.stack_pipeline state-surgery report "${args[@]}"

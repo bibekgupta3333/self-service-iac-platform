@@ -271,6 +271,31 @@ CREATE TABLE pipeline_runs (
 CREATE INDEX pipeline_runs_request_idx ON pipeline_runs (request_id, created_at DESC);
 CREATE INDEX pipeline_runs_active_idx  ON pipeline_runs (status) WHERE status IN ('queued', 'in_progress');
 
+-- Classified apply failures and the automatic retries they scheduled (migration 0016,
+-- docs/06 §5). One row per failed run of a request; iacp_app: SELECT, INSERT, UPDATE.
+CREATE TYPE failure_class AS ENUM ('transient', 'config', 'infra');
+CREATE TABLE apply_failures (
+    id                  uuid PRIMARY KEY,
+    request_id          uuid NOT NULL REFERENCES requests(id) ON DELETE CASCADE,
+    stack_id            uuid NOT NULL REFERENCES stacks(id) ON DELETE CASCADE,
+    github_run_id       bigint NOT NULL,
+    github_run_attempt  int    NOT NULL,
+    stage               text   NOT NULL,              -- first failed stage of the run: plan, apply, destroy, smoke, ...
+    terraform_exit_code int,
+    failure_class       failure_class NOT NULL,
+    reason              text   NOT NULL,              -- throttling, timeout, provider_5xx, lock_contention, partial_apply, ...
+    decision            text   NOT NULL,              -- retry_scheduled, not_transient, retry_budget_exhausted, lock_lost, ...
+    retry_number        int,                          -- requests.retry_count after the retry (1..2)
+    retry_at            timestamptz,                  -- dispatch job available_at (backoff)
+    dispatch_state      text,                         -- scheduled → dispatching → dispatched | dispatch_failed | skipped
+    dispatch_detail     text,
+    dispatched_at       timestamptz,
+    created_at          timestamptz NOT NULL,
+    updated_at          timestamptz NOT NULL,
+    UNIQUE (request_id, github_run_id, github_run_attempt)
+);
+CREATE UNIQUE INDEX apply_failures_retry_idx ON apply_failures (request_id, retry_number) WHERE retry_number IS NOT NULL;
+
 CREATE TABLE plan_summaries (
     id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     pipeline_run_id   uuid        NOT NULL UNIQUE REFERENCES pipeline_runs(id) ON DELETE CASCADE,
@@ -449,7 +474,7 @@ CREATE UNIQUE INDEX outbox_dedupe_idx ON outbox (dedupe_key)
 -- iacp_app: webhook_deliveries SELECT/INSERT/DELETE (7-day purge), outbox SELECT/INSERT/UPDATE (migration 0008).
 ```
 
-`request_kind` extends the four user-facing kinds (create/update/upgrade/destroy) with two platform-initiated kinds: `reconcile` (drift remediation) and `rollback` (revert PR to the last applied spec). Both follow the same state machine.
+`request_kind` extends the four user-facing kinds (create/update/upgrade/destroy) with two platform-initiated kinds: `reconcile` (drift remediation) and `rollback` (an update that re-renders the last applied spec; the API creates it as `kind = update` with `spec.rollback_of`). Both follow the same state machine.
 
 **Lock acquisition** (inside the request-creation transaction; `backend/internal/locks`):
 
@@ -592,7 +617,7 @@ stateDiagram-v2
 | `pr_open`/`validating`/`plan_ready`/`approved` | `pull_request.closed` (unmerged) | `rejected` | release lock |
 | `approved` | `pull_request.closed` merged (`pr_merged`, the push to main) / the first accepted `apply` run report (`apply_started`) | `applying` | store `merge_commit_sha`; the stack moves to `provisioning`/`updating`/`destroying` with the first apply report |
 | `applying` | `apply` run finished: `summary` passed, or failed only because the smoke test did | `applied` | stack outputs, `last_applied_sha`, `last_applied_request_id`, `health`; stack → `active` (or `destroyed` with `destroyed_at` after a destroy); release lock and promote and publish the next queued request, in the same transaction |
-| `applying` | callback apply failed (transient), `retry_count < 2` | `applying` | `retry_count += 1`; re-dispatch with backoff. The state machine has the edge; the pipeline reports do not use it yet (no re-dispatch exists), so a transient failure fails the request like a permanent one |
+| `applying` | `apply` run failed with a transient error (`internal/recovery.Classify` on the failed stage's error excerpt), `retry_count < 2` | `applying` | the report leaves the request `applying` and the stack as it is; `retry_count += 1` (`apply_retry`, cap enforced by `Next`) and an outbox job `recovery.apply_retry` re-dispatches `apply.yml` after 2 min, then 10 min (docs/06 §5) |
 | `applying` | `apply` run failed or was cancelled (`plan`, `apply`/`destroy` or `summary` stage failed) | `failed` | `failure_reason` (`plan_failed`, `apply_failed`, `apply_incomplete`, `apply_cancelled`) and `failure_detail` (stage, error, exit code); stack → `failed` (open to fix-forward or destroy); release lock and promote the next waiter |
 
 **Apply reports drive the lifecycle (WBS 5.3).** `POST /v1/runs` with `pipeline: apply` moves the request and its stack in the report's own transaction (`runs.Service.Record` → `requests.Service.ApplyIn`, with the pure `requests.DecideApply` deciding). Locks are taken stacks → locks → request, the order every lock operation uses. A `validate` report is stored and never moves anything: a passed validation is not an approval. A request that is not `approved`, `applying` or terminal gets `409 request_not_applying` and nothing is recorded. The run status comes from the stages: `plan`, `apply`/`destroy` and `summary` finish it when they fail, the `smoke` stage does not (a failed smoke test degrades the stack instead), and `release` never does. Because `apply.yml` sends `summary` from `job.status`, a red smoke step makes the summary `failed`; when the mutating stage passed and the smoke test is the only failure, the run is `succeeded`, the request `applied`, the stack `active` with `health = degraded`. A failed `release` after the verdict is stored in the run, audited as `request.lock_release_failed` (with whether the lock is still held and by whom) and never moves the request. Every request event is audited as `request.transitioned` and every stack move as `stack.status_changed` (plus `stack.destroyed`). Replays are no-ops (stages are replaced by name, and a replayed `DecideApply` yields no events). Once the request is terminal the backend has released the lease, so a later report that carries the request's own token (a replayed `summary`, a failed `release`) is accepted only for a run the API already recorded for that request, audited and ignored (`request.run_report_ignored`) without touching the finished run's stages (except the advisory `release` stage); any other token, or a new run id or attempt, is `409 stale_fencing_token`.
@@ -754,6 +779,7 @@ The logic is pure (`catalog.BuildUpgradePath`): steps are the usable (not yanked
 | GET | `/stacks/{id}/upgrades` | Available module upgrades per resource. Not built: the portal combines the stack's current spec with `upgrade-path` per resource. | viewer |
 | POST | `/stacks/{id}/ttl/extend` | Extend an ephemeral stack's TTL: body `{"hours": 24}` (one extension is `IACP_TTL_MIN_HOURS`..`IACP_TTL_MAX_HOURS`). `200 {"stack_id", "expires_at", "extended_hours", "remaining_extension_hours"}`. The hours are added to the current `expires_at` (to now when the stack expired but is not being destroyed yet). Refused with `409 ttl_extension_cap` once the stack's extensions would total more than `IACP_TTL_MAX_EXTENSION_HOURS` (default 168), `409 ttl_environment_max` when the lifetime would pass the environment's `max_ttl_hours`, `409 destroy_pending` when a destroy request is open, `409 not_ephemeral` for a permanent stack. Clears `ttl_warned_at` when the new expiry is more than 24 h away, so the next window warns again (a shorter extension keeps the warning already sent); audit `ttl.extended`. A caller without the `stack.extend_ttl` role (developer or higher) in the stack's team gets `403`; a stack of another team is `404`. There is no pull request: the TTL is database state, not a generated file. | developer |
 | GET | `/stacks/{id}/lock` / DELETE `/stacks/{id}/lock` | Inspect / force-release platform lock. | viewer / admin |
+| POST | `/stacks/{id}/rollback` | Open a rollback: an `update` request whose spec is the stack's last successfully applied configuration, through the normal request path (catalog and input checks, stack lock, audit, PR). Body `{"reason": "..."}` (1-1000 characters); `Idempotency-Key` required, as for `POST /requests`; `202` with the request, `Idempotent-Replayed: true` on a replay. Target: a `failed` stack returns to its newest `applied` create/update; an `active` or `drifted` stack to the one before it. Refused with `409 stack_destroyed`, `409 stack_busy` (provisioning, updating, destroying, or any open request) and `409 no_rollback_target`. The spec records `rollback_of` (the restored request's short id), the `request.created` audit event carries it, and the PR is titled `iacp: rollback <env>/<team>/<stack> to <req> (<req>)`, labelled `iacp:rollback` and explains what is and is not restored. | maintainer (rbac `retry`; route policy plus the caller's role in the stack's team; no role is `404`) |
 
 Stacks are never created or destroyed directly; mutation is always a request.
 
@@ -767,7 +793,7 @@ Stacks are never created or destroyed directly; mutation is always a request.
 | POST | `/requests/{id}/preview` | Dry-run render: returns generated files + diff without opening a PR. | developer |
 | POST | `/requests/{id}/cancel` | Cancel (`draft`/`pr_open`/`plan_ready`); closes PR, releases lock. | creator or maintainer |
 | POST | `/requests/{id}/replan` | Re-dispatch `pr-validate.yml` (e.g. after plan mismatch). | developer |
-| POST | `/requests/{id}/retry-apply` | Re-dispatch `apply.yml` for a `failed` request whose merge is on `main`. | maintainer |
+| POST | `/requests/{id}/retry-apply` | Re-dispatch `apply.yml` for a `failed` request whose merge is on `main`. Not implemented yet: automatic retries of transient failures are (docs/06 §5). | maintainer |
 | GET | `/requests/{id}/events` | Server-Sent Events stream of status changes (below). Any role in the request's team; others get `404`. | viewer |
 
 **Create** — `POST /v1/requests`
@@ -1034,6 +1060,7 @@ Called only by GitHub Actions jobs with `Authorization: Bearer <GitHub OIDC JWT>
 | POST | `/internal/stacks/{id}/lock` | worker, `apply.yml` | Acquire for `{"request_id"}`: `200 {"lock": "granted"\|"held", "queued_behind": null, "current": {…}}` or `202 {"lock": "queued", "queued_behind": "<holder request id>", "current": {…}}`. |
 | POST | `/internal/stacks/{id}/lock/heartbeat` | worker, `apply.yml` | Renew the lease: `{"request_id", "fencing_token"}`; `409 stale_fencing_token` when superseded. |
 | DELETE | `/internal/stacks/{id}/lock?request_id=&fencing_token=` | worker, `apply.yml` | Release (terminal request) and promote the oldest queued request: `200 {"released": {…}, "promoted": {…}\|null}`; `409 stale_fencing_token`. Idempotent once the request ended: apply reports release the lease with the final transition, so a later release by the request's own token answers `200 {"released": null, "promoted": null, "already_released": true}`. |
+| POST | `/internal/state-surgery` | `state-surgery.yml` | Break-glass audit report (docs/06 §2.3): `stack_path`, `operation` (`state rm`, `state mv`, `import`, `force-unlock`), `args`, `ticket`, `requested_by`, `dry_run`, `outcome` (`succeeded`, `failed`, `refused`), exit codes, state digests and `github {run_id, run_attempt, head_sha}` (must be the token's run, `403 run_mismatch`), optional `triggered_by`. OIDC only (`403 oidc_required`/`workflow_not_allowed` for the shared token); a run that is not `refused` must come from the `break-glass` Environment job (`environment` claim, `403 environment_required`); `requested_by` in the audit event is the token's `actor` claim. Validated with the workflow's rules; appended as one `state.surgery` audit event on the stack (`201`), or on the run (subject `state_surgery`, `stack_id: null`) for a refused run without a valid or known stack path; a resend by the same run attempt is `200 {"duplicate": true}`. A refused run's rejected arguments are never stored and its `approved_via` is null. |
 
 Machine endpoints accept the GitHub OIDC JWT, and, as a fallback while workflows migrate, the shared `IACP_INTERNAL_TOKEN`. Neither configured means every call is rejected.
 
@@ -1047,6 +1074,7 @@ Route classes (`backend/internal/auth/routes.go`, pure table enforced by middlew
 | catalog_index | `/internal/catalog/index` | `module-release.yml` | `refs/heads/main` | `push`, `workflow_dispatch` |
 | runs | `/runs` | `pr-validate.yml`, `apply.yml`, `drift.yml`, `ttl-reaper.yml` | per pipeline | `pull_request`, `push`, `workflow_dispatch`, `schedule` |
 | request_lookup | `/internal/requests/by-path` (read-only) | `apply.yml` only | `refs/heads/main` (ref and workflow definition) | `push`, `workflow_dispatch` |
+| state_surgery | `/internal/state-surgery` | `state-surgery.yml` only, OIDC only (the shared token is refused) | `refs/heads/main` (ref and workflow definition) | `workflow_dispatch` |
 | drift | `/internal/drift`, `/internal/drift/stacks` | `drift.yml` only | `refs/heads/main` (ref and workflow definition) | `schedule`, `workflow_dispatch` |
 | ttl | `/internal/ttl/*` | `ttl-reaper.yml` only | `refs/heads/main` (ref and workflow definition) | `schedule`, `workflow_dispatch` |
 | budget_context | `/internal/budget-context` (read-only) | `pr-validate.yml`, `apply.yml` | global allow-list (PR merge ref for `pr-validate.yml`, main otherwise) | `pull_request`, `push`, `workflow_dispatch` |
@@ -1106,7 +1134,7 @@ The route class is `apply.yml` only, from main, on `push` or `workflow_dispatch`
 }
 ```
 
-Apply callback adds `"outputs": {...}` (sensitive outputs replaced with `"<sensitive>"`), `"terraform_exit_code"`, and on failure `"error": {"class": "transient|permanent", "message": "...", "log_excerpt": "..."}`.
+Apply callback adds `"outputs": {...}` (sensitive outputs replaced with `"<sensitive>"`), `"terraform_exit_code"`, and on failure `"error": {"class": "transient|permanent", "message": "...", "signals": ["..."]}`: `message` is a redacted summary (Terraform `Error:` lines cut after the resource identifier, at most 500 characters) and `signals` are fixed-vocabulary classification signals; the API redacts both again before storing (`runs.RedactError`) and drops any other field.
 
 Response `200 {"accepted": true, "run_id": "…", "run_status": "succeeded", "request_status": "plan_ready"}`; `409 stale_fencing_token` aborts the job.
 

@@ -117,6 +117,7 @@ func (s *Service) Record(ctx context.Context, by identity.Principal, r Report) (
 	if err := CheckProvenance(r, by.Workflow); err != nil {
 		return Recorded{}, err
 	}
+	r.Error = RedactError(r.Error) // never store raw Terraform output (stages, failure_detail)
 	var out Recorded
 	err := s.repo.InTx(ctx, func(st Store) error {
 		stackID, err := st.StackIDByPath(ctx, r.StackPath)

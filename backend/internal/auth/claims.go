@@ -53,7 +53,7 @@ func (c Claims) Identity() (identity.Workflow, error) {
 		return identity.Workflow{}, fmt.Errorf("%w: run_attempt %q is not a positive integer", ErrInvalidToken, c.RunAttempt)
 	}
 	return identity.Workflow{Repository: c.Repository, Ref: c.Ref, JobWorkflowRef: c.JobWorkflowRef, SHA: c.SHA,
-		EventName: c.EventName, RunID: runID, RunAttempt: attempt}, nil
+		EventName: c.EventName, RunID: runID, RunAttempt: attempt, Actor: c.Actor, Environment: c.Environment}, nil
 }
 
 // Policy is what a token must say to be accepted.
