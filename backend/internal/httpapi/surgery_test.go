@@ -44,6 +44,7 @@ func TestStateSurgeryRoute(t *testing.T) {
 		code             string
 	}{
 		{"state-surgery.yml on main", "Bearer surgery.jwt.token", surgeryBody, 201, ""},
+		{"the shared token may not report surgery", "Bearer " + testInternalToken, surgeryBody, 403, "workflow_not_allowed"},
 		{"apply.yml may not report surgery", "Bearer applydispatch.jwt.token", surgeryBody, 403, "workflow_not_allowed"},
 		{"pr-validate may not report surgery", "Bearer prvalidate.jwt.token", surgeryBody, 403, "workflow_not_allowed"},
 		{"dev user is not a workflow", "", surgeryBody, 401, ""},

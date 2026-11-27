@@ -110,18 +110,39 @@ func TestValidateSurgeryReport(t *testing.T) {
 	}
 }
 
+// gateWorkflow is the surgery job's verified identity: past the break-glass gate.
+func gateWorkflow() *identity.Workflow {
+	return &identity.Workflow{RunID: 77, RunAttempt: 1, SHA: strings.Repeat("e4", 20), Actor: "sre-oncall", Environment: BreakGlassEnvironment}
+}
+
 func TestCheckSurgeryProvenance(t *testing.T) {
 	r := surgeryReport()
-	if err := CheckSurgeryProvenance(r, nil); err != nil {
+	if err := CheckSurgeryProvenance(r, gateWorkflow()); err != nil {
 		t.Fatal(err)
 	}
-	wf := &identity.Workflow{RunID: 77, RunAttempt: 1, SHA: strings.Repeat("e4", 20)}
-	if err := CheckSurgeryProvenance(r, wf); err != nil {
-		t.Fatal(err)
+	if err := CheckSurgeryProvenance(r, nil); code(err) != "oidc_required" {
+		t.Fatalf("shared token: %v", err)
 	}
+	wf := gateWorkflow()
 	wf.RunAttempt = 2
 	if err := CheckSurgeryProvenance(r, wf); code(err) != "run_mismatch" {
 		t.Fatalf("other attempt: %v", err)
+	}
+	wf = gateWorkflow()
+	wf.Actor = ""
+	if err := CheckSurgeryProvenance(r, wf); code(err) != "actor_missing" {
+		t.Fatalf("no actor: %v", err)
+	}
+	// A surgery that ran must come from the job behind the break-glass gate.
+	wf = gateWorkflow()
+	wf.Environment = ""
+	if err := CheckSurgeryProvenance(r, wf); code(err) != "environment_required" {
+		t.Fatalf("validate job reporting a run: %v", err)
+	}
+	// The validate job (no environment) may report a refused run.
+	r.Outcome = SurgeryRefused
+	if err := CheckSurgeryProvenance(r, wf); err != nil {
+		t.Fatalf("refused from the validate job: %v", err)
 	}
 }
 
@@ -156,11 +177,13 @@ func TestSurgeryRecorder(t *testing.T) {
 	repo := &memSurgery{stacks: map[string]SurgeryStack{"environments/development/payments/orders": stack}}
 	rec := NewSurgeryRecorder(repo, platform.FixedClock{T: now})
 	bot := identity.Principal{Login: "acme/iacp/.github/workflows/state-surgery.yml@refs/heads/main", Type: identity.ActorGitHubActions,
-		Workflow: &identity.Workflow{RunID: 77, RunAttempt: 1, SHA: strings.Repeat("e4", 20)}}
+		Workflow: gateWorkflow()}
 	ctx := context.Background()
 
-	out, err := rec.Record(ctx, bot, surgeryReport())
-	if err != nil || out.Duplicate || out.StackID != stack.ID {
+	r := surgeryReport()
+	r.TriggeredBy = "sre-rerun"
+	out, err := rec.Record(ctx, bot, r)
+	if err != nil || out.Duplicate || out.StackID == nil || *out.StackID != stack.ID {
 		t.Fatalf("%+v, %v", out, err)
 	}
 	e := repo.events[0]
@@ -170,7 +193,10 @@ func TestSurgeryRecorder(t *testing.T) {
 	}
 	var p map[string]any
 	_ = json.Unmarshal(e.Payload, &p)
-	if p["operation"] != OpStateMv || p["ticket"] != "INC-1234" || p["requested_by"] != "priya-s" || p["approved_via"] != "github_environment:break-glass" ||
+	// requested_by is the verified actor claim; the workflow's own value is kept apart.
+	if p["operation"] != OpStateMv || p["ticket"] != "INC-1234" || p["requested_by"] != "sre-oncall" ||
+		p["reported_requested_by"] != "priya-s" || p["triggered_by"] != "sre-rerun" ||
+		p["approved_via"] != "github_environment:break-glass" ||
 		p["state_before_sha256"] != strings.Repeat("a", 64) || len(p["args"].([]any)) != 2 {
 		t.Fatalf("payload %v", p)
 	}
@@ -179,11 +205,13 @@ func TestSurgeryRecorder(t *testing.T) {
 		t.Fatalf("duplicate: %+v, %v", out, err)
 	}
 
-	// A refused run is recorded without the rejected arguments or ticket.
+	// A refused run (from the validate job, no environment) is recorded without the rejected
+	// arguments or ticket, and without approved_via.
+	validateJob := identity.Principal{Type: identity.ActorGitHubActions, Login: bot.Login,
+		Workflow: &identity.Workflow{RunID: 77, RunAttempt: 2, SHA: strings.Repeat("e4", 20), Actor: "priya-s"}}
 	refused := surgeryReport()
 	refused.GitHub.RunAttempt, refused.Outcome, refused.Args, refused.Ticket = 2, SurgeryRefused, []string{"::stop-commands::x"}, "nope"
-	bot.Workflow.RunAttempt = 2
-	if _, err := rec.Record(ctx, bot, refused); err != nil {
+	if _, err := rec.Record(ctx, validateJob, refused); err != nil {
 		t.Fatal(err)
 	}
 	p = map[string]any{}
@@ -194,11 +222,34 @@ func TestSurgeryRecorder(t *testing.T) {
 	if _, ok := p["ticket"]; ok {
 		t.Fatalf("refused payload carries an invalid ticket: %v", p)
 	}
+	if v, ok := p["approved_via"]; !ok || v != nil {
+		t.Fatalf("refused payload must record approved_via null: %v", p)
+	}
 
+	// A refused run whose stack path was invalid (sent empty) or names no stack is still
+	// audited, on the run, with no stack and no team.
+	for i, path := range []string{"", "environments/development/payments/ghost"} {
+		ref := surgeryReport()
+		ref.Outcome, ref.StackPath, ref.GitHub.RunAttempt = SurgeryRefused, path, 3+i
+		validateJob.Workflow.RunAttempt = 3 + i
+		out, err := rec.Record(ctx, validateJob, ref)
+		if err != nil || out.StackID != nil {
+			t.Fatalf("refused, path %q: %+v, %v", path, out, err)
+		}
+		e := repo.events[len(repo.events)-1]
+		if e.SubjectType != "state_surgery" || e.SubjectID != SurgeryCorrelationID(ref.GitHub) || e.TeamID != nil {
+			t.Fatalf("refused, path %q: event %+v", path, e)
+		}
+	}
+
+	// A surgery that ran against an unknown stack is refused, and so is the shared token.
 	unknown := surgeryReport()
 	unknown.StackPath = "environments/development/payments/ghost"
-	if _, err := rec.Record(ctx, identity.Principal{Type: identity.ActorGitHubActions}, unknown); !apperr.IsKind(err, apperr.KindNotFound) {
+	if _, err := rec.Record(ctx, bot, unknown); !apperr.IsKind(err, apperr.KindNotFound) {
 		t.Fatalf("unknown stack: %v", err)
+	}
+	if _, err := rec.Record(ctx, identity.Principal{Type: identity.ActorGitHubActions}, surgeryReport()); code(err) != "oidc_required" {
+		t.Fatalf("shared token: %v", err)
 	}
 	if _, err := rec.Record(ctx, bot, SurgeryReport{}); code(err) != "validation_failed" {
 		t.Fatalf("empty report: %v", err)

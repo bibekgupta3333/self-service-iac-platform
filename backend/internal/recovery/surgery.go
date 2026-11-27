@@ -55,7 +55,15 @@ type SurgeryReport struct {
 	StateBefore string    `json:"state_before_sha256,omitempty"`
 	StateAfter  string    `json:"state_after_sha256,omitempty"`
 	GitHub      GitHubRun `json:"github"`
+	// TriggeredBy is github.triggering_actor (who started this attempt; differs from the
+	// dispatcher on a re-run). RequestedBy is what the workflow reported; the audit event
+	// names the verified OIDC actor claim instead.
+	TriggeredBy string `json:"triggered_by,omitempty"`
 }
+
+// BreakGlassEnvironment is the GitHub Environment whose approval gates the surgery job. Its
+// name is in the OIDC token's environment claim only for a job that passed that gate.
+const BreakGlassEnvironment = "break-glass"
 
 // GitHubRun identifies the reporting workflow run.
 type GitHubRun struct {
@@ -143,7 +151,8 @@ func ValidateSurgeryReport(r SurgeryReport) []apperr.FieldError {
 	add := func(ptr, code, msg string) {
 		errs = append(errs, apperr.FieldError{Pointer: ptr, Code: code, Message: msg})
 	}
-	if !surgeryStackPathRe.MatchString(r.StackPath) {
+	// A refused run whose stack path was the bad input reports it empty; it is still audited.
+	if !surgeryStackPathRe.MatchString(r.StackPath) && (r.Outcome != SurgeryRefused || r.StackPath != "") {
 		add("/stack_path", "pattern", "must look like environments/<env>/<team>/<stack>")
 	}
 	if !slices.Contains([]string{SurgerySucceeded, SurgeryFailed, SurgeryRefused}, r.Outcome) {
@@ -159,8 +168,10 @@ func ValidateSurgeryReport(r SurgeryReport) []apperr.FieldError {
 	if !ticketRe.MatchString(r.Ticket) && r.Outcome != SurgeryRefused {
 		add("/ticket", "pattern", "must be an incident or change ticket such as INC-1234")
 	}
-	if !loginRe.MatchString(r.RequestedBy) {
-		add("/requested_by", "pattern", "must be the GitHub login that dispatched the run")
+	for ptr, v := range map[string]string{"/requested_by": r.RequestedBy, "/triggered_by": r.TriggeredBy} {
+		if v != "" && v != "unknown" && !loginRe.MatchString(v) {
+			add(ptr, "pattern", "must be a GitHub login")
+		}
 	}
 	for ptr, v := range map[string]string{"/state_before_sha256": r.StateBefore, "/state_after_sha256": r.StateAfter} {
 		if v != "" && !sha256Re.MatchString(v) {
@@ -177,16 +188,31 @@ func ValidateSurgeryReport(r SurgeryReport) []apperr.FieldError {
 	return errs
 }
 
-// CheckSurgeryProvenance matches a report against the caller's verified workflow: the run
-// and commit are the caller's own. A nil workflow (shared internal token) skips it. The
-// route class (auth.RouteStateSurgery) already pinned the workflow file, ref and event. Pure.
+// CheckSurgeryProvenance matches a report against the caller's verified workflow. The route
+// class (auth.RouteStateSurgery) already pinned the workflow file, ref and event and refused
+// the shared token; this checks the rest. Pure.
+//
+//   - there must be a verified workflow (OIDC), never the shared token (oidc_required);
+//   - the run and commit are the caller's own (run_mismatch);
+//   - the token names the actor who started the run (actor_missing);
+//   - a run that did anything (not refused) must come from a job that passed the
+//     break-glass Environment gate: its token carries environment "break-glass"
+//     (environment_required). A refused run is reported by the validate job, before the gate.
 func CheckSurgeryProvenance(r SurgeryReport, wf *identity.Workflow) error {
-	if wf == nil {
-		return nil
+	forbidden := func(code, msg string) error {
+		return &apperr.Error{Kind: apperr.KindForbidden, Code: code, Message: msg}
 	}
-	if r.GitHub.RunID != wf.RunID || r.GitHub.RunAttempt != wf.RunAttempt || r.GitHub.HeadSHA != wf.SHA {
-		return &apperr.Error{Kind: apperr.KindForbidden, Code: "run_mismatch",
-			Message: fmt.Sprintf("report for run %d/%d sent by run %d/%d", r.GitHub.RunID, r.GitHub.RunAttempt, wf.RunID, wf.RunAttempt)}
+	switch {
+	case wf == nil:
+		return forbidden("oidc_required", "state surgery reports must carry the state-surgery.yml run's GitHub OIDC token")
+	case r.GitHub.RunID != wf.RunID || r.GitHub.RunAttempt != wf.RunAttempt || r.GitHub.HeadSHA != wf.SHA:
+		return forbidden("run_mismatch",
+			fmt.Sprintf("report for run %d/%d sent by run %d/%d", r.GitHub.RunID, r.GitHub.RunAttempt, wf.RunID, wf.RunAttempt))
+	case !loginRe.MatchString(wf.Actor):
+		return forbidden("actor_missing", "the OIDC token names no actor")
+	case r.Outcome != SurgeryRefused && wf.Environment != BreakGlassEnvironment:
+		return forbidden("environment_required",
+			fmt.Sprintf("a surgery that ran must be reported by the job of the %q environment", BreakGlassEnvironment))
 	}
 	return nil
 }
@@ -227,10 +253,11 @@ func NewSurgeryRecorder(repo SurgeryRepository, clock platform.Clock) *SurgeryRe
 	return &SurgeryRecorder{repo: repo, clock: clock}
 }
 
-// Recorded is the outcome of Record.
+// Recorded is the outcome of Record. StackID is nil for a refused run whose stack path was
+// invalid or names no stack.
 type Recorded struct {
-	StackID   uuid.UUID `json:"stack_id"`
-	Duplicate bool      `json:"duplicate"`
+	StackID   *uuid.UUID `json:"stack_id"`
+	Duplicate bool       `json:"duplicate"`
 }
 
 // Record validates a report from by and appends it as one state.surgery audit event on the
@@ -242,18 +269,26 @@ func (s *SurgeryRecorder) Record(ctx context.Context, by identity.Principal, r S
 	if err := CheckSurgeryProvenance(r, by.Workflow); err != nil {
 		return Recorded{}, err
 	}
-	payload, err := json.Marshal(surgeryPayload(r))
+	payload, err := json.Marshal(surgeryPayload(r, *by.Workflow))
 	if err != nil {
 		return Recorded{}, fmt.Errorf("encode audit payload: %w", err)
 	}
 	correlationID := SurgeryCorrelationID(r.GitHub)
 	var out Recorded
 	err = s.repo.InSurgeryTx(ctx, func(st SurgeryStore) error {
-		stack, err := st.StackByPath(ctx, r.StackPath)
-		if err != nil {
-			return err
+		// The subject is the stack. A refused run with no valid or known stack path is still
+		// audited, on the run itself (subject state_surgery) with no team.
+		subjectType, subjectID, teamID := "state_surgery", correlationID, (*uuid.UUID)(nil)
+		if r.StackPath != "" {
+			stack, err := st.StackByPath(ctx, r.StackPath)
+			switch {
+			case err == nil:
+				id, team := stack.ID, stack.TeamID
+				out.StackID, subjectType, subjectID, teamID = &id, "stack", id.String(), &team
+			case !(r.Outcome == SurgeryRefused && apperr.IsKind(err, apperr.KindNotFound)):
+				return err
+			}
 		}
-		out.StackID = stack.ID
 		dup, err := st.Recorded(ctx, "state.surgery", correlationID)
 		if err != nil {
 			return fmt.Errorf("check earlier report: %w", err)
@@ -262,13 +297,12 @@ func (s *SurgeryRecorder) Record(ctx context.Context, by identity.Principal, r S
 			out.Duplicate = true
 			return nil
 		}
-		teamID := stack.TeamID
 		actorType := string(by.Type)
 		if actorType == "" {
 			actorType = audit.ActorGitHubActions
 		}
 		return st.AppendAudit(ctx, audit.Event{OccurredAt: s.clock.Now(), ActorType: actorType, ActorID: by.AuditActorID(),
-			Action: "state.surgery", SubjectType: "stack", SubjectID: stack.ID.String(), TeamID: &teamID,
+			Action: "state.surgery", SubjectType: subjectType, SubjectID: subjectID, TeamID: teamID,
 			CorrelationID: correlationID, Payload: payload})
 	})
 	if err != nil {
@@ -277,14 +311,26 @@ func (s *SurgeryRecorder) Record(ctx context.Context, by identity.Principal, r S
 	return out, nil
 }
 
-// surgeryPayload is the audit payload of a report: everything but the raw arguments of a
-// refused run. Pure.
-func surgeryPayload(r SurgeryReport) map[string]any {
+// surgeryPayload is the audit payload of a report sent by wf: everything but the raw
+// arguments of a refused run. requested_by is the verified OIDC actor; the workflow's own
+// claim is kept as reported_requested_by only when it differs. approved_via is set only for a
+// run reported from the break-glass Environment job (CheckSurgeryProvenance); a refused run,
+// reported before the gate, records null. Pure.
+func surgeryPayload(r SurgeryReport, wf identity.Workflow) map[string]any {
 	p := map[string]any{
-		"stack_path": r.StackPath, "operation": r.Operation, "requested_by": r.RequestedBy,
+		"stack_path": nullIfEmpty(r.StackPath), "operation": nullIfEmpty(r.Operation), "requested_by": wf.Actor,
 		"dry_run": r.DryRun, "outcome": r.Outcome, "workflow": SurgeryWorkflow,
 		"run_id": r.GitHub.RunID, "run_attempt": r.GitHub.RunAttempt, "head_sha": r.GitHub.HeadSHA,
-		"approved_via": "github_environment:break-glass",
+		"approved_via": nil,
+	}
+	if r.Outcome != SurgeryRefused && wf.Environment == BreakGlassEnvironment {
+		p["approved_via"] = "github_environment:" + BreakGlassEnvironment
+	}
+	if r.RequestedBy != "" && r.RequestedBy != wf.Actor && loginRe.MatchString(r.RequestedBy) {
+		p["reported_requested_by"] = r.RequestedBy
+	}
+	if loginRe.MatchString(r.TriggeredBy) {
+		p["triggered_by"] = r.TriggeredBy
 	}
 	if r.Outcome != SurgeryRefused {
 		p["args"] = r.Args
@@ -305,4 +351,11 @@ func surgeryPayload(r SurgeryReport) map[string]any {
 		p["state_after_sha256"] = r.StateAfter
 	}
 	return p
+}
+
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }

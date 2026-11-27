@@ -16,10 +16,11 @@ func TestPostgresSurgeryAudit(t *testing.T) {
 	rec := NewSurgeryRecorder(NewPostgresRepository(pool, w), platform.SystemClock{})
 	r := surgeryReport()
 	r.StackPath = itStackPath
-	bot := identity.Principal{Login: "acme/iacp/.github/workflows/state-surgery.yml@refs/heads/main", Type: identity.ActorGitHubActions}
+	bot := identity.Principal{Login: "acme/iacp/.github/workflows/state-surgery.yml@refs/heads/main", Type: identity.ActorGitHubActions,
+		Workflow: gateWorkflow()}
 
 	out, err := rec.Record(ctx, bot, r)
-	if err != nil || out.StackID != stackID || out.Duplicate {
+	if err != nil || out.StackID == nil || *out.StackID != stackID || out.Duplicate {
 		t.Fatalf("%+v, %v", out, err)
 	}
 	if again, err := rec.Record(ctx, bot, r); err != nil || !again.Duplicate {
