@@ -349,7 +349,7 @@ Rules:
 | Pipeline validation failure (lint/policy/budget) | Callback `status=failed` | Request `failed` with structured findings; lock released; user edits inputs → new request. |
 | Plan hash mismatch at apply | `apply.yml` comparison | Abort before apply; request `failed(plan_mismatch)`; PR comment; maintainer re-opens via "Re-plan". |
 | Transient apply error (throttling, eventual consistency, `RequestLimitExceeded`, provider 5xx) | Exit code + log classifier regexes | Auto-retry at most 2× with exponential backoff (1 min, then 5 min) via `workflow_dispatch` of `apply.yml` for that stack. |
-| Non-transient apply error | Retries exhausted / classifier | Stack `failed`, request `failed`, page owning team; options: fix-forward request, or **rollback** = revert PR to last applied config (state versions in S3 as last resort, see [06-lifecycle-management.md](06-lifecycle-management.md)). |
+| Non-transient apply error | Retries exhausted / classifier | Stack `failed`, request `failed`, page owning team; options: fix-forward request, or **rollback** = an update request that re-renders the last applied config (state versions in S3 as last resort, see [06-lifecycle-management.md](06-lifecycle-management.md)). |
 | Runner died mid-apply | Job `cancelled`/timeout, state lock lingering | S3 lockfile left; worker detects, notifies maintainers; `force-unlock` only via audited admin action that dispatches a workflow. |
 | Callback cannot reach API | Job step fails | Steps retry 5× with backoff; job artifacts (plan JSON, cost JSON) uploaded so reconciler can backfill via GitHub API. |
 | Database unavailable | Health checks | API returns 503; webhooks still accepted (SQS buffer); worker resumes on recovery. |

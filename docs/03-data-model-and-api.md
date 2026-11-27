@@ -461,7 +461,7 @@ CREATE UNIQUE INDEX outbox_dedupe_idx ON outbox (dedupe_key)
 -- iacp_app: webhook_deliveries SELECT/INSERT/DELETE (7-day purge), outbox SELECT/INSERT/UPDATE (migration 0008).
 ```
 
-`request_kind` extends the four user-facing kinds (create/update/upgrade/destroy) with two platform-initiated kinds: `reconcile` (drift remediation) and `rollback` (revert PR to the last applied spec). Both follow the same state machine.
+`request_kind` extends the four user-facing kinds (create/update/upgrade/destroy) with two platform-initiated kinds: `reconcile` (drift remediation) and `rollback` (an update that re-renders the last applied spec; the API creates it as `kind = update` with `spec.rollback_of`). Both follow the same state machine.
 
 **Lock acquisition** (inside the request-creation transaction; `backend/internal/locks`):
 
@@ -1003,7 +1003,7 @@ Called only by GitHub Actions jobs with `Authorization: Bearer <GitHub OIDC JWT>
 | POST | `/internal/stacks/{id}/lock` | worker, `apply.yml` | Acquire for `{"request_id"}`: `200 {"lock": "granted"\|"held", "queued_behind": null, "current": {…}}` or `202 {"lock": "queued", "queued_behind": "<holder request id>", "current": {…}}`. |
 | POST | `/internal/stacks/{id}/lock/heartbeat` | worker, `apply.yml` | Renew the lease: `{"request_id", "fencing_token"}`; `409 stale_fencing_token` when superseded. |
 | DELETE | `/internal/stacks/{id}/lock?request_id=&fencing_token=` | worker, `apply.yml` | Release (terminal request) and promote the oldest queued request: `200 {"released": {…}, "promoted": {…}\|null}`; `409 stale_fencing_token`. Idempotent once the request ended: apply reports release the lease with the final transition, so a later release by the request's own token answers `200 {"released": null, "promoted": null, "already_released": true}`. |
-| POST | `/internal/state-surgery` | `state-surgery.yml` | Break-glass audit report (docs/06 §2.3): `stack_path`, `operation` (`state rm`, `state mv`, `import`, `force-unlock`), `args`, `ticket`, `requested_by`, `dry_run`, `outcome` (`succeeded`, `failed`, `refused`), exit codes, state digests and `github {run_id, run_attempt, head_sha}` (must be the token's run, `403 run_mismatch`). Validated with the workflow's rules; appended as one `state.surgery` audit event on the stack (`201`); a resend by the same run attempt is `200 {"duplicate": true}`. A refused run's rejected arguments are never stored. |
+| POST | `/internal/state-surgery` | `state-surgery.yml` | Break-glass audit report (docs/06 §2.3): `stack_path`, `operation` (`state rm`, `state mv`, `import`, `force-unlock`), `args`, `ticket`, `requested_by`, `dry_run`, `outcome` (`succeeded`, `failed`, `refused`), exit codes, state digests and `github {run_id, run_attempt, head_sha}` (must be the token's run, `403 run_mismatch`), optional `triggered_by`. OIDC only (`403 oidc_required`/`workflow_not_allowed` for the shared token); a run that is not `refused` must come from the `break-glass` Environment job (`environment` claim, `403 environment_required`); `requested_by` in the audit event is the token's `actor` claim. Validated with the workflow's rules; appended as one `state.surgery` audit event on the stack (`201`), or on the run (subject `state_surgery`, `stack_id: null`) for a refused run without a valid or known stack path; a resend by the same run attempt is `200 {"duplicate": true}`. A refused run's rejected arguments are never stored and its `approved_via` is null. |
 
 Machine endpoints accept the GitHub OIDC JWT, and, as a fallback while workflows migrate, the shared `IACP_INTERNAL_TOKEN`. Neither configured means every call is rejected.
 
@@ -1017,7 +1017,7 @@ Route classes (`backend/internal/auth/routes.go`, pure table enforced by middlew
 | catalog_index | `/internal/catalog/index` | `module-release.yml` | `refs/heads/main` | `push`, `workflow_dispatch` |
 | runs | `/runs` | `pr-validate.yml`, `apply.yml`, `drift.yml`, `ttl-reaper.yml` | per pipeline | `pull_request`, `push`, `workflow_dispatch`, `schedule` |
 | request_lookup | `/internal/requests/by-path` (read-only) | `apply.yml` only | `refs/heads/main` (ref and workflow definition) | `push`, `workflow_dispatch` |
-| state_surgery | `/internal/state-surgery` | `state-surgery.yml` only | `refs/heads/main` (ref and workflow definition) | `workflow_dispatch` |
+| state_surgery | `/internal/state-surgery` | `state-surgery.yml` only, OIDC only (the shared token is refused) | `refs/heads/main` (ref and workflow definition) | `workflow_dispatch` |
 | drift | `/internal/drift`, `/internal/drift/stacks` | `drift.yml` only | `refs/heads/main` (ref and workflow definition) | `schedule`, `workflow_dispatch` |
 | ttl | `/internal/ttl/*` | `ttl-reaper.yml` only | `refs/heads/main` (ref and workflow definition) | `schedule`, `workflow_dispatch` |
 | budget_context | `/internal/budget-context` (read-only) | `pr-validate.yml`, `apply.yml` | global allow-list (PR merge ref for `pr-validate.yml`, main otherwise) | `pull_request`, `push`, `workflow_dispatch` |
