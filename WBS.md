@@ -141,7 +141,7 @@ Milestones follow [docs/08-mvp-roadmap.md](docs/08-mvp-roadmap.md). Tick boxes a
 - [x] 10.1 Repo init, git author config
 - [ ] 10.2 GitHub remote, README badges, issue/PR templates
 - [x] 10.3 Release v0.2.0 at M2 (walking skeleton), v1.0.0 at MVP exit (v1.0.0 tagged at MVP exit; v0.2.0 was folded into it)
-- [~] 10.4 Demo video + portfolio write-up (write-up done: README front page and [docs/case-study.md](docs/case-study.md); the demo video is open)
+- [x] 10.4 Demo video + portfolio write-up (walkthrough on YouTube: https://youtu.be/kO7bbZ8YXxs; write-up in docs/case-study.md)
 
 ## Critical path
 `2.1 → 2.3 → 2.4 → 3.1 → 3.2 → 4.2 → 4.5 → 4.7 → 4.8 → 5.2 → 5.3 → 6.2 → 7.3 → 7.6 → MVP exit`

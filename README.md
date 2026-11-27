@@ -2,6 +2,10 @@
 
 Developers ask for AWS infrastructure through a portal and get a reviewed pull request instead of a ticket. They pick versioned Terraform modules (S3, SQS, Lambda, ...), fill in typed inputs, and the Go control plane renders a pinned Terraform stack root and opens a PR. GitHub Actions then validates, lints, scans, policy-checks, prices and plans the change. A merge applies it, and the platform tracks the stack afterwards: locking, drift, TTL teardown, budgets, upgrades, rollback, and a tamper-evident audit log. Terraform never runs in the backend. The backend orchestrates, and Actions executes.
 
+[![Watch the Self-Service IaC Platform walkthrough on YouTube](https://img.youtube.com/vi/kO7bbZ8YXxs/maxresdefault.jpg)](https://youtu.be/kO7bbZ8YXxs)
+
+▶ **[Watch the walkthrough on YouTube](https://youtu.be/kO7bbZ8YXxs)**: the problem, the architecture, the pipeline checks, a local run from request to generated stack root, the lifecycle features and the security design.
+
 ![System architecture](docs/diagrams/images/architecture.png)
 
 The longer story, with the design decisions and trade-offs, is in [docs/case-study.md](docs/case-study.md).
